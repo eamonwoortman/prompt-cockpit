@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.1.4]
+- Codex added as a third session provider, alongside Claude and Grok
+- Provider architecture refactored; Codex wired into launcher and UI
+- Codex session lifecycle, rewind, and effort-validation fixes
+- Security review fixes: ReDoS, delegation FIFO desync, route hammering
+
 ## [0.1.3]
 - Cross-session delegation: relay, message rendering, handshake secret
 - Per-tool cost breakdown, session-count fixes, tooltips
