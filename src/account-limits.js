@@ -46,10 +46,19 @@ export function _resetCacheForTests() {
   inFlight = null;
 }
 
-export async function fetchAccountLimits(claudeBin = 'claude') {
+// execFileImpl is injectable (same pattern as session.js's queryImpl/
+// session-registry.js's startSessionImpl) - tests stub it instead of
+// spawning a real subprocess, which sidesteps a real cross-platform mess:
+// a fake `claude` binary written as a chmod +x shell script works fine on
+// posix but can't be spawned by execFile without `shell: true` on Windows
+// (Node refuses bare .bat/.cmd files post-CVE-2024-27980, and a plain-text
+// file has no PE header to run directly either) - a fidelity gap not worth
+// chasing when the real thing being tested is the single-flight/TTL cache
+// logic above, not child_process's own OS-level spawn behavior.
+export async function fetchAccountLimits(claudeBin = 'claude', execFileImpl = execFileAsync) {
   if (cached && Date.now() - cached.atMs < CACHE_TTL_MS) return cached.result;
   if (inFlight) return inFlight;
-  inFlight = doFetch(claudeBin).then((result) => {
+  inFlight = doFetch(claudeBin, execFileImpl).then((result) => {
     cached = { result, atMs: Date.now() };
     return result;
   }).finally(() => {
@@ -58,10 +67,10 @@ export async function fetchAccountLimits(claudeBin = 'claude') {
   return inFlight;
 }
 
-async function doFetch(claudeBin) {
+async function doFetch(claudeBin, execFileImpl) {
   let stdout;
   try {
-    ({ stdout } = await execFileAsync(
+    ({ stdout } = await execFileImpl(
       claudeBin,
       ['-p', '/usage', '--output-format', 'json'],
       // tmpdir, not process.cwd() - this is an account-level query, not
