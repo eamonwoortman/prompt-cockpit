@@ -8,6 +8,21 @@
 // hitting the server per keystroke - the full list is small and static
 // almost all the time.
 
+// Pure filter+sort, split out so it's unit-testable without a DOM (see
+// tests/command-picker.test.mjs) - matches anywhere in the name/alias, not
+// just the start (so `/bullet` finds `candidate_bullets`), then sorts
+// alphabetically by name.
+export function filterCommands(commands, needle) {
+  const n = (needle || '').toLowerCase();
+  return commands.filter((c) => matches(c, n)).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function matches(command, needle) {
+  if (!needle) return true;
+  if (command.name.toLowerCase().includes(needle)) return true;
+  return (command.aliases || []).some((a) => a.toLowerCase().includes(needle));
+}
+
 export function initCommandPicker({ textarea, dropdown, getCommands }) {
   let activeIndex = -1;
   let items = [];
@@ -20,8 +35,7 @@ export function initCommandPicker({ textarea, dropdown, getCommands }) {
     const query = currentQuery();
     if (query === null) return close();
 
-    const needle = query.toLowerCase();
-    items = getCommands().filter((c) => matches(c, needle));
+    items = filterCommands(getCommands(), query);
     activeIndex = items.length > 0 ? 0 : -1;
     render();
   }
@@ -36,12 +50,6 @@ export function initCommandPicker({ textarea, dropdown, getCommands }) {
     const firstToken = text.slice(0, pos);
     if (/\s/.test(firstToken)) return null; // past the command name into its arguments
     return firstToken.slice(1);
-  }
-
-  function matches(command, needle) {
-    if (!needle) return true;
-    if (command.name.toLowerCase().startsWith(needle)) return true;
-    return (command.aliases || []).some((a) => a.toLowerCase().startsWith(needle));
   }
 
   function render() {
