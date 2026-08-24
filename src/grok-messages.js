@@ -1,7 +1,7 @@
 // Turn ACP session/update payloads into the Claude-shaped sdk:message
 // objects stream-view.js already knows how to render.
-import { joinStreamText } from './stream-join.js';
-export { joinStreamText };
+import { joinStreamText, createFenceTracker } from './stream-join.js';
+export { joinStreamText, createFenceTracker };
 
 function textFromContent(content) {
   if (!content) return '';
@@ -158,15 +158,25 @@ function canMergeAssistant(prev, msg) {
 // so history, export, and any batch replay don't render one card per token.
 export function coalesceAssistantMessages(messages) {
   const out = [];
+  // Keyed by identity of the block currently being merged onto - a fresh
+  // run (new prevBlock after a non-mergeable message breaks the chain)
+  // needs a fresh tracker, same reasoning as session-registry.js's
+  // per-delegation-buffer-entry reset.
+  let tracker = null;
+  let trackerBlock = null;
   for (const msg of messages || []) {
     const prev = out[out.length - 1];
     if (canMergeAssistant(prev, msg)) {
       const prevBlock = prev.message.content[0];
       const nextBlock = msg.message.content[0];
+      if (trackerBlock !== prevBlock) {
+        tracker = createFenceTracker();
+        trackerBlock = prevBlock;
+      }
       if (prevBlock.type === 'thinking') {
-        prevBlock.thinking = joinStreamText(prevBlock.thinking, nextBlock.thinking);
+        prevBlock.thinking = joinStreamText(prevBlock.thinking, nextBlock.thinking, tracker);
       } else {
-        prevBlock.text = joinStreamText(prevBlock.text, nextBlock.text);
+        prevBlock.text = joinStreamText(prevBlock.text, nextBlock.text, tracker);
       }
       continue;
     }

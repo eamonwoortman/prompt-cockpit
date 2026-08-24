@@ -2,8 +2,7 @@
 // (registry row, ws route, token); Claude's own session id is a mutable
 // attribute refreshed as messages arrive (see plan Decisions).
 //
-// Settings-store boundary (three stores exist; this is one of them - see
-// backlog.md's now-resolved "no stated boundary" item): a registry row is
+// Settings-store boundary (three stores exist; this is one of them): a registry row is
 // the live, in-memory mirror of one running session's SDK-reported state
 // (model, mode, thinking budget, auto-continue, usage, etc). Purely
 // ephemeral - nothing here ever touches disk, and the whole row is gone the
@@ -24,29 +23,31 @@ import { forkConversation, rewindFiles as rewindFilesSdk, resolveTurnUuid } from
 import { resolveGrokPromptIndex } from './grok-rewind.js';
 import { fetchSessionHistory, countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
 import { fetchGrokSessionHistory } from './grok-history.js';
-import { joinStreamText } from './grok-messages.js';
+import { joinStreamText, createFenceTracker } from './grok-messages.js';
 import { createEventLog, append as appendEvent, replay as replayEvents } from './event-log.js';
 import { createUsageAccumulator, costForUsage } from './usage.js';
 import { contextPayload } from './context-usage.js';
+import { getProvider, parseProvider, CLAUDE_EFFORTS, GROK_EFFORTS } from './provider-registry.js';
 const sessions = new Map();
 
-// MVP6 seed (backlog.md): a single per-process "handshake secret" minted
-// fresh every time this server starts, in memory only - never persisted,
-// never sent anywhere automatically. It's the shared value that will
-// eventually let a session running on a DIFFERENT machine (an SSH'd Windows
-// cockpit, the actual MVP6 target) prove it belongs to the same trusted
-// group as sessions running locally, so delegation isn't gated on nothing
-// more than "the name string matched." Pairing today is deliberately manual
-// (copy from the session-list pane, paste into the other side's session) -
-// no exchange protocol exists yet, which is fine for a single human running
+// A single per-process "handshake secret" minted fresh every time this
+// server starts, in memory only - never persisted, never sent anywhere
+// automatically. It's the shared value that will eventually let a session
+// running on a DIFFERENT machine (an SSH'd Windows cockpit, the target for
+// remote-hosted sessions) prove it belongs to the same trusted group as
+// sessions running locally, so delegation isn't gated on nothing more than
+// "the name string matched." Pairing today is deliberately manual (copy
+// from the session-list pane, paste into the other side's session) - no
+// exchange protocol exists yet, which is fine for a single human running
 // both ends.
 //
 // Every LOCALLY-created row is stamped with the CURRENT secret at creation
 // time (see createSession below), so local sessions are trusted by
 // construction - they were spawned by this very process, there's nothing to
 // prove. The override only matters two ways: (1) a future non-local row
-// type (once MVP6 actually exists) that does NOT get stamped automatically
-// and has to be manually promoted via setSessionHandshake, and (2) as a
+// type (once remote-hosted sessions actually exist) that does NOT get
+// stamped automatically and has to be manually promoted via
+// setSessionHandshake, and (2) as a
 // manual revoke - blank/garble a row's value via the same setter to opt
 // that session out of delegation entirely, in either direction.
 let handshakeSecret = randomBytes(16).toString('hex');
@@ -78,18 +79,8 @@ export function isSessionTrusted(row) {
   return Boolean(row.handshakeSecret) && row.handshakeSecret === handshakeSecret;
 }
 
-// `startSessionImpl` defaults to the real SDK-backed session but can be
-// swapped for a stub in tests so unit tests don't spawn a real CLI process.
-// `history` (from server.js's resume flow, already fetched via
-// fetchSessionHistory) seeds the buffer with a recent tail so a resumed
-// session shows its prior conversation immediately rather than starting
-// blank - see loadEarlierHistory() for the rest, on demand.
-function defaultStart(provider) {
-  return provider === 'grok' ? startGrokSession : startSession;
-}
-
 export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, startSessionImpl }) {
-  // MVP5: authoritative uniqueness check - this function has no `await`
+  // Authoritative uniqueness check for delegation names - this function has no `await`
   // before it and none until sessions.set() further down, so this closes
   // the TOCTOU window server.js's own pre-check has on its own (that check
   // runs after awaiting the resume-history fetch, so two concurrent
@@ -102,8 +93,11 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     err.code = 'ERR_NAME_TAKEN';
     throw err;
   }
-  const resolvedProvider = provider === 'grok' ? 'grok' : 'claude';
-  if (!startSessionImpl) startSessionImpl = defaultStart(resolvedProvider);
+  const providerDescriptor = parseProvider(provider);
+  const resolvedProvider = providerDescriptor.id;
+  // `startSessionImpl` can still be swapped for a stub in tests so unit
+  // tests don't spawn a real CLI process.
+  if (!startSessionImpl) startSessionImpl = providerDescriptor.startSession;
   const id = randomUUID();
   const token = randomUUID();
   const historyShownCount = history ? countWithinTokenBudget(history, INITIAL_HISTORY_TOKEN_BUDGET) : 0;
@@ -121,6 +115,10 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     thinkingDisplay: null, // 'summarized' | 'omitted' | null (SDK default when thinking is on)
     state: 'starting', // starting | idle | running | error | closed
     mode: permissionMode || 'default',
+    // Native conversation id reported by the active provider. Keep the
+    // legacy Claude-named alias in sync until older clients/routes have
+    // migrated; shared code should use providerSessionId from here on.
+    providerSessionId: resume || null,
     claudeSessionId: resume || null,
     // See handshakeSecret's own module-level comment above - stamped with
     // the CURRENT canonical value at creation, so a locally-spawned row is
@@ -132,7 +130,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // run in a terminal or in a prior cockpit process - has no snapshots
     // for its earlier turns, so file rewind must be off rather than
     // attempted and failed (see rewind() below, which checks this flag).
-    hasFileCheckpointing: resolvedProvider === 'claude' && !resume,
+    hasFileCheckpointing: providerDescriptor.capabilities.fileRewind && !resume,
     // `history` is null here in exactly two cases: no resume was requested
     // (fine, turnIndexOffset is genuinely 0), or a resume WAS requested and
     // fetchSessionHistory threw (server.js's `.catch(() => null)`) - the
@@ -152,7 +150,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     historyTotal: history ? history.length : 0,
     historyShownCount, // fixed at creation - distinct from the event log, which keeps growing with live traffic
     pendingApproval: null, // last unresolved approval request, so a reconnecting client sees it again instead of a stuck banner it never got
-    // MVP4 live stats: cost/token totals accumulate from every assistant
+    // Live stats: cost/token totals accumulate from every assistant
     // message's `usage` (usage.js), no 1-turn lag. `contextUsage` is
     // refreshed separately (getContextUsage() is its own round trip to the
     // CLI, not free on every message) - see refreshContextUsage below.
@@ -181,7 +179,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // a call that never gets one (error mid-flight, session closes) just
     // lingers harmlessly for the row's lifetime.
     pendingTaskOps: new Map(),
-    // Visible input queue (backlog.md) - full snapshot from session.js's
+    // Visible input queue - full snapshot from session.js's
     // onQueueChange, same shape session.js's listQueue() returns:
     // [{id, text}], ordered. Empty on grok sessions (stubbed - see
     // grok-session.js). Not persisted/resumed across a reconnect for the
@@ -189,7 +187,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // `history` either - a queue only ever holds turns pushed THIS process
     // lifetime, there is nothing about it in a resumed transcript.
     queue: [],
-    // MVP5 cross-session delegation (backlog.md): ordered record of every
+    // Cross-session delegation: ordered record of every
     // turn pushed into THIS row that hasn't produced its `result` yet - one
     // entry per pushTurn() call (see below), `{ queueId, tag }`. `tag` is
     // `null` for an ordinary human/auto-continue turn, or
@@ -272,7 +270,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
       row.queue = queue;
       broadcastQueue(id);
     },
-    // MCP "needs-auth" badge (backlog.md) - no row field to keep in sync,
+    // MCP "needs-auth" badge - no row field to keep in sync,
     // same as toggleMcpServer/reconnectMcpServer below: session.js's
     // getMcpAuthPending() is the only source of truth, this just tells any
     // open MCP panel to re-fetch it (mcp-panel.js is poll-on-open/refresh-
@@ -290,8 +288,8 @@ export function get(id) {
   return sessions.get(id);
 }
 
-// MVP5 cross-session delegation: name -> row lookup, scoped to one cwd
-// (v1 routing is same-project only - see backlog.md). Case-insensitive,
+// Cross-session delegation: name -> row lookup, scoped to one cwd
+// (v1 routing is same-project only). Case-insensitive,
 // exact match otherwise (no path normalization on `cwd` - two sessions
 // started from the same launcher cwd string will always match; a
 // differently-spelled-but-equivalent path won't, that's a known v1 gap).
@@ -307,7 +305,7 @@ export function findByName(cwd, name) {
   return null;
 }
 
-// MVP5 cross-session delegation: the ONE place that pushes a turn into a
+// Cross-session delegation: the ONE place that pushes a turn into a
 // row's handle - every call site (sendInput, delegateTask, a relayed result
 // landing back on its origin, scheduleAutoContinue's synthetic 'Continue')
 // goes through this, so row.pendingResultTags can never silently miss an
@@ -316,6 +314,16 @@ export function findByName(cwd, name) {
 // mode this closes). `tag` is null for a non-delegated turn.
 function pushTurn(row, text, tag = null) {
   const queueId = row.handle.pushInput(text);
+  // `null` (not `undefined` - grok's ordinary success return has no
+  // queueId to give) means pushInput did NOT enqueue anything: the target
+  // queue was already closed, or (grok only) this exact prompt was already
+  // pending. No result will ever come for a turn that was never actually
+  // pushed, so appending a pendingResultTags entry for it here is exactly
+  // the desync bug from the 2026-08-24 review (finding #2) - a later,
+  // unrelated `result` would shift() this dead entry off first and get
+  // relayed to the wrong origin. Best-effort drop instead, same as
+  // relayDelegationResult already does when its own origin lookup misses.
+  if (queueId === null) return null;
   row.pendingResultTags.push({ queueId, tag });
   // Returned so relayDelegationResult can correlate this turn's own echoed
   // 'user' message (which session.js stamps with this same queueId, see its
@@ -325,7 +333,7 @@ function pushTurn(row, text, tag = null) {
   return queueId;
 }
 
-// MVP5 cross-session delegation: the whole feature in one call. Triggered
+// Cross-session delegation: the whole feature in one call. Triggered
 // by a user typing `/ask <Name>: <text>` in the ORIGIN session's compose
 // box (server.js's ws 'delegate' handler) - not an LLM tool call, so there
 // is no real tool_use id for the eventual reply to attach to as a genuine
@@ -370,7 +378,19 @@ export function delegateTask(originId, targetName, text) {
   // function's own comment above) and is what a suspicious model is really
   // checking.
   const wrappedTask = buildDelegatedHeader('task', origin.name || 'session', text);
-  pushTurn(target, wrappedTask, { fromId: origin.id, fromName: origin.name || 'session', task: text, buffer: [] });
+  const tag = { fromId: origin.id, fromName: origin.name || 'session', task: text, buffer: [] };
+  const queueId = pushTurn(target, wrappedTask, tag);
+  if (queueId === null) {
+    // Target's input queue was already closed (its session ended right as
+    // this delegation landed) - pushTurn dropped the turn instead of
+    // queuing it, so no `result` will ever arrive to relay back. Without
+    // this, the origin would just wait forever for a reply that's never
+    // coming (see the 2026-08-24 review, finding #2's "or the origin
+    // strands forever"). relayDelegationResult's own tag.fromId lookup is
+    // enough here - it doesn't need targetRow.pendingResultTags at all.
+    relayDelegationResult(target, tag, { ok: false, errorText: `"${target.name || targetName}" is no longer available to receive this task` });
+    return { targetId: target.id, targetName: target.name };
+  }
   broadcastSummary(target.id); // target tab's state flips to 'running' immediately, not on its next unrelated broadcast
   // Durable marker on the ORIGIN's own event log/transcript - not routed
   // through target.handle/onMessage, this never touched the SDK - so a
@@ -389,7 +409,7 @@ export function closeSession(id) {
   const row = sessions.get(id);
   if (!row) return false;
   clearAutoContinueTimer(row);
-  // MVP5: session.js's close() only interrupts the current turn and closes
+  // For a delegated turn: session.js's close() only interrupts the current turn and closes
   // the input queue - the interrupted turn's own `result` still arrives
   // asynchronously later, per its own comment - but sessions.delete(id)
   // below happens synchronously right now, so by the time that late
@@ -445,6 +465,7 @@ export function getDebugInfo(id) {
 }
 
 export function toSummary(row) {
+  const provider = getProvider(row.provider);
   return {
     id: row.id,
     name: row.name,
@@ -452,6 +473,8 @@ export function toSummary(row) {
     state: row.state,
     mode: row.mode,
     provider: row.provider,
+    providerSessionId: row.providerSessionId,
+    // Backward-compatible response field for existing browser tabs.
     claudeSessionId: row.claudeSessionId,
     hasFileCheckpointing: row.hasFileCheckpointing,
     turnIndexUnreliable: row.turnIndexUnreliable,
@@ -479,15 +502,10 @@ export function toSummary(row) {
     // own comment describes - see forceIdle below for the manual recovery.
     pendingTurnsCount: row.pendingResultTags.length,
     capabilities: {
-      fileRewind: row.provider === 'claude' && row.hasFileCheckpointing,
-      thinkingBudget: row.provider === 'claude',
-      // Both providers support reasoning effort now - Grok as a named tier
-      // (spawn-time flag, grok-acp.js), Claude as the Agent SDK's `effort`
-      // option (session.js), live-adjustable via applyFlagSettings. Distinct
-      // value sets per provider - see GROK_EFFORTS vs CLAUDE_EFFORTS below.
-      effort: true,
-      autoContinue: row.provider === 'claude',
-      mcpToggle: true,
+      ...provider.capabilities,
+      // Checkpointing is session-specific: even a provider that supports
+      // it cannot rewind files for a transcript it resumed midstream.
+      fileRewind: provider.capabilities.fileRewind && row.hasFileCheckpointing,
     },
   };
 }
@@ -507,8 +525,9 @@ export function checkToken(id, token) {
 
 // `sinceSeq` comes from the client's last-seen event seq (server.js reads
 // it off the ws upgrade URL's `since` param). Omitted/0 on a first-ever
-// attach - full replay, same as before MVP3. A returning client that still
-// holds its rendered DOM sends its real last seq and gets only the delta;
+// attach - full replay, same as before reconnect support existed. A
+// returning client that still holds its rendered DOM sends its real last
+// seq and gets only the delta;
 // one that has evicted past what the log still holds gets `gap: true` and
 // a full resend instead of a replay with a hole in it (event-log.js).
 export function attachClient(id, ws, sinceSeq = 0) {
@@ -541,7 +560,7 @@ export function detachClient(id, ws) {
 export async function sendInput(id, text) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  pushTurn(row, text); // MVP5: must go through pushTurn, not handle.pushInput directly - see pendingResultTags' comment
+  pushTurn(row, text); // Must go through pushTurn, not handle.pushInput directly - see pendingResultTags' comment
 }
 
 // Shared shape behind every route below that calls straight through to the
@@ -551,7 +570,7 @@ export async function sendInput(id, text) {
 // passthroughs - toggleMcpServer/reconnectMcpServer have no row field to
 // keep in sync), then broadcast so every connected tab sees the change.
 // Used to be copy-pasted per route (setPermissionMode/setModel/
-// setMaxThinkingTokens each hand-rolled this - see backlog.md), which meant
+// setMaxThinkingTokens each hand-rolled this), which meant
 // a 4th/5th route repeating it by hand instead of just calling this.
 async function queryPassthrough(id, action, patch) {
   const row = sessions.get(id);
@@ -605,7 +624,7 @@ export async function setModel(id, model) {
 // row.name is purely cockpit-side bookkeeping (session-titles.js persists
 // the durable copy; server.js's rename route calls both), the SDK has
 // nothing analogous to tell. NOT routed through queryPassthrough (unlike
-// every sibling here) - MVP5's uniqueness check needs to run synchronously
+// every sibling here) - the delegation-name uniqueness check needs to run synchronously
 // right next to the mutation it's guarding, with zero `await` in between,
 // the same reasoning as createSession's own check above. queryPassthrough's
 // `await action(row)` - even against a no-op async function - is enough of
@@ -639,13 +658,9 @@ export async function setMaxThinkingTokens(id, maxThinkingTokens, thinkingDispla
   );
 }
 
-export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
-// Claude's effort ladder (Agent SDK's EffortLevel) - one level wider than
-// Grok's: 'max' is accepted by the SDK type but only actually honored by
-// models that support it (Fable 5, Opus 4.6+, Sonnet 4.6+); on other models
-// the SDK/API silently treats it as 'xhigh' or 'high' rather than erroring,
-// so no server-side model-aware narrowing is done here.
-export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// Re-exported for callers that used the pre-descriptor constants. New route
+// code should use getProvider(provider).efforts instead.
+export { GROK_EFFORTS, CLAUDE_EFFORTS };
 
 export async function setEffort(id, effort) {
   return queryPassthrough(id, (row) => row.handle.query.setEffort(effort), { effort });
@@ -672,7 +687,7 @@ export async function setAutoContinue(id, enabled) {
 
 // `decision` is a PermissionResult - {behavior:'allow', updatedInput?} or
 // {behavior:'deny', message?}. Called from the client's accept/reject click
-// on a plan-request banner (MVP2 scope: ExitPlanMode only).
+// on a plan-request banner (ExitPlanMode only).
 export function resolveApproval(id, requestId, decision) {
   const row = sessions.get(id);
   if (!row) return false;
@@ -688,11 +703,10 @@ export function resolveApproval(id, requestId, decision) {
 export async function loadEarlierHistory(id, fetchHistoryImpl) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  if (!row.claudeSessionId) throw new Error('session has no claude session id yet');
+  if (!row.providerSessionId) throw new Error('session has no provider session id yet');
 
-  const fetchHistory = fetchHistoryImpl
-    || (row.provider === 'grok' ? fetchGrokSessionHistory : fetchSessionHistory);
-  const full = await fetchHistory(row.claudeSessionId, row.cwd);
+  const fetchHistory = fetchHistoryImpl || getProvider(row.provider).fetchHistory;
+  const full = await fetchHistory(row.providerSessionId, row.cwd);
   const earlier = full.slice(0, Math.max(0, full.length - row.historyShownCount));
   row.historyTotal = full.length;
   row.historyShownCount = full.length;
@@ -703,47 +717,31 @@ export async function loadEarlierHistory(id, fetchHistoryImpl) {
 
 // Fork the conversation at `userMessageId` and open the fork as a new,
 // independent cockpit session (non-destructive - the original keeps
-// running). Optionally reverts files on the *original* session first, per
-// plan MVP2 ("forkSession() for the conversation and rewindFiles() for the
-// files"). Skips the file half when the row has no checkpointing rather
+// running). Optionally reverts files on the *original* session first
+// (forkSession() for the conversation, rewindFiles() for the files). Skips
+// the file half when the row has no checkpointing rather
 // than letting it fail.
 export async function rewind(id, turnIndex, { dryRun = false } = {}) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  if (!row.claudeSessionId) throw new Error('session has no claude session id yet');
+  const provider = getProvider(row.provider);
+  if (!provider.capabilities.conversationFork) {
+    throw new Error(`${provider.label} sessions do not support conversation rewind`);
+  }
+  if (!row.providerSessionId) throw new Error('session has no provider session id yet');
   if (row.turnIndexUnreliable) {
     throw new Error('could not read this session\'s prior transcript when it started, so turn numbering cannot be trusted - rewind is disabled for it. Resuming it again may resolve this.');
   }
-
-  if (row.provider === 'grok') {
-    const points = await row.handle.listRewindPoints();
-    const promptIndex = resolveGrokPromptIndex(points, turnIndex);
-    if (dryRun) {
-      return { filesResult: { conversationOnly: true, promptIndex }, forkedSessionId: null };
-    }
-    // Conversation-only. Fork first so the original Grok session stays
-    // intact, then truncate the copy. Matches Claude's non-destructive
-    // rewind: the caller opens forkedSessionId as a new cockpit row.
-    const forked = await row.handle.forkAt(promptIndex);
-    return {
-      filesResult: { conversationOnly: true, promptIndex },
-      forkedSessionId: forked.newSessionId,
-    };
+  // How to actually fork a conversation is provider-specific (Claude's SDK
+  // forkSession() vs Grok's own fork-then-truncate ACP calls) and lives on
+  // the descriptor itself (provider-registry.js) rather than branching here
+  // - a provider that sets conversationFork: true without a rewind
+  // implementation is a descriptor bug, not something this function should
+  // silently paper over by falling back to Claude's.
+  if (typeof provider.rewind !== 'function') {
+    throw new Error(`${provider.label} advertises conversation-fork support but has no rewind implementation`);
   }
-
-  const userMessageId = await resolveTurnUuid(row.claudeSessionId, row.cwd, turnIndex);
-
-  let filesResult = null;
-  if (row.hasFileCheckpointing) {
-    filesResult = await rewindFilesSdk(row.handle.query, userMessageId, { dryRun });
-  }
-
-  let fork = null;
-  if (!dryRun) {
-    fork = await forkConversation(row.claudeSessionId, userMessageId);
-  }
-
-  return { filesResult, forkedSessionId: fork ? fork.sessionId : null };
+  return provider.rewind(row, turnIndex, { dryRun });
 }
 
 // Read-only passthrough, same as supportedModels/supportedAgents in
@@ -815,7 +813,10 @@ function setState(id, state) {
 function handleMessage(id, message) {
   const row = sessions.get(id);
   if (!row) return;
-  if (message.session_id) row.claudeSessionId = message.session_id;
+  if (message.session_id) {
+    row.providerSessionId = message.session_id;
+    row.claudeSessionId = message.session_id;
+  }
   // The CLI can move itself out of the mode it was started/set in (e.g.
   // accepting a plan exits `plan`) without any setPermissionMode() call
   // from us - previously only session.js's own private `currentMode`
@@ -841,7 +842,7 @@ function handleMessage(id, message) {
     // unrelated event (e.g. renaming) happened to trigger a state broadcast.
     if (!hadModel && row.model) broadcastSummary(id);
   }
-  collectDelegationText(row, message); // MVP5: buffers this turn's assistant text while a delegation is pending, see the 'result' branch below
+  collectDelegationText(row, message); // buffers this turn's assistant text while a delegation is pending, see the 'result' branch below
   // Task* detection/resolution also has to run for a resumed session's
   // replayed history (see createSession's seedTaskState call), not just the
   // live stream - factored out so both call sites share one implementation
@@ -893,7 +894,7 @@ function handleMessage(id, message) {
   const seq = appendEvent(row.eventLog, message);
   broadcast(id, { type: 'sdk:message', message, seq });
   if (message.type === 'result') {
-    // MVP5: this array's order always matches actual execution order now
+    // This array's order always matches actual execution order now
     // (pushTurn + the removeQueued/reorderQueue/sendNow mirrors below keep
     // it that way), so the OLDEST entry is always the one this `result`
     // belongs to - shift, not filter/find. `entry.tag` is null for a
@@ -905,7 +906,7 @@ function handleMessage(id, message) {
   }
 }
 
-// MVP5: delivers a delegated task's result back into the ORIGIN session
+// Delivers a delegated task's result back into the ORIGIN session
 // that asked for it, once the TARGET row's turn finishes (ok), the target
 // row errors out mid-turn (handleError below), the target row is closed
 // mid-turn (closeSession below), or the delegated turn is removed from the
@@ -1017,7 +1018,7 @@ function sanitizeName(s) {
   return String(s).replace(/"/g, "'");
 }
 
-// MVP5: watches one assistant message for delegated-turn text while this
+// Watches one assistant message for delegated-turn text while this
 // row has a pending delegation tag (row.pendingResultTags[0] - the OLDEST,
 // same FIFO reasoning as the 'result' branch above). Only the plain text
 // blocks are kept (no tool-call trace) - but every block, not just the
@@ -1060,9 +1061,13 @@ function collectDelegationText(row, message) {
       continue;
     }
     if (tag.openTextEntry && tag.buffer.length) {
-      tag.buffer[tag.buffer.length - 1] = joinStreamText(tag.buffer[tag.buffer.length - 1], block.text);
+      tag.buffer[tag.buffer.length - 1] = joinStreamText(tag.buffer[tag.buffer.length - 1], block.text, tag.fenceTracker);
     } else {
       tag.buffer.push(block.text);
+      // A fresh buffer entry starts a new run - the tracker's committed
+      // state belongs to the PREVIOUS entry's text, so it must not carry
+      // over (see stream-join.js's joinStreamText perf note).
+      tag.fenceTracker = createFenceTracker();
     }
     tag.openTextEntry = true;
   }
@@ -1297,7 +1302,7 @@ function broadcastQueue(id) {
   broadcast(id, queuePayload(row));
 }
 
-// MCP "needs-auth" badge (backlog.md) - fired from session.js's
+// MCP "needs-auth" badge - fired from session.js's
 // onMcpAuthRequest/onMcpAuthResolved (see createSession above). Unlike every
 // other broadcast* here, there's no row field to read a payload off - the
 // merged {authUrl} list only exists behind the async getMcpServerStatus()
@@ -1310,7 +1315,7 @@ async function broadcastMcpAuth(id) {
   if (servers) broadcast(id, { type: 'cockpit:mcp-auth', servers });
 }
 
-// Queue pane operations (backlog.md) - all three just forward to the
+// Queue pane operations - all three just forward to the
 // session handle (listQueue is synchronous and local, no round trip, so it
 // isn't wrapped in queryPassthrough's async shape). row.queue/the broadcast
 // itself are driven by onQueueChange, not by these calls succeeding - a
@@ -1327,7 +1332,7 @@ export async function removeQueued(id, queueId) {
   if (!row) throw new Error(`unknown session: ${id}`);
   const removed = await row.handle.removeQueued(queueId);
   if (removed) {
-    // MVP5: this queueId's turn will now never run, so it will never
+    // This queueId's turn will now never run, so it will never
     // produce a `result` either - drop its pendingResultTags entry so a
     // LATER turn's result doesn't get mismatched against it (the same
     // desync review flagged for plain shift()-without-bookkeeping), and if
@@ -1478,7 +1483,7 @@ function scheduleAutoContinue(id) {
     // timer sat waiting.
     if (!row.autoContinue || !row.rateLimitHit) return;
     row.rateLimitHit = null;
-    pushTurn(row, 'Continue'); // MVP5: must go through pushTurn, not handle.pushInput directly - see pendingResultTags' comment
+    pushTurn(row, 'Continue'); // Must go through pushTurn, not handle.pushInput directly - see pendingResultTags' comment
     broadcastSummary(id);
   }, delay);
 }
@@ -1524,7 +1529,7 @@ async function refreshRateLimits(id) {
 // getContextUsage() is a Query-handle round trip (unlike usage.js's
 // accumulator, which is pure local math off the message stream already
 // flowing through), so it's only called once a turn actually finishes -
-// still "live, no 1-turn lag" per plan MVP4, just not on every partial
+// still "live, no 1-turn lag" for the stats panel, just not on every partial
 // message. Best-effort: swallows errors (e.g. a session that closed mid
 // flight) rather than surfacing a stats-panel failure as a session error.
 async function refreshContextUsage(id) {
@@ -1561,7 +1566,7 @@ function handleApprovalRequest(id, request) {
   broadcast(id, { type: 'cockpit:approval-request', request });
 }
 
-// MVP5: relays an ok:false notice to every origin session with a delegation
+// Relays an ok:false notice to every origin session with a delegation
 // still pending on `row`, then clears them all - shared by handleError
 // (target crashes mid-turn) and closeSession (target is deliberately closed
 // mid-turn) below, so neither leaves an origin session's "-> Asked ..."
@@ -1586,7 +1591,7 @@ function handleError(id, err) {
   // never re-enables on a stray running broadcast).
   clearAutoContinueTimer(row);
   row.state = 'error';
-  // MVP5: a crashing row's for-await loop (session.js/grok-session.js) exits
+  // A crashing row's for-await loop (session.js/grok-session.js) exits
   // without ever emitting the 'result' message handleMessage's delegation
   // branch waits for, so any tags still pending here would otherwise strand
   // their origin session waiting forever.

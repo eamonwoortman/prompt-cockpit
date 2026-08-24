@@ -13,7 +13,7 @@ async function makeTmpDir() {
 test('readSessionDefaults returns the empty defaults when settings.local.json does not exist', async () => {
   const cwd = await makeTmpDir();
   try {
-    assert.deepEqual(await readSessionDefaults(cwd), { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false });
+    assert.deepEqual(await readSessionDefaults(cwd), { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -24,7 +24,7 @@ test('readSessionDefaults returns the empty defaults on corrupt JSON rather than
   try {
     await mkdir(path.join(cwd, '.claude'), { recursive: true });
     await writeFile(path.join(cwd, '.claude', 'settings.local.json'), '{ not json', 'utf-8');
-    assert.deepEqual(await readSessionDefaults(cwd), { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false });
+    assert.deepEqual(await readSessionDefaults(cwd), { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -34,7 +34,7 @@ test('setSessionDefaults creates .claude/settings.local.json when absent', async
   const cwd = await makeTmpDir();
   try {
     const defaults = await setSessionDefaults(cwd, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized' });
-    assert.deepEqual(defaults, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized', autoContinue: false });
+    assert.deepEqual(defaults, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized', autoContinue: false, effort: null });
     const onDisk = JSON.parse(await readFile(path.join(cwd, '.claude', 'settings.local.json'), 'utf-8'));
     assert.deepEqual(onDisk.sessionDefaults, defaults);
   } finally {
@@ -47,7 +47,7 @@ test('setSessionDefaults shallow-merges over what is already stored', async () =
   try {
     await setSessionDefaults(cwd, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized' });
     const defaults = await setSessionDefaults(cwd, { autoContinue: true });
-    assert.deepEqual(defaults, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized', autoContinue: true });
+    assert.deepEqual(defaults, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized', autoContinue: true, effort: null });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -72,12 +72,27 @@ test('setSessionDefaults preserves unrelated keys already in the file, including
   }
 });
 
+// 2026-08-24 review fix: `effort` used to be the one live setting NOT
+// tracked here (unlike maxThinkingTokens/thinkingDisplay/autoContinue), so
+// a brand-new session in the same cwd never inherited it the way it does
+// every other per-cwd default.
+test('setSessionDefaults tracks effort the same way as thinking/auto-continue', async () => {
+  const cwd = await makeTmpDir();
+  try {
+    const defaults = await setSessionDefaults(cwd, { effort: 'high' });
+    assert.deepEqual(defaults, { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: 'high' });
+    assert.deepEqual(await readSessionDefaults(cwd), defaults);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 // plugin-settings.test.mjs's own concurrency test only interleaves multiple
 // setPluginEnabled calls with each other; settings-file.js's write queue is
 // shared across *every* writer of a cwd's settings.local.json, not just
 // same-module callers - a plugin toggle and a thinking-budget change landing
 // in the same tick is the exact scenario the queue exists to serialize
-// (backlog.md: this cross-module interleaving was untested). Fired without
+// (this cross-module interleaving was previously untested). Fired without
 // awaiting between them so both read-modify-write cycles would race on the
 // same file if the queue didn't hold.
 test('concurrent setSessionDefaults and setPluginEnabled on the same cwd do not clobber each other', async () => {
@@ -93,6 +108,7 @@ test('concurrent setSessionDefaults and setPluginEnabled on the same cwd do not 
       maxThinkingTokens: 4096,
       thinkingDisplay: 'summarized',
       autoContinue: true,
+      effort: null,
     });
     assert.deepEqual(await readEnabledPlugins(cwd), {
       'formatter@anthropic-tools': true,

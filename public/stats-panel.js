@@ -1,4 +1,4 @@
-// MVP4 live stats strip: cost, tokens, cache hit rate, context percentage.
+// Live stats strip: cost, tokens, cache hit rate, context percentage.
 // Fed by the server's `cockpit:usage` message (session-registry.js), sent on
 // every assistant message (cost/tokens) and after every finished turn
 // (context percentage, which is its own round trip to the CLI). Formatters

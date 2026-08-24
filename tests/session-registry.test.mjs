@@ -48,10 +48,14 @@ function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatu
     return {
       ...(withMcpAuthPending ? { getMcpAuthPending: () => mcpAuthPending } : {}),
       pushInput: (text) => {
+        // Mirrors session.js's real pushInput now returning `null` (not a
+        // queueId) once the queue is closed - see the 2026-08-24 review fix
+        // for the pendingResultTags desync this used to cause.
+        if (impl.closed) return null;
         impl.lastInput = text;
         impl.allInputs = impl.allInputs || [];
         impl.allInputs.push(text);
-        // MVP5: mirrors session.js's pushInput now returning a queueId so
+        // Mirrors session.js's pushInput now returning a queueId so
         // registry.js's pendingResultTags/removeQueued/reorderQueue/sendNow
         // mirroring logic has something real to key off in tests.
         impl.allQueueIds = impl.allQueueIds || [];
@@ -185,12 +189,15 @@ test('attachClient sends hello then replays buffered messages', () => {
   assert.equal(ws.sent[1].message.subtype, 'init');
 });
 
-test('claudeSessionId on the row tracks message.session_id as messages arrive', () => {
+test('providerSessionId tracks message.session_id and preserves the legacy alias', () => {
   registry._reset();
   const startSessionImpl = fakeStartSession();
   const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
   startSessionImpl.emitMessage({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+  assert.equal(registry.get(row.id).providerSessionId, 'sess-1');
   assert.equal(registry.get(row.id).claudeSessionId, 'sess-1');
+  assert.equal(registry.toSummary(row).providerSessionId, 'sess-1');
+  assert.equal(registry.toSummary(row).claudeSessionId, 'sess-1');
 });
 
 test('an assistant message with usage broadcasts cockpit:usage with running cost/token totals', () => {
@@ -472,6 +479,8 @@ test('hasFileCheckpointing is true only for a freshly-started session, not a res
   // regardless of what the live process is passed.
   const resumed = registry.createSession({ cwd: '/tmp', resume: 'some-claude-session-id', startSessionImpl: fakeStartSession() });
   assert.equal(resumed.hasFileCheckpointing, false);
+  assert.equal(resumed.providerSessionId, 'some-claude-session-id');
+  assert.equal(resumed.claudeSessionId, 'some-claude-session-id');
 });
 
 test('createSession defaults provider to claude; grok disables file checkpointing', () => {
@@ -519,6 +528,17 @@ test('rewind() on grok forks a new session and leaves the original running', asy
   assert.equal(live.filesResult.conversationOnly, true);
   assert.equal(impl.closed, undefined);
   assert.equal(registry.get(row.id), row);
+});
+
+test('rewind() rejects providers without conversation-fork capability before Claude-specific work', async () => {
+  registry._reset();
+  const impl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl: impl });
+
+  await assert.rejects(
+    () => registry.rewind(row.id, 1),
+    /Codex sessions do not support conversation rewind/,
+  );
 });
 
 test('setHandlePluginEnabled passes through to the grok handle', async () => {
@@ -760,7 +780,7 @@ test('getMcpServerStatus on an unknown session id rejects instead of throwing sy
   await assert.rejects(() => registry.getMcpServerStatus('does-not-exist'));
 });
 
-// MCP "needs-auth" badge (backlog.md).
+// MCP "needs-auth" badge.
 test('getMcpServerStatus merges authUrl/authMessage from session.js\'s onElicitation into the matching server, leaving others untouched', async () => {
   registry._reset();
   const mcpStatus = [
@@ -1101,7 +1121,7 @@ test('resuming a session seeds usage totals and per-message _usageInfo from hist
   assert.equal(replayed.message._usageInfo.inputTokens, 1000);
 });
 
-// MVP5 cross-session delegation (backlog.md) - findByName is the addressing
+// Cross-session delegation - findByName is the addressing
 // primitive `/ask <Name>: ...` resolves against: case-insensitive within a
 // cwd, never matches across cwds or against an unnamed row.
 test('findByName matches case-insensitively within a cwd, and never across cwds or against an unnamed row', () => {
@@ -1141,6 +1161,31 @@ test('delegateTask pushes the task into the named target session and throws on u
   assert.throws(() => registry.delegateTask(claude.id, 'NoSuchName', 'hi'), /no session named/);
   assert.throws(() => registry.delegateTask(claude.id, 'Claude', 'hi'), /cannot delegate to the same session/);
   assert.throws(() => registry.delegateTask(claude.id, 'Other', 'hi'), /no session named/, 'a same-named session in a different cwd must not be reachable (same-cwd-only v1 scope)');
+});
+
+// 2026-08-24 review fix, exercised through delegateTask: the TARGET's queue is
+// closed at delegation time, so the task can never run and no `result`
+// will ever arrive for it. Without the fix this pushed a permanent
+// pendingResultTags entry that desynced every later result on that row -
+// with the fix, delegateTask must notice and relay an immediate failure
+// back to the origin instead of leaving it waiting forever.
+test('delegateTask relays an immediate failure to the origin when the target queue is already closed, instead of stranding a dead pendingResultTags entry', () => {
+  registry._reset();
+  const originImpl = fakeStartSession();
+  const origin = registry.createSession({ cwd: '/tmp/proj', name: 'Origin', startSessionImpl: originImpl });
+  const targetImpl = fakeStartSession();
+  const target = registry.createSession({ cwd: '/tmp/proj', name: 'Target', startSessionImpl: targetImpl });
+
+  targetImpl.closed = true; // simulate the race: row still registered, handle already dead
+
+  registry.delegateTask(origin.id, 'Target', 'do the thing');
+
+  assert.equal(target.pendingResultTags.length, 0, 'no dead entry should be left on the target row');
+  assert.match(
+    originImpl.lastInput,
+    /ERROR:.*no longer available/,
+    'the origin must be told immediately, not left waiting for a result that will never come',
+  );
 });
 
 test('delegateTask appends a durable cockpit:delegate-sent marker to the ORIGIN eventLog and broadcasts it, so a reconnecting origin tab sees it', () => {
@@ -1486,8 +1531,8 @@ test('closing a session that is the target of a pending delegation relays a fail
 // 2026-08-20: the wrapper moved from an XML-ish `<delegated_result from=
 // "...">` tag to a prose header + `\n---\n` separator specifically because
 // receiving models were pattern-matching the tag shape as a spoofed
-// tool-scaffolding tag and refusing legitimate delegations outright (see
-// backlog.md). There is no closing-tag boundary left for a reply body to
+// tool-scaffolding tag and refusing legitimate delegations outright.
+// There is no closing-tag boundary left for a reply body to
 // spoof, so the body is no longer escaped - it goes through verbatim, same
 // as any other plain-text turn.
 test('a delegated reply body is inserted verbatim after the separator, unescaped', () => {
@@ -1567,7 +1612,7 @@ test('a crash after a rate-limit hit disarms auto-continue instead of resurrecti
   assert.equal(row.state, 'error');
 });
 
-// MVP6 seed (backlog.md): the per-process delegation handshake secret -
+// The per-process delegation handshake secret -
 // see session-registry.js's own module-level comment for the full
 // rationale. Deliberately NOT calling registry._reset() at the top of every
 // test in this block the way the rest of the file does where it would wipe

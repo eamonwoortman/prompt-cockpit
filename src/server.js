@@ -104,7 +104,7 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
-  // Reconnect (MVP3): a client that already rendered up to some seq sends
+  // Reconnect: a client that already rendered up to some seq sends
   // it back here so attachClient() can send just the delta instead of
   // re-rendering the whole visible transcript. Absent/invalid - including
   // the very first connect, which has nothing to resume from - is a full
@@ -132,7 +132,7 @@ wss.on('connection', (ws, req, id, since) => {
         console.error(`sendInput failed for ${id}:`, err);
       });
     }
-    // Queue pane mutations (backlog.md) - same ws channel as 'input' rather
+    // Queue pane mutations - same ws channel as 'input' rather
     // than a REST round trip: these are live edits to messages already sent
     // down this same socket, so there's no meaningful "queue-remove before
     // the socket that queued it is even open" case to support.
@@ -151,7 +151,7 @@ wss.on('connection', (ws, req, id, since) => {
         console.error(`sendNow failed for ${id}:`, err);
       });
     }
-    // MVP5 cross-session delegation (backlog.md) - `/ask <Name>: <text>`
+    // Cross-session delegation - `/ask <Name>: <text>`
     // parsed client-side (app.js's onSend) into this payload shape. Errors
     // (unknown name, self-delegation, cross-cwd) are synchronous throws
     // from delegateTask - sent straight back on THIS socket (the origin's

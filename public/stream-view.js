@@ -1,6 +1,6 @@
 // Renders the SDK message stream: assistant text, tool calls, tool
 // results, thinking blocks. Whole-message rendering (no token-level
-// partials - see plan MVP1 scope). Hook/thinking-token/rate-limit chatter
+// partials - out of scope for now). Hook/thinking-token/rate-limit chatter
 // and repeat init messages are dropped entirely rather than dumped as raw
 // JSON. Per-tool approval (accept-this-once / no) is a banner driven by
 // cockpit:approval-request, handled in app.js - not part of this module.
@@ -36,7 +36,15 @@
 
 import { resetToolCallStore, createToolCallRecord, completeToolCallRecord, mergeToolCallStore, recordOrphanResult, popOrphanResult } from '/tool-call-store.js';
 import { renderMarkdown } from '/markdown.js';
-import { joinStreamText } from '/stream-join.js';
+import { joinStreamText, createFenceTracker } from '/stream-join.js';
+
+// One tracker per streamed-block body element, so joinStreamText resumes
+// its fence scan instead of rescanning the whole reply on every chunk. A
+// fresh `body` is created per stream block (appendToLastStreamBlock only
+// ever appends onto the current one), so keying on it doubles as the
+// "reset on a new run" behavior grok-messages.js/session-registry.js also
+// need - no explicit cleanup required since it's a WeakMap.
+const fenceTrackerByBody = new WeakMap();
 
 const seenInitByContainer = new WeakMap();
 const groupsByContainer = new WeakMap(); // container -> group[]
@@ -184,7 +192,7 @@ export function renderMessage(container, message, { onRewindClick, hasFileCheckp
     case 'rate_limit_event':
       return; // noise - not actionable per-turn
     case 'cockpit:delegate-sent':
-      // MVP5 cross-session delegation (backlog.md) - cockpit-only marker,
+      // Cross-session delegation - cockpit-only marker,
       // never a real SDK message, appended straight to the origin's own
       // eventLog by session-registry.js's delegateTask so it survives
       // reconnect. Minimal/textual per the confirmed v1 scope - no special
@@ -192,7 +200,7 @@ export function renderMessage(container, message, { onRewindClick, hasFileCheckp
       closeGroup(container);
       return appendBlock(container, 'system', 'Delegated', `-> Asked ${message.targetName}: ${message.text}`, [], container, null, null, timestampMs);
     case 'cockpit:delegate-full-trace':
-      // MVP5 cross-session delegation follow-up (backlog.md) - cockpit-only
+      // Cross-session delegation follow-up - cockpit-only
       // marker, never a real SDK message, appended straight to the origin's
       // own eventLog by session-registry.js's relayDelegationResult so it
       // survives reconnect. Purely additive UI: attaches a button to an
@@ -526,7 +534,7 @@ function summarizeToolInput(name, input) {
   return `${key}: ${JSON.stringify(truncated)}`;
 }
 
-// MVP5 cross-session delegation: session-registry.js wraps both directions
+// Cross-session delegation: session-registry.js wraps both directions
 // of the exchange in a self-identifying prose header before pushing them as
 // a plain user turn - "[Prompt Cockpit] Relayed task from "..."" going out
 // (delegateTask), "[Prompt Cockpit] Relayed reply from "..."" coming back
@@ -536,7 +544,7 @@ function summarizeToolInput(name, input) {
 // (Earlier version of this wrapper used an XML-ish `<delegated_task from=
 // "...">` tag - dropped 2026-08-20 because receiving models were pattern-
 // matching it as a spoofed tool-scaffolding tag and refusing it outright;
-// see session-registry.js's buildDelegatedHeader comment and backlog.md.)
+// see session-registry.js's buildDelegatedHeader comment.)
 // No unescaping needed here (unlike the old tag shape) - the server no
 // longer HTML-escapes the payload, and this renders via textContent
 // downstream regardless, never as markup.
@@ -874,11 +882,13 @@ function appendToLastStreamBlock(container, cls, text, markdown) {
     const prev = Object.prototype.hasOwnProperty.call(body.dataset, 'rawText')
       ? body.dataset.rawText
       : (body.textContent ?? '');
-    const next = joinStreamText(prev, text);
+    if (!fenceTrackerByBody.has(body)) fenceTrackerByBody.set(body, createFenceTracker());
+    const next = joinStreamText(prev, text, fenceTrackerByBody.get(body));
     body.dataset.rawText = next;
     renderBody(body, next, null, true);
   } else {
-    body.textContent = joinStreamText(body.textContent ?? '', text);
+    if (!fenceTrackerByBody.has(body)) fenceTrackerByBody.set(body, createFenceTracker());
+    body.textContent = joinStreamText(body.textContent ?? '', text, fenceTrackerByBody.get(body));
   }
   if (wasAtBottom) container.scrollTop = container.scrollHeight;
   return true;

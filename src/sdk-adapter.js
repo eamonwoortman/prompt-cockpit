@@ -1,6 +1,6 @@
 // Wrapper for the two internal-only control requests (`file_suggestions`,
 // `get_workspace_diff` - plan Spike B: protocol-only, not on the public
-// Query interface). Both are implemented as fallback-only for MVP2: there
+// Query interface). Both are implemented as fallback-only: there
 // is no public method to reach the real internal handler from outside the
 // CLI's own request loop, so this *is* the adapter's fallback path, not a
 // degraded mode of it. If a public surface appears later, swap the

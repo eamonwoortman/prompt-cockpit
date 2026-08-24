@@ -4,7 +4,7 @@
 // textarea doesn't insert a newline for it by default, so it was only ever
 // suppressing send with no newline landing - a documented gap that turned
 // out to be a bug, not a feature.) Visible Send button is keyboard-optional
-// (sets up MVP7 phone approvals).
+// (sets up phone approvals, planned as a future addition).
 
 // Matches index.html's CSS (min-height: 60px, ~2 lines at 14px/1.4 +
 // padding) - kept as one number here rather than read back from computed
@@ -23,8 +23,8 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   // afterward doesn't silently undo their resize.
   let manualHeight = null;
 
-  // Prompt-suggestion ghost text (see backlog.md/2026-08-18 - Claude Code's
-  // own "prompt suggestions" feature, mirrored here): app.js computes a
+  // Prompt-suggestion ghost text (mirrors Claude Code's own "prompt
+  // suggestions" feature): app.js computes a
   // suggested next message from the last assistant reply once a turn ends
   // idle and hands it to setSuggestion() below. Shown via the textarea's own
   // `placeholder` attribute rather than an overlay element - the browser
@@ -51,7 +51,7 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   }
 
   // Up/Down history recall (shell/REPL convention). The persisted list
-  // itself lives in prompt-history.js (backlog.md - survives reload, keyed
+  // itself lives in prompt-history.js (survives reload, keyed
   // per cwd, shared with history-search.js's Ctrl+R fuzzy search); this
   // module only owns the browsing cursor into it. `historyIndex === -1`
   // means "not currently browsing"; `draftText` is whatever was in the box

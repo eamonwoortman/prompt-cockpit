@@ -93,6 +93,13 @@ async function poll() {
 
 function scheduleNext() {
   if (stopped) return;
+  // Defensive: `timer` is currently never non-null here in practice (the
+  // only two writers - this line and the click handler below - already
+  // guarantee at most one pending timer), but clearing before overwriting
+  // means a future change that calls scheduleNext/poll from a new spot
+  // can't silently end up with two overlapping poll loops (2026-08-24
+  // review - flagged as fragile, not yet an active bug).
+  if (timer != null) clearTimeout(timer);
   timer = setTimeout(poll, POLL_MS);
 }
 
@@ -100,6 +107,7 @@ function scheduleNext() {
 // reload (which would lose scroll position for no reason).
 statusEl.addEventListener('click', () => {
   if (!stopped) return;
+  if (timer != null) clearTimeout(timer);
   stopped = false;
   stallCount = 0;
   statusEl.textContent = 'refreshing…';

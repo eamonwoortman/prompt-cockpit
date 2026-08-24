@@ -25,7 +25,12 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
 
     let stats;
     try {
-      const res = await fetch(`/api/stats?range=${encodeURIComponent(rangeSelect.value)}`);
+      // Guarded like the addEventListener below it (line 59) - this module
+      // otherwise treats rangeSelect as optional throughout, so reading
+      // .value unguarded here was inconsistent and would throw if it's ever
+      // absent (2026-08-24 review).
+      const range = rangeSelect ? rangeSelect.value : 'all';
+      const res = await fetch(`/api/stats?range=${encodeURIComponent(range)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       stats = await res.json();
     } catch (err) {

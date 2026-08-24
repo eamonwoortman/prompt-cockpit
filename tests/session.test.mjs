@@ -287,7 +287,7 @@ test('a non-AskUserQuestion tool still auto-allows in an auto-allow mode (unchan
   assert.deepEqual(result, { behavior: 'allow', updatedInput: { command: 'echo hi' } });
 });
 
-// MCP "needs-auth" badge (backlog.md) - session.js's onElicitation handler
+// MCP "needs-auth" badge - session.js's onElicitation handler
 // and the elicitation_complete system message that clears it.
 test('onElicitation with mode "url" accepts, records the pending auth, and notifies onMcpAuthRequest', async () => {
   const mcpAuthRequests = [];

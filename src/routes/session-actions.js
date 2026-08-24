@@ -7,8 +7,6 @@
 // router entries. Split out of server.js unchanged (behavior-wise).
 import * as registry from '../session-registry.js';
 import { PERMISSION_MODES } from '../permissions.js';
-import { fetchSessionHistory } from '../session-history.js';
-import { fetchGrokSessionHistory } from '../grok-history.js';
 import { readAllowRules, addAllowRule, removeAllowRule, formatRule } from '../permission-rules.js';
 import { setSessionTitle } from '../session-titles.js';
 import { setPluginEnabled, readEnabledPlugins } from '../plugin-settings.js';
@@ -17,6 +15,7 @@ import { setSessionDefaults } from '../session-defaults.js';
 import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
 import { seedSessionDefaults } from './sessions.js';
+import { getProvider } from '../provider-registry.js';
 
 export function registerSessionActionRoutes(router) {
   router.any('/api/sessions/:id/:action', async (req, res, url, { id, action }) => {
@@ -137,7 +136,7 @@ export function registerSessionActionRoutes(router) {
         // loaded, which is true regardless of what was last saved (B3). Merge
         // the saved map in here so the panel's toggle reflects what a restart
         // would actually pick up, not just "it's loaded right now".
-        if (row.provider !== 'grok' && Array.isArray(result.plugins)) {
+        if (getProvider(row.provider).capabilities.pluginToggleViaFile && Array.isArray(result.plugins)) {
           const enabledMap = await readEnabledPlugins(row.cwd).catch(() => ({}));
           result.plugins = result.plugins.map((plugin) => {
             if (!plugin.source) return plugin;
@@ -156,10 +155,17 @@ export function registerSessionActionRoutes(router) {
       const body = await readJsonBody(req);
       if (!body.pluginKey) return respondJson(res, 400, { error: 'pluginKey required' });
       try {
-        if (row.provider === 'grok') {
+        const caps = getProvider(row.provider).capabilities;
+        if (caps.pluginToggleViaHandle) {
           await registry.setHandlePluginEnabled(id, body.pluginKey, Boolean(body.enabled));
-        } else {
+        } else if (caps.pluginToggleViaFile) {
           await setPluginEnabled(row.cwd, body.pluginKey, Boolean(body.enabled));
+        } else {
+          // Neither toggle path applies - this provider has no plugin
+          // concept at all (Codex). Previously fell through to the
+          // Claude-only file path, which would have written a Codex plugin
+          // key into .claude/settings.local.json.
+          return respondJson(res, 400, { error: `${row.provider} sessions do not support plugins` });
         }
         return respondJson(res, 200, { enabled: Boolean(body.enabled) });
       } catch (err) {
@@ -186,7 +192,7 @@ export function registerSessionActionRoutes(router) {
       }
     }
 
-    // MVP6 seed (backlog.md): pastes a handshake value onto THIS row -
+    // Pastes a handshake value onto THIS row -
     // "paste from the server's own /api/handshake copy" is the trusted
     // path, but any string is accepted (setSessionHandshake trims it and
     // just compares); a mismatched value is a valid way to explicitly
@@ -251,10 +257,10 @@ export function registerSessionActionRoutes(router) {
       // same signal (throw a clear error) rather than silently no-op-ing.
       const body = await readJsonBody(req);
       const title = typeof body.title === 'string' ? body.title : '';
-      if (!row.claudeSessionId) {
-        return respondJson(res, 409, { error: 'session has no claude session id yet - try again once it has started' });
+      if (!row.providerSessionId) {
+        return respondJson(res, 409, { error: 'session has no provider session id yet - try again once it has started' });
       }
-      // Same MVP5 uniqueness requirement as POST /api/sessions - a rename
+      // Same delegation-name uniqueness requirement as POST /api/sessions - a rename
       // must not collide with another live session's name in the same cwd
       // either. Fast-fail only, same caveat as the create route's own
       // pre-check - registry.setSessionName below is the authoritative,
@@ -269,7 +275,7 @@ export function registerSessionActionRoutes(router) {
       try {
         await registry.setSessionName(id, title.trim() || null);
         try {
-          await setSessionTitle(row.cwd, row.claudeSessionId, title);
+          await setSessionTitle(row.cwd, row.providerSessionId, title);
         } catch {
           // ignore - best-effort persistence, see 'thinking' route's comment
         }
@@ -282,12 +288,31 @@ export function registerSessionActionRoutes(router) {
 
     if (action === 'effort' && req.method === 'POST') {
       const body = await readJsonBody(req);
-      const validEfforts = row.provider === 'claude' ? registry.CLAUDE_EFFORTS : registry.GROK_EFFORTS;
+      const provider = getProvider(row.provider);
+      // provider.efforts is the advertised superset across every model a
+      // provider might use - not every model supports every value in it
+      // (Codex in particular: see provider-registry.js's resolveEfforts).
+      // A provider that can narrow that down for the session's actual
+      // current model does so here, so an unsupported choice is rejected
+      // now instead of accepted here and only failing when the next turn
+      // starts.
+      const validEfforts = provider.resolveEfforts ? await provider.resolveEfforts(row) : provider.efforts;
       if (!validEfforts.includes(body.effort)) {
         return respondJson(res, 400, { error: `invalid effort: ${body.effort}` });
       }
       try {
         await registry.setEffort(id, body.effort);
+        // Persisted (2026-08-24 review fix) so the next brand-new session
+        // started in this cwd inherits it - same "live effect first,
+        // best-effort persist" shape as the 'thinking' route below. A
+        // FORKED session already inherits effort a different way (the
+        // rewind route passes `row.effort` straight into createSession),
+        // so this write only matters for the "new session, same cwd" gap.
+        try {
+          await setSessionDefaults(row.cwd, { effort: body.effort });
+        } catch {
+          // ignore - see 'thinking' route's comment below
+        }
         return respondJson(res, 200, { effort: body.effort });
       } catch (err) {
         return respondJson(res, 500, { error: String(err.message || err) });
@@ -352,7 +377,7 @@ export function registerSessionActionRoutes(router) {
 
     if (action === 'approval-decision' && req.method === 'POST') {
       const body = await readJsonBody(req);
-      // `alwaysAllow` (backlog.md's permission "always allow this tool")
+      // `alwaysAllow` (the permission "always allow this tool" toggle)
       // rides along on the same decision object session.js's resolveApproval
       // already receives - stripped back off before it's ever handed to the
       // SDK as the actual PermissionResult (see that function). `false`/
@@ -360,6 +385,15 @@ export function registerSessionActionRoutes(router) {
       // compatibility and coerced to `'session'`.
       if (![undefined, false, true, 'session', 'project'].includes(body.alwaysAllow)) {
         return respondJson(res, 400, { error: `invalid alwaysAllow: ${body.alwaysAllow}` });
+      }
+      // The UI hides "always in this project" for a provider whose
+      // capabilities.projectPersistentApprovals is false, but defend here
+      // too - Grok's and Codex's own resolveApproval() have no scope
+      // concept beyond turn/session, so a 'project' choice for either
+      // would otherwise silently collapse to session-scoped with no
+      // indication the promised persistence never happened.
+      if (body.alwaysAllow === 'project' && !getProvider(row.provider).capabilities.projectPersistentApprovals) {
+        return respondJson(res, 400, { error: `${row.provider} sessions cannot persist an "always allow" choice across a restart - use "rest of this session" instead` });
       }
       const decision = body.decision === 'allow'
         ? { behavior: 'allow', updatedInput: body.updatedInput, alwaysAllow: body.alwaysAllow }
@@ -392,9 +426,9 @@ export function registerSessionActionRoutes(router) {
           // correctly. A fork is a resume like any other - skipping this
           // left the forked session's own future rewinds targeting the
           // wrong turn.
-          const forkedHistory = row.provider === 'grok'
-            ? await fetchGrokSessionHistory(result.forkedSessionId, row.cwd).catch(() => null)
-            : await fetchSessionHistory(result.forkedSessionId, row.cwd).catch(() => null);
+          const forkedHistory = await getProvider(row.provider)
+            .fetchHistory(result.forkedSessionId, row.cwd)
+            .catch(() => null);
           const forked = registry.createSession({
             cwd: row.cwd,
             resume: result.forkedSessionId,

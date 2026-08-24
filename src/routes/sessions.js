@@ -2,14 +2,12 @@
 // resumable-sessions list for the launcher. Split out of server.js unchanged
 // (behavior-wise) into its own route module.
 import * as registry from '../session-registry.js';
-import { listResumableSessions, isValidCwd } from '../session-launcher.js';
-import { listGrokSessions } from '../grok-launcher.js';
-import { fetchSessionHistory } from '../session-history.js';
-import { fetchGrokSessionHistory } from '../grok-history.js';
+import { isValidCwd } from '../session-launcher.js';
 import { getSessionTitle, attachTitles, readSessionTitles } from '../session-titles.js';
 import { isSafeGrokArg } from '../grok-acp.js';
 import { readSessionDefaults } from '../session-defaults.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
+import { parseProvider } from '../provider-registry.js';
 
 // Applies this cwd's persisted thinking-budget/auto-continue defaults
 // (session-defaults.js) to a freshly created row - both the plain "new
@@ -40,8 +38,18 @@ export async function seedSessionDefaults(row, defaults) {
 
 export function registerSessionRoutes(router) {
   router.get('/api/resumable', async (req, res, url) => {
-    const provider = url.searchParams.get('provider') === 'grok' ? 'grok' : 'claude';
-    const sessions = provider === 'grok' ? await listGrokSessions() : await listResumableSessions();
+    let provider;
+    try {
+      provider = parseProvider(url.searchParams.get('provider'));
+    } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
+    let sessions;
+    try {
+      sessions = await provider.listResumableSessions();
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
     // Joins in any durable title (session-titles.js) a past session was
     // given from the resume list or a prior tab - one settings.local.json
     // read per distinct cwd (capped at listResumableSessions' own 30-session
@@ -70,11 +78,14 @@ export function registerSessionRoutes(router) {
     // shouldn't block starting the session - query() itself is the
     // authority on whether resume actually works, this is just the
     // transcript backfill for the client's initial view.
-    const provider = body.provider === 'grok' ? 'grok' : 'claude';
+    let provider;
+    try {
+      provider = parseProvider(body.provider);
+    } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
     const history = body.resume
-      ? await (provider === 'grok'
-        ? fetchGrokSessionHistory(body.resume, cwd)
-        : fetchSessionHistory(body.resume, cwd)).catch(() => null)
+      ? await provider.fetchHistory(body.resume, cwd).catch(() => null)
       : null;
     const model = typeof body.model === 'string' && body.model ? body.model : undefined;
     if (model && !isSafeGrokArg(model)) {
@@ -86,7 +97,7 @@ export function registerSessionRoutes(router) {
     // when given (currently no client path sends it, but the field exists
     // on createSession - see session-registry.js).
     const name = body.name || (body.resume ? await getSessionTitle(cwd, body.resume).catch(() => null) : null);
-    // MVP5 cross-session delegation (backlog.md) addresses sessions by name
+    // Cross-session delegation addresses sessions by name
     // within a cwd, so names must be unique there. This is a fast-fail only
     // - it avoids wasting the effort validation/history fetch on a request
     // that's doomed anyway - NOT the authoritative check: two concurrent
@@ -101,15 +112,32 @@ export function registerSessionRoutes(router) {
     }
     let effort;
     if (typeof body.effort === 'string' && body.effort) {
-      const validEfforts = provider === 'grok' ? registry.GROK_EFFORTS : registry.CLAUDE_EFFORTS;
+      const validEfforts = provider.efforts;
       if (!validEfforts.includes(body.effort)) {
         return respondJson(res, 400, { error: `invalid effort: ${body.effort}` });
       }
       effort = body.effort;
+    } else {
+      // 2026-08-24 review fix: effort must be a createSession param (unlike
+      // thinking/auto-continue, there's no post-creation setter for a
+      // brand-new session to seed from below) - so unlike those, it has to
+      // be resolved from the persisted default HERE, before createSession,
+      // not via seedSessionDefaults() after. Applied the same regardless of
+      // resume, matching seedSessionDefaults' own unconditional behavior
+      // below - a genuine fork instead carries row.effort forward directly
+      // (session-actions.js's rewind route), bypassing this branch entirely
+      // since it never goes through this create-a-new-row route at all.
+      const persisted = await readSessionDefaults(cwd).catch(() => null);
+      // `provider` is the resolved provider object here (parseProvider's
+      // return, see the branch above), not a string - matches line 115's
+      // own `provider.efforts` access. A stray `provider === 'grok'` string
+      // check merged in from the pre-refactor branch would always be false
+      // here and silently fall back to CLAUDE_EFFORTS for a Grok session.
+      if (persisted?.effort && provider.efforts.includes(persisted.effort)) effort = persisted.effort;
     }
     let row;
     try {
-      row = registry.createSession({ cwd, resume: body.resume, name, model, provider, effort, history });
+      row = registry.createSession({ cwd, resume: body.resume, name, model, provider: provider.id, effort, history });
     } catch (err) {
       if (err.code === 'ERR_NAME_TAKEN') return respondJson(res, 409, { error: err.message });
       throw err;
@@ -124,7 +152,7 @@ export function registerSessionRoutes(router) {
   });
 
   router.get('/api/sessions/:id', async (req, res, url, { id }) => {
-    // MVP3 reconnect: lets a reopened tab (app.js's localStorage-remembered
+    // Reconnect: lets a reopened tab (app.js's localStorage-remembered
     // session) check whether the session it last had open is still live
     // before trying to rejoin it, rather than assuming and failing loudly
     // on the websocket upgrade instead.

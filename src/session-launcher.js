@@ -130,8 +130,7 @@ async function listWindowsDrives() {
 // Origin/Host spoof check applied to every request, which deliberately
 // allows a missing Origin (for curl). Any local process can enumerate the
 // filesystem this way, including other drives via DRIVES_SENTINEL. Low
-// severity for a local dev tool, but don't overstate the protection here -
-// see backlog.md if tightening this is ever prioritized.
+// severity for a local dev tool, but don't overstate the protection here.
 export async function listDirectory(dirPath) {
   if (dirPath === DRIVES_SENTINEL) {
     const drives = await listWindowsDrives();

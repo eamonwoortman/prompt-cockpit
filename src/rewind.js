@@ -1,5 +1,5 @@
 // Rewind = forkSession() for the conversation plus rewindFiles() for the
-// files (plan MVP2). Both operate on a live session's row from the
+// files. Both operate on a live session's row from the
 // registry; the registry decides what happens to the fork (opens it as a
 // new cockpit session) so this module stays a thin, testable wrapper
 // around the SDK calls.

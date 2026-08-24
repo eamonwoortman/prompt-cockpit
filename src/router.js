@@ -47,9 +47,19 @@ export function createRouter() {
       const match = route.regex.exec(url.pathname);
       if (!match) continue;
       const params = {};
-      route.paramNames.forEach((name, i) => {
-        params[name] = decodeURIComponent(match[i + 1]);
-      });
+      try {
+        route.paramNames.forEach((name, i) => {
+          params[name] = decodeURIComponent(match[i + 1]);
+        });
+      } catch (err) {
+        // A malformed percent-escape (e.g. a bare "%") throws URIError from
+        // decodeURIComponent - that's a client mistake, not a server fault,
+        // so answer 400 instead of falling through to server.js's generic
+        // 500 catch-all.
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Malformed URL path' }));
+        return true;
+      }
       await route.handler(req, res, url, params);
       return true;
     }

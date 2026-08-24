@@ -17,7 +17,7 @@ export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl,
     return `${count} session${count === 1 ? '' : 's'}`;
   }
 
-  // MVP6 seed (backlog.md): the per-process delegation handshake secret -
+  // The per-process delegation handshake secret -
   // shown copyable here so a human can paste it into a sibling session's
   // own row (per-row "fix" button below) to mark that session trusted for
   // delegation, or eventually into a remote/SSH'd cockpit once that exists.

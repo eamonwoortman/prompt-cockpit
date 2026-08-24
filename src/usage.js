@@ -1,4 +1,4 @@
-// Cost/token accounting for MVP4's live stats panel. Cost math is ported
+// Cost/token accounting for the live stats panel. Cost math is ported
 // verbatim from claude-realtime-usage/live_watcher_template.html's
 // stepCost() (itself mirroring that project's parse.py cost_for_usage()) -
 // same pricing table, same formula, so the two tools agree on a dollar
@@ -66,8 +66,8 @@ function stampedCostUsd(usage) {
 }
 
 // Running totals for one session, updated as assistant messages arrive on
-// the live stream (session-registry.js's handleMessage) - no 1-turn lag,
-// per plan MVP4. `unpriced` collects any model id missing from both
+// the live stream (session-registry.js's handleMessage) - no 1-turn lag.
+// `unpriced` collects any model id missing from both
 // pricing files so the panel can flag "cost may be understated" instead of
 // silently under-reporting.
 const NO_TOOL_BUCKET = '(no tool call)';

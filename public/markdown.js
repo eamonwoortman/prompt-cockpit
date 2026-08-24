@@ -22,7 +22,14 @@ const STRIKE_RE = /~~([^~]+)~~/;
 // Dest allows one nested (...) so `javascript:alert(1)` is one dest, not a
 // cut at the first `)`. Optional GFM title stays in this capture and is
 // stripped by parseLinkDestination.
-const LINK_DEST_RE = /(?:<[^>]+>|(?:[^()]+|\([^()]*\))+)/;
+// The alternation body is a single `(?:[^()]|\([^()]*\))*` rather than
+// `(?:[^()]+|\([^()]*\))+` - the "+ of an alternation whose branches
+// overlap on plain characters" shape is classic ReDoS: on a truncated dest
+// (streaming text with `[label](https://...` and no closing `)` yet) the
+// engine backtracks through every split of the plain-char run before
+// failing, cost doubling per character. A streamed reply hits this on
+// every link mid-flight, so this must stay linear.
+const LINK_DEST_RE = /(?:<[^>]+>|(?:[^()]|\([^()]*\))*)/;
 const IMAGE_RE = new RegExp(`!\\[([^\\]]*)\\]\\((${LINK_DEST_RE.source})\\)`);
 const LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\((${LINK_DEST_RE.source})\\)`);
 // GFM backslash-escape: a backslash before ASCII punctuation is a literal

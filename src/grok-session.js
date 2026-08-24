@@ -271,11 +271,19 @@ export function startGrokSession({
   }
 
   function pushInput(text) {
-    if (closed) return;
+    // `null` (not `undefined`) specifically means "did not enqueue anything
+    // - no result will ever come for this call". session-registry.js's
+    // pushTurn checks for this exact sentinel to decide whether to add a
+    // pendingResultTags entry; `undefined` stays the ordinary "pushed, but
+    // grok has no queueId to report" return for the success path below, so
+    // the two must not be conflated (see the 2026-08-24 review finding #2 -
+    // both of these early-returns used to fall through pushTurn silently,
+    // leaving a permanent FIFO entry nothing would ever shift off).
+    if (closed) return null;
     // Same body already queued or running: a second Enter (or Grok treating
     // mid-turn session/prompt as queue+send-now plus our chained retry)
     // must not mint another user turn.
-    if (openPromptText === text && pendingTurns > 0) return;
+    if (openPromptText === text && pendingTurns > 0) return null;
     const wireMessage = {
       type: 'user',
       message: { role: 'user', content: text },
@@ -390,7 +398,7 @@ export function startGrokSession({
     return { ...result, newSessionId: childId };
   }
 
-  // Queue-pane operations (backlog.md) aren't meaningful here yet: grok
+  // Queue-pane operations aren't meaningful here yet: grok
   // sessions serialize pushInput() calls through `promptTail` (a plain
   // promise chain), not a pull-based queue a turn can sit "in" and be
   // inspected/reordered - there's nothing to list. Stubbed rather than

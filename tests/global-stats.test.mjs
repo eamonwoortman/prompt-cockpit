@@ -85,6 +85,38 @@ test('range=7d drops sessions and tokens outside the window', () => {
   assert.equal(stats.inputTokens, 5);
 });
 
+// 2026-08-24 review fix: longestSessionMs used to come from the whole
+// file's firstTs/lastTs even under a range filter - a session with one
+// message inside the window but a real span going back a month reported
+// that full month as "longest session". It must be bounded by the range.
+test('range=7d bounds longestSessionMs to the in-range messages, not the whole file span', () => {
+  const now = Date.parse('2026-08-20T12:00:00Z');
+  const scans = [
+    {
+      // File spans a full month, but only its LAST message (a few minutes
+      // before `now`) falls inside the 7-day window.
+      firstTs: now - 30 * 86400000,
+      lastTs: now - 1 * 3600000,
+      rows: [
+        { ts: now - 30 * 86400000, model: 'm', usage: { input_tokens: 1, output_tokens: 1 } },
+        { ts: now - 1 * 3600000, model: 'm', usage: { input_tokens: 1, output_tokens: 1 } },
+      ],
+    },
+  ];
+  const stats = aggregateGlobalStats(scans, { range: '7d', now });
+  assert.equal(stats.sessions, 1);
+  assert.equal(stats.longestSessionMs, 0, 'only one message is in-range, so its session span within the window is 0, not the whole-file month');
+});
+
+test('range=all still uses the whole-file span for longestSessionMs (no filtering needed)', () => {
+  const now = Date.parse('2026-08-20T12:00:00Z');
+  const scans = [
+    { firstTs: now - 30 * 86400000, lastTs: now - 1 * 3600000, rows: [{ ts: now - 1 * 3600000, model: 'm', usage: { input_tokens: 1, output_tokens: 1 } }] },
+  ];
+  const stats = aggregateGlobalStats(scans, { range: 'all', now });
+  assert.equal(stats.longestSessionMs, 30 * 86400000 - 3600000);
+});
+
 test('computeGlobalStats reads real transcript files across multiple projects', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'cockpit-stats-'));
   try {

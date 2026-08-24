@@ -110,6 +110,7 @@ test('concurrent addAllowRule and setSessionDefaults on the same cwd do not clob
       maxThinkingTokens: 4096,
       thinkingDisplay: 'summarized',
       autoContinue: true,
+      effort: null,
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });

@@ -1,4 +1,4 @@
-// Visible input queue (backlog.md) - docked above compose, same spot/
+// Visible input queue - docked above compose, same spot/
 // pattern as task-panel.js. Unlike task-panel.js there's no toggle: the
 // queue is either empty (session idle or nothing typed ahead) or it isn't,
 // and an empty queue has nothing worth a permanent chrome element for - the

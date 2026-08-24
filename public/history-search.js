@@ -1,4 +1,4 @@
-// Ctrl+R fuzzy search over prompt-history.js's persisted list (backlog.md) -
+// Ctrl+R fuzzy search over prompt-history.js's persisted list -
 // shell reverse-search convention. Same dropdown shape as model-picker.js
 // (capture-phase keydown so it runs before compose.js's own Enter handler,
 // mousedown+preventDefault on each row so a click doesn't blur the textarea

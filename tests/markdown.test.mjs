@@ -45,6 +45,12 @@ test('renderMarkdown strips whitespace/tab/newline before checking the link sche
   assert.equal(html("[x](java\tscript:document.title='p')"), '<p>x</p>');
 });
 
+test('renderMarkdown does not hang on an unterminated link mid-stream (ReDoS regression)', () => {
+  const start = Date.now();
+  html('See [the docs](https://example.com/a/very/long/path/to/page/that/never/closes');
+  assert.ok(Date.now() - start < 100, 'unterminated link destination must fail fast, not backtrack exponentially');
+});
+
 test('renderMarkdown allows mailto: links', () => {
   assert.equal(
     html('[mail](mailto:a@b.com)'),

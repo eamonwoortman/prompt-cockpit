@@ -19,9 +19,16 @@
 // origin session's model forward via its own createSession `model` param
 // (see server.js's rewind/fork route), so there was never a gap for it the
 // way there was for thinking budget/auto-continue (backlog's B6).
+//
+// `effort` (2026-08-24 review fix) used to be the odd one out: a fork
+// already carried it forward directly via createSession's own `effort`
+// param (session-actions.js's rewind route passes `row.effort`), same as
+// model - but a brand-new (non-fork) session in the same cwd had nothing
+// to inherit from, since the 'effort' route never wrote here the way
+// 'thinking' does. Tracked here now so both paths behave the same way.
 import { readSettingsFile, updateSettingsFile } from './settings-file.js';
 
-const EMPTY_DEFAULTS = { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false };
+const EMPTY_DEFAULTS = { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null };
 
 export async function readSessionDefaults(cwd) {
   const settings = await readSettingsFile(cwd);

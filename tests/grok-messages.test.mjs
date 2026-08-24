@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction, joinStreamText, coalesceAssistantMessages } from '../src/grok-messages.js';
+import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction, joinStreamText, coalesceAssistantMessages, createFenceTracker } from '../src/grok-messages.js';
 
 test('agent_message_chunk becomes an assistant text message', () => {
   const msgs = acpUpdateToMessages({
@@ -175,6 +175,27 @@ test('joinStreamText keeps newlines inside a fenced code body', () => {
       + 'd--h-- 2026-08-21 12:45:03 AM        .git\n'
       + '```\nEight files.\n',
   );
+});
+
+test('joinStreamText with a fence tracker matches the untracked result across every case above', () => {
+  const cases = [
+    ['The\n', 'user\n'], ['The user\n', 'wants'], ['para 1\n\n', 'para 2'], ['Hello', ' world'],
+  ];
+  for (const [a, b] of cases) {
+    assert.equal(joinStreamText(a, b, createFenceTracker()), joinStreamText(a, b));
+  }
+  // Same buffer, growing chunk by chunk with ONE tracker reused throughout -
+  // the real usage pattern (stream-view.js/grok-messages.js/
+  // session-registry.js each own one tracker per running buffer).
+  const chunks = ['Listed files:\n\n', '```\n', 'Mode   LastWriteTime\n', '----   -------------\n', '```\n', 'Done.\n'];
+  const tracker = createFenceTracker();
+  let tracked = '';
+  let untracked = '';
+  for (const chunk of chunks) {
+    tracked = joinStreamText(tracked, chunk, tracker);
+    untracked = joinStreamText(untracked, chunk);
+    assert.equal(tracked, untracked);
+  }
 });
 
 test('coalesceAssistantMessages keeps markdown structure in streamed text', () => {

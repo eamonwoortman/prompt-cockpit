@@ -1,5 +1,5 @@
-// Both functions here ARE the fallback path for MVP2 (file_suggestions and
-// get_workspace_diff are protocol-only, not public - see plan Spike B), so
+// Both functions here ARE the fallback path (file_suggestions and
+// get_workspace_diff are protocol-only, not public), so
 // these tests exercise the real behavior, not a degraded mode of it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

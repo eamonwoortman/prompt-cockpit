@@ -49,7 +49,7 @@
       <button id="browseBtn" title="Browse for a project folder">Browse</button>
     </div>
     <div class="start-row">
-      <input id="startNameInput" type="text" placeholder="Name (e.g. Claude)" title="MVP5: lets another session /ask this one by name" />
+      <input id="startNameInput" type="text" placeholder="Name (e.g. Claude)" title="Lets another session /ask this one by name" />
       <select id="startModelSelect">
         <option value="">Default model</option>
         <option value="sonnet">Sonnet</option>
@@ -123,7 +123,7 @@
       <span class="detail-pane-header-label">All sessions</span>
       <button id="sessionListCloseBtn" title="Close">✕</button>
     </div>
-    <!-- MVP6 seed (backlog.md): this process's delegation handshake secret -
+    <!-- This process's delegation handshake secret -
          copy it and paste into a sibling session's own Settings panel (or,
          eventually, an SSH'd remote cockpit's) to mark that session trusted
          for /ask delegation. Pairing is manual-only for now - see
@@ -173,8 +173,8 @@
         <button id="approveBtn" title="Approve and continue with this plan">Accept this</button>
         <button id="rejectBtn" title="Reject this plan and send feedback">No</button>
       </div>
-      <!-- Plan review (backlog.md's "preview + comment/revise, not just
-           approve/reject" - Grok CLI's /view-plan equivalent). Shown only
+      <!-- Plan review ("preview + comment/revise, not just approve/reject" -
+           Grok CLI's /view-plan equivalent). Shown only
            for ExitPlanMode (showApprovalRequest); a plain Bash/Write
            approval has no use for either field. Two independent verbs, not
            one text box: "Request changes" reuses the existing deny path
@@ -282,7 +282,7 @@
          click-to-assert rather than automatic: only the human watching the
          actual CLI output can know nothing is really running. -->
     <button id="pendingTurnsBadge" style="display:none" title="Turns cockpit still thinks are in flight. Click if nothing is actually running to force it back to idle."></button>
-    <!-- Cancel the running turn (backlog.md) - lives right next to the
+    <!-- Cancel the running turn - lives right next to the
          |\-/ activity spinner it's cancelling, not down in composeSendGroup
          next to Send anymore (too easy to fat-finger right after Enter).
          Same row height as stateLabel/statsPanel, not the tall #compose
@@ -324,8 +324,8 @@
     </div>
     <ul id="commandSuggestions"></ul>
     <ul id="modelSuggestions"></ul>
-    <!-- Persisted prompt history + fuzzy search (backlog.md, history-search.js)
-         - Ctrl+R while focused in composeInput, shell reverse-search
+    <!-- Persisted prompt history + fuzzy search (history-search.js) - Ctrl+R
+         while focused in composeInput, shell reverse-search
          convention. Reuses #commandSuggestions/#modelSuggestions' own CSS
          (.cmd-name/.cmd-desc, dropdown positioning) under its own id, same
          as modelSuggestions already does under commandSuggestions'. -->
@@ -434,7 +434,7 @@
             <span class="hint" title="Auto-denies Bash tool calls containing a Co-Authored-By trailer or a 'Generated with Claude Code' line. 'git commit / gh pr' only checks git commit and gh pr create/edit invocations; 'anywhere' checks every Bash command for either phrase. Project-scoped (settings.local.json), takes effect on this session's next matching Bash call.">?</span>
           </label>
           <div id="gitGuardError" class="mcp-error" style="display: none;"></div>
-          <!-- MVP6 seed (backlog.md): per-session delegation handshake -
+          <!-- Per-session delegation handshake -
                THIS session's own trust status plus a paste-in field to
                re-sync it, scoped to this session's own token (unlike the
                server-wide copy shown in the "All sessions" pane, which has

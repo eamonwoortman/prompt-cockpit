@@ -1,5 +1,5 @@
-// Append-only, sequence-numbered, byte-capped per-session event log (plan
-// MVP3: "reconnect, designed rather than assumed"). Only the durable
+// Append-only, sequence-numbered, byte-capped per-session event log - built
+// so reconnect is designed rather than assumed. Only the durable
 // `sdk:message` stream goes through this - `cockpit:state`/
 // `cockpit:approval-request` are current-snapshot broadcasts (registry.js
 // resends the live snapshot on every attach) and would be meaningless to

@@ -21,8 +21,44 @@ import { tmpdir } from 'node:os';
 
 const execFileAsync = promisify(execFile);
 const TIMEOUT_MS = 20_000;
+// /api/account-limits (server.js) has no session token to gate it - like
+// /api/browse/etc it relies on Origin/Host allowlisting only (an
+// operator-level token to close that gap is still an open idea). Unlike
+// those read-only routes, this one spawns a real subprocess on every GET
+// with no rate limit of its own - the worst route in the app to leave open
+// in that sense (2026-08-24 review). A short single-flight+TTL cache here
+// means N rapid/concurrent
+// requests (a buggy client retry loop, or literally anyone else on
+// 127.0.0.1) collapse into at most one `claude -p` spawn per window,
+// without changing the on-demand "own button, not polled" contract the
+// module comment above already describes.
+const CACHE_TTL_MS = 30_000;
+let cached = null; // { result, atMs }
+let inFlight = null; // Promise, shared by concurrent callers while one spawn is running
+
+// Test-only: clears the module-level cache/in-flight state between test
+// cases (same pattern as session-registry.js's own `_reset`) - without it,
+// a cached result from one test's fake `claudeBin` would leak into the
+// next test's assertions, since the cache isn't (and in production doesn't
+// need to be) keyed by claudeBin.
+export function _resetCacheForTests() {
+  cached = null;
+  inFlight = null;
+}
 
 export async function fetchAccountLimits(claudeBin = 'claude') {
+  if (cached && Date.now() - cached.atMs < CACHE_TTL_MS) return cached.result;
+  if (inFlight) return inFlight;
+  inFlight = doFetch(claudeBin).then((result) => {
+    cached = { result, atMs: Date.now() };
+    return result;
+  }).finally(() => {
+    inFlight = null;
+  });
+  return inFlight;
+}
+
+async function doFetch(claudeBin) {
   let stdout;
   try {
     ({ stdout } = await execFileAsync(

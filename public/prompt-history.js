@@ -1,4 +1,4 @@
-// Persisted prompt history (backlog.md) - localStorage-backed, keyed per
+// Persisted prompt history - localStorage-backed, keyed per
 // cwd since a prompt typed in one project is rarely useful in a different
 // one. Single source of truth for both compose.js's Up/Down recall (already
 // existed, in-memory only until now, lost on every reload) and

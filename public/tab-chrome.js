@@ -1,4 +1,4 @@
-// Browser tab title + favicon (plan MVP3): reflects session activity so an
+// Browser tab title + favicon: reflects session activity so an
 // unfocused tab is scannable from the tab strip instead of needing a
 // terminal-bell substitute, plus a user-settable tab name that stops
 // getting overwritten once set (`userNamed`).

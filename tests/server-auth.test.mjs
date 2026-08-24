@@ -1,6 +1,5 @@
-// Exercises the auth surface from plan Decisions and the MVP1 verification
-// checklist: Origin validation and per-session token, both on the ws
-// upgrade path. Does not create a real session (that would spawn the CLI) -
+// Exercises the auth surface: Origin validation and per-session token, both
+// on the ws upgrade path. Does not create a real session (that would spawn the CLI) -
 // see tests/integration.manual.mjs for the spawn-a-real-session path.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -114,6 +113,15 @@ test('GET /api/history/:sessionId/markdown on an unknown session id returns an e
   assert.match(body, new RegExp(`^# Session transcript - ${sessionId}`));
 });
 
+// 2026-08-24 review fix: a malformed percent-escape in a :param URL segment
+// (decodeURIComponent throws URIError) used to propagate uncaught out of
+// router.js's route match, landing in server.js's generic catch-all as a
+// bare 500 - a client typo should be a 400, not "the server broke".
+test('a malformed percent-escape in a route param returns 400, not a generic 500', async () => {
+  const res = await fetch(`${ORIGIN}/api/history/%/markdown`);
+  assert.equal(res.status, 400);
+});
+
 test('POST /api/sessions rejects a cwd that is not a directory', async () => {
   const res = await fetch(`${ORIGIN}/api/sessions`, {
     method: 'POST',
@@ -140,6 +148,41 @@ test('POST /api/sessions rejects a model or grok effort that is not a safe token
   });
   assert.equal(badEffort.status, 400);
   assert.match((await badEffort.json()).error, /invalid effort/);
+});
+
+test('provider routes preserve omitted-Claude behavior and reject explicit unknown providers', async () => {
+  const cwd = process.cwd();
+  const create = await fetch(`${ORIGIN}/api/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cwd, provider: 'not-a-provider' }),
+  });
+  assert.equal(create.status, 400);
+  assert.match((await create.json()).error, /unknown provider/);
+
+  for (const endpoint of [
+    '/api/resumable?provider=not-a-provider',
+    '/api/history/test-session?provider=not-a-provider',
+    '/api/history/test-session/markdown?provider=not-a-provider',
+  ]) {
+    const response = await fetch(`${ORIGIN}${endpoint}`);
+    assert.equal(response.status, 400, endpoint);
+    assert.match((await response.json()).error, /unknown provider/);
+  }
+});
+
+test('GET /api/providers keeps provider ids and includes descriptor metadata', async () => {
+  const response = await fetch(`${ORIGIN}/api/providers`);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.ok(Array.isArray(body.providers));
+  assert.ok(Array.isArray(body.providerDetails));
+  assert.deepEqual(body.providerDetails.map(({ id }) => id), body.providers);
+  for (const detail of body.providerDetails) {
+    assert.equal(typeof detail.label, 'string');
+    assert.equal(typeof detail.capabilities, 'object');
+    assert.ok(Array.isArray(detail.launch.efforts));
+  }
 });
 
 test('a request with a foreign Host is rejected, even with the right Origin', async () => {
@@ -398,6 +441,23 @@ test('POST /api/sessions/:id/approval-decision with alwaysAllow: "project" persi
   }
 });
 
+test('POST /api/sessions/:id/approval-decision with alwaysAllow: "project" on a Codex session is rejected, not silently downgraded', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, provider: 'codex', startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/approval-decision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ requestId: 'req-1', decision: 'allow', alwaysAllow: 'project' }),
+    });
+    assert.equal(res.status, 400);
+    assert.deepEqual(await readAllowRules(cwd), []); // no rule written for a rejected request
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('POST /api/sessions/:id/approval-decision with alwaysAllow: "session" does not persist anything', async () => {
   registry._reset();
   const cwd = await makeTmpCwd();
@@ -555,6 +615,24 @@ test('POST /api/sessions/:id/plugin-enabled on a grok session uses grok plugin, 
   }
 });
 
+test('POST /api/sessions/:id/plugin-enabled on a codex session is rejected instead of writing settings.local.json', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, provider: 'codex', startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/plugin-enabled`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ pluginKey: 'formatter@anthropic-tools', enabled: true }),
+    });
+    assert.equal(res.status, 400);
+    const settingsFile = settingsPath(cwd);
+    await assert.rejects(readFile(settingsFile), /ENOENT/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test('POST /api/sessions/:id/plugin-enabled requires pluginKey and persists the toggle', async () => {
   registry._reset();
   const cwd = await makeTmpCwd();
@@ -696,8 +774,8 @@ test('POST /api/sessions/:id/auto-continue has already persisted to disk by the 
 // test above only exercises /mode - it proves the shared checkToken() gate
 // in handleSessionRoute works, but every route added since (model/thinking/
 // mcp-toggle/mcp-reconnect/reload-plugins/plugin-enabled) was only ever
-// exercised with a valid token (backlog.md: no 401 coverage on these
-// specifically). Parametrized here rather than six near-identical tests,
+// exercised with a valid token, with no 401 coverage on these specifically.
+// Parametrized here rather than six near-identical tests,
 // since the thing being proven - "this route is behind the same gate" - is
 // identical for all six; a bad token never reaches the route's own body
 // parsing or registry call either way.
@@ -734,7 +812,7 @@ for (const { action, body } of NEWER_ROUTES) {
   });
 }
 
-// MVP5 cross-session delegation (backlog.md) - names must be unique within
+// Cross-session delegation - names must be unique within
 // a cwd so `/ask <Name>: ...` addressing is unambiguous. Only the 409 path
 // is exercised over real HTTP: it's caught before registry.createSession
 // ever runs, so no real CLI process gets spawned. The success path (a
@@ -801,7 +879,7 @@ test('a delegate ws payload with an unknown target name gets a cockpit:delegate-
   }
 });
 
-// MVP6 seed (backlog.md): the global handshake routes have no session token
+// The global handshake routes have no session token
 // (there's no one session they belong to - see routes/system.js's own
 // comment), so this just proves Origin/Host-allowed requests reach them and
 // get a real value back, same coverage level as the rest of this file gives

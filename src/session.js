@@ -7,7 +7,7 @@ import { readGitGuardMode, commandTripsGuard } from './git-commit-guard.js';
 
 // A minimal AsyncIterable<SDKUserMessage> that supports pushing values in
 // from the outside. query() pulls from this for as long as the session lives.
-// Also the backing store for the visible input queue (backlog.md): `pending`
+// Also the backing store for the visible input queue: `pending`
 // only ever holds entries pushed while nothing was already waiting on
 // next() - i.e. exactly the messages queued up behind a still-running turn,
 // which is also exactly what a "queue pane" should show. A push that lands
@@ -45,6 +45,14 @@ function createInputQueue() {
         resolve({ value: undefined, done: true });
       }
     },
+    // pushInput needs this BEFORE it decides whether to push - push()
+    // already no-ops on a closed queue, but by then pushInput has already
+    // committed to returning a queueId and incrementing pendingTurns,
+    // which is exactly the desync session-registry.js's pendingResultTags
+    // FIFO relies on not happening (see pushTurn's comment there).
+    isClosed() {
+      return closed;
+    },
     // Tracked entries only (id !== null) - what the client's queue panel
     // renders. Order is the order they'll actually run in.
     list() {
@@ -56,7 +64,7 @@ function createInputQueue() {
       pending.splice(i, 1);
       return true;
     },
-    // "Send now" (backlog.md) - moves one queued entry to the front so it's
+    // "Send now" - moves one queued entry to the front so it's
     // what the SDK pulls next. Doesn't interrupt anything itself; the caller
     // (session.js's sendNow) still has to abort whatever's currently running
     // or this just becomes "runs next after the current turn" instead.
@@ -110,7 +118,7 @@ function createInputQueue() {
  * Start a session. Returns a handle with `pushInput(text)`, `close()`,
  * `interrupt()`, `setMode(mode)`, `resolveApproval(requestId, decision)`,
  * and the queue-pane operations `listQueue()`/`removeQueued(queueId)`/
- * `reorderQueue(queueIds)`/`sendNow(queueId)` (backlog.md). `onMessage`
+ * `reorderQueue(queueIds)`/`sendNow(queueId)`. `onMessage`
  * fires for every SDK message, `onStateChange` for coarse
  * idle/running/closed/error transitions, `onApprovalRequest` when any tool
  * needs a one-off client-side decision (default/plan mode, any tool the
@@ -121,7 +129,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const pendingApprovals = new Map(); // requestId -> { resolve(PermissionResult), toolName }
-  // MCP "needs-auth" badge (backlog.md) - serverName -> { url, message,
+  // MCP "needs-auth" badge - serverName -> { url, message,
   // elicitationId }. Populated by onElicitation below when an MCP server
   // asks for URL-mode auth; drained when the matching `elicitation_complete`
   // system message arrives (see the for-await loop below). Exposed via
@@ -130,7 +138,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   // equivalent field of its own - McpServerStatus only carries
   // name/status/error, not how to actually resolve 'needs-auth'.
   const mcpAuthPending = new Map();
-  // Permission "always allow this tool" (backlog.md), per-tool-name only
+  // Permission "always allow this tool", per-tool-name only
   // (no input/cwd pattern matching - still flagged as needing its own
   // design call, unattempted here). Two scopes share this same in-memory
   // set so *this* session gets the immediate effect either way: 'session'
@@ -175,13 +183,13 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
       // not launched with --dangerously-skip-permissions", which the
       // client silently swallowed, looking exactly like the mode button
       // "getting stuck". Needed unconditionally since mode cycling must
-      // reach all six PermissionMode values (plan MVP2) and this can only
+      // reach all six PermissionMode values and this can only
       // be granted at session start, not mid-session.
       allowDangerouslySkipPermissions: true,
-      // Confirmed live against a real session while building MVP2:
+      // Confirmed live against a real session:
       //   - no canUseTool configured at all: the CLI auto-denies any tool
       //     that needs a decision (no hang, no prompt - safe by default,
-      //     which is what MVP1 ran on for every tool call).
+      //     which is how earlier versions of this handled every tool call).
       //   - permissionMode 'acceptEdits'/'bypassPermissions': the CLI
       //     resolves permission itself and never calls this callback.
       //   - permissionMode 'default'/'plan': every gated tool call routes
@@ -211,7 +219,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
           onApprovalRequest?.({ requestId, toolName, input, title: opts.title, displayName: opts.displayName });
         });
       },
-      // MCP "needs-auth" badge (backlog.md). Two elicitation modes exist;
+      // MCP "needs-auth" badge. Two elicitation modes exist;
       // only 'url' (the OAuth-style "open this link to authorize" case) is
       // handled - 'form' would need real dynamic-schema form rendering the
       // panel doesn't have, so it's declined outright rather than left to
@@ -368,6 +376,15 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   })();
 
   function pushInput(text) {
+    // A push after the queue is closed (turn loop already exited, see the
+    // inputQueue.close() calls above) would never be consumed - no `result`
+    // will ever come for it. Returning null here (instead of proceeding to
+    // mint a queueId, echo it, and increment pendingTurns as if it were
+    // live) is what lets pushTurn/session-registry.js's pendingResultTags
+    // stay in lockstep with actual results - see finding #2 in the
+    // 2026-08-24 review: this used to fall through and leave a permanent
+    // FIFO entry nothing would ever shift off correctly.
+    if (inputQueue.isClosed()) return null;
     // The wire message stays exactly this shape - nothing extra. Confirmed
     // live (reproducibly) that adding a client-supplied `uuid` makes the
     // CLI treat the message as non-user-sourced: the model refused it
@@ -383,7 +400,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
       parent_tool_use_id: null,
     };
     // Tracked so a turn queued up behind a still-running one is addressable
-    // from the queue pane (backlog.md) - listQueue/removeQueued/reorderQueue/
+    // from the queue pane - listQueue/removeQueued/reorderQueue/
     // sendNow below all key off this id, not the wire message (which has no
     // stable id of its own - see the comment on user_message_uuid above).
     const queueId = randomUUID();
@@ -402,7 +419,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
     onMessage({ ...wireMessage, turnIndex: turnCounter, queueId });
     onStateChange('running');
     if (queued) onQueueChange?.(inputQueue.list());
-    // MVP5 cross-session delegation (backlog.md): the registry needs this to
+    // Cross-session delegation: the registry needs this to
     // correlate a specific pushed turn with its eventual `result` message
     // (and with later queue-remove/-reorder/-send-now calls) - positional
     // FIFO alone breaks the moment removeQueued/reorderQueue touch a queue
@@ -411,7 +428,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
     return queueId;
   }
 
-  // Queue pane operations (backlog.md) - all no-ops (false/[]) once the
+  // Queue pane operations - all no-ops (false/[]) once the
   // queueId in question has already been dequeued and started running,
   // which is the normal race a slow double-click loses to; nothing more to
   // do about it, the turn is just already underway.
@@ -439,7 +456,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
 
   // Moves `queueId` to the front, then interrupts whatever's currently
   // running so the SDK's next pull grabs it - matches Grok CLI's
-  // Ctrl+Enter/empty-Enter "send now" (backlog.md). If nothing is actually
+  // Ctrl+Enter/empty-Enter "send now". If nothing is actually
   // running (queue can only be non-empty while something is - see
   // createInputQueue's module comment), the interrupt is a documented no-op
   // and this just reorders, safe either way.

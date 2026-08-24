@@ -6,7 +6,7 @@
 // The SDK types isAutoCompactEnabled/autoCompactThreshold (sdk.d.ts), but
 // autoCompactThreshold's units relative to `percentage`'s confirmed 0-100
 // scale are undocumented and unconfirmed anywhere in this codebase or its
-// tests - see backlog.md's note on this. Rather than gate the feature
+// tests. Rather than gate the feature
 // behind that missing confirmation, or risk silently trusting a
 // wrong-scale value, this module tries the plausible encodings (fraction,
 // percent, absolute token count) and rejects anything that lands outside a

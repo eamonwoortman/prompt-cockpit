@@ -5,12 +5,13 @@ import { defaultScreenshotDir } from '../os-defaults.js';
 import { listDirectory } from '../session-launcher.js';
 import { respondJson } from '../http-utils.js';
 import { availableProviders } from '../provider-availability.js';
+import { providerDetails } from '../provider-registry.js';
 import { getHandshakeSecret, regenerateHandshakeSecret } from '../session-registry.js';
 import { computeGlobalStats } from '../global-stats.js';
 import { fetchAccountLimits } from '../account-limits.js';
 
 export function registerSystemRoutes(router) {
-  // MVP6 seed (backlog.md): the per-process delegation handshake secret -
+  // The per-process delegation handshake secret -
   // see session-registry.js's own module-level comment for the full
   // rationale. No session token gate (there's no one session it belongs
   // to), same as /api/browse below - Host/Origin allowlisting is the actual
@@ -35,7 +36,11 @@ export function registerSystemRoutes(router) {
   // lets the launcher hide a provider's UI (e.g. the Grok dropdown) when
   // its CLI isn't installed on this machine.
   router.get('/api/providers', async (req, res) => {
-    return respondJson(res, 200, { providers: await availableProviders() });
+    const providers = await availableProviders();
+    return respondJson(res, 200, {
+      providers,
+      providerDetails: providers.map(providerDetails),
+    });
   });
 
   router.get('/api/browse', async (req, res, url) => {

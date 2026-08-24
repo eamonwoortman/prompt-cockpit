@@ -105,6 +105,7 @@ test('concurrent setSessionTitle and setSessionDefaults/setPluginEnabled on the 
       maxThinkingTokens: 4096,
       thinkingDisplay: 'summarized',
       autoContinue: false,
+      effort: null,
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });

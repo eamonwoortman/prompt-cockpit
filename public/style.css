@@ -621,7 +621,7 @@
     margin: 0;
     font-size: 12px;
   }
-  /* Plan review (backlog.md) - a plan is worth an actual read, not the same
+  /* Plan review - a plan is worth an actual read, not the same
      120px peephole a Bash/Write JSON blob gets. Toggled in showApprovalRequest. */
   #approvalPlain pre.plan-detail { max-height: 320px; }
   /* Decision controls always start flush left under the message, not

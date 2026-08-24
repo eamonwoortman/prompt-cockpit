@@ -1,6 +1,6 @@
 # Prompt Cockpit
 
-A local browser UI for driving a Claude Code or Grok session against a project folder. You pick a provider and a directory, type in the compose box, and the cockpit renders the stream, tool calls, diffs, and a live cost/token strip. It talks to the CLIs over their APIs. It does not wrap a terminal.
+A local browser UI for driving a Claude Code, Grok, or Codex session against a project folder. You pick a provider and a directory, type in the compose box, and the cockpit renders the stream, tool calls, diffs, and a live cost/token strip. It talks to the CLIs over their APIs. It does not wrap a terminal.
 
 ![Prompt Cockpit session view with live cost graph](docs/screenshot.jpg)
 
@@ -10,6 +10,7 @@ A local browser UI for driving a Claude Code or Grok session against a project f
 - At least one logged-in coding agent on this machine:
   - **Claude**: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, then `claude login`
   - **Grok**: the `grok` binary on `PATH` (or set `GROK_BIN`), then `grok login`
+  - **Codex**: the [Codex CLI](https://developers.openai.com/codex/cli/) on `PATH` (or set `CODEX_BIN`) and signed in
 - The cockpit does not store API keys. It drives whatever login the CLI already has.
 
 The server binds to `127.0.0.1` only. Do not expose it to the network.
@@ -25,7 +26,7 @@ Open [http://localhost:4317](http://localhost:4317). Set `PORT` if 4317 is taken
 
 ## First session
 
-1. Choose **Claude** or **Grok** in the launcher.
+1. Choose **Claude**, **Grok**, or **Codex** in the launcher.
 2. Point it at a project folder (type a path, pick a recent one, or Browse).
 3. Optionally name the session (needed later if another session will `/ask` it) and pick a model. Leave the model on Default to use the CLI's usual one.
 4. Click **Start**.
@@ -33,7 +34,7 @@ Open [http://localhost:4317](http://localhost:4317). Set `PORT` if 4317 is taken
 
 **Resume** lists past sessions for the selected provider. **Start** resumes live; **View** opens the transcript read-only.
 
-A Claude tab and a Grok tab can run at the same time. A session keeps the provider it was started with. You cannot open a Claude transcript as a Grok session, or the other way around.
+Tabs using different providers can run at the same time. A session keeps the provider it was started with, and transcripts can only be resumed by their original provider.
 
 ## Once you are in a session
 

@@ -2,7 +2,7 @@
 // live Haiku session, so it costs a few cents and takes a few seconds.
 // NOT run by `npm test`. Run by hand: `node tests/integration.manual.mjs`.
 //
-// Covers the MVP1 verification items that a stubbed unit test can't:
+// Covers the verification items that a stubbed unit test can't:
 //   - system/init actually arrives in streaming-input mode (see the
 //     priming-sentinel comment in src/session.js - this is the regression
 //     test for that fix)

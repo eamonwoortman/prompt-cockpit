@@ -1,5 +1,5 @@
-// Unit tests for the durable per-session event log (plan MVP3: reconnect,
-// designed rather than assumed).
+// Unit tests for the durable per-session event log - built so reconnect is
+// designed rather than assumed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createEventLog, append, replay } from '../src/event-log.js';
