@@ -14,7 +14,7 @@
     <span id="sessionLabelError" class="mcp-error" style="display:none"></span>
     <!-- Model + reasoning-effort/thinking-budget in use, live for the whole
          session (not just the Settings modal) - see applyModelBadge in
-         app.js. Click reopens Settings on the General tab, same spot these
+         app.js. Click reopens Settings on the Display tab, same spot these
          values are actually changed from, rather than duplicating the
          controls up here. Hidden until a session is live (returnToLauncher
          resets it), same pattern as diffBtn/closeSessionBtn. -->
@@ -34,6 +34,11 @@
     <button id="newSessionTabBtn" title="Open a new tab to start another session">+ New tab</button>
     <button id="settingsBtn" style="display:none" title="Settings">⚙</button>
   </header>
+  <div id="operatorGate" style="display:none">
+    <span>Open the URL printed in the server console, or paste the operator token:</span>
+    <input id="operatorTokenInput" type="password" autocomplete="off" spellcheck="false" />
+    <button type="button" id="operatorTokenSave">Save</button>
+  </div>
 
   <div id="launcher">
     <select id="startProviderSelect" title="Which coding agent to use">
@@ -144,6 +149,7 @@
     <div id="approvalPlain">
       <div id="approvalMessageRow">
         <strong id="approvalHeading"></strong>
+        <span id="approvalQueueCount" style="display:none"></span>
         <pre id="approvalDetail"></pre>
       </div>
       <!-- Decision row - always-allow scope + Accept/No - kept on its own
@@ -323,6 +329,7 @@
       <ul id="fileSuggestionsFiles"></ul>
     </div>
     <ul id="commandSuggestions"></ul>
+    <ul id="askSuggestions"></ul>
     <ul id="modelSuggestions"></ul>
     <!-- Persisted prompt history + fuzzy search (history-search.js) - Ctrl+R
          while focused in composeInput, shell reverse-search
@@ -400,23 +407,23 @@
     <div class="modal-box">
       <header class="modal-body"><strong>Settings</strong></header>
       <div class="modal-body settings-body">
-        <!-- Three tabs so the modal isn't one long scroll: General prefs,
-             MCP server status/toggles, and the plugin list/toggles - each
-             was already its own self-contained block, this just gives each
-             its own pane instead of stacking them. settings.js wires the
-             click-to-switch (toggles .active + each panel's display). -->
+        <!-- Four tabs so the modal isn't one long scroll: display prefs,
+             project/session prefs, MCP server status/toggles, and the
+             plugin list/toggles - each was already its own self-contained
+             block, this just gives each its own pane instead of stacking
+             them. settings.js wires the click-to-switch (toggles .active +
+             each panel's display) generically off data-settings-tab /
+             data-settings-tab-panel, so splitting "general" into two panels
+             here needed no settings.js changes. -->
         <div class="settings-tabs">
-          <button type="button" class="settings-tab active" data-settings-tab="general" title="General settings">Settings</button>
+          <button type="button" class="settings-tab active" data-settings-tab="project" title="Project and session settings">Project</button>
+          <button type="button" class="settings-tab" data-settings-tab="display" title="Display and thinking settings">Display</button>
           <button type="button" class="settings-tab" data-settings-tab="mcp" title="MCP server settings">MCP</button>
           <button type="button" class="settings-tab" data-settings-tab="plugins" title="Plugin settings">Plugins</button>
           <button type="button" class="settings-tab" data-settings-tab="stats" title="Local usage stats across every project">Stats</button>
         </div>
 
-        <div class="settings-tab-panel" data-settings-tab-panel="general">
-          <label class="settings-row">
-            <input type="checkbox" id="autoCollapsePreviousGroupBtn" />
-            <span>Auto-collapse the previous tool call group when a new one starts</span>
-          </label>
+        <div class="settings-tab-panel" data-settings-tab-panel="project">
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Extra folders searchable in @</strong>
@@ -462,6 +469,27 @@
                  project" on an approval prompt (#alwaysAllowScope above). -->
             <ul id="permissionRulesList" class="settings-list"></ul>
           </div>
+          <div class="settings-row settings-danger">
+            <div>
+              <strong>Reset session</strong>
+              <p>Ends this session's live process and immediately starts a new one in the same folder with the same model/effort/thinking settings. The old transcript stays on disk (resumable later).</p>
+            </div>
+            <button id="resetSessionBtn" class="danger" style="display:none" title="End this session and start a fresh one with the same settings">Reset session</button>
+          </div>
+          <div class="settings-row settings-danger">
+            <div>
+              <strong>Close session</strong>
+              <p>Ends this session's live process - it stops being resumable from here, though it stays on disk like any other transcript.</p>
+            </div>
+            <button id="closeSessionBtn" class="danger" style="display:none" title="End this session's live process">Close session</button>
+          </div>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-tab-panel="display" style="display:none">
+          <label class="settings-row">
+            <input type="checkbox" id="autoCollapsePreviousGroupBtn" />
+            <span>Auto-collapse the previous tool call group when a new one starts</span>
+          </label>
           <label class="settings-row">
             <input type="checkbox" id="detailPaneEnabledBtn" />
             <span>Show the tool-call detail pane docked beside the transcript</span>
@@ -498,13 +526,6 @@
               <select id="effortBtn" title="Reasoning effort for this session"></select>
             </label>
             <div id="effortError" class="mcp-error" style="display: none;"></div>
-          </div>
-          <div class="settings-row settings-danger">
-            <div>
-              <strong>Close session</strong>
-              <p>Ends this session's live process - it stops being resumable from here, though it stays on disk like any other transcript.</p>
-            </div>
-            <button id="closeSessionBtn" class="danger" style="display:none" title="End this session's live process">Close session</button>
           </div>
         </div>
 

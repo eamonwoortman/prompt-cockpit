@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as registry from '../src/session-registry.js';
+import { createResultEpochTracker } from '../src/result-epoch.js';
 
 function fakeWs() {
   return {
@@ -41,6 +42,7 @@ function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatu
   let mode = 'default';
   const resolvers = new Map();
   let mcpAuthPending = [];
+  const epochTracker = createResultEpochTracker();
   const impl = (opts) => {
     callbacks = opts;
     impl.lastOpts = opts;
@@ -61,6 +63,7 @@ function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatu
         impl.allQueueIds = impl.allQueueIds || [];
         const queueId = `q-${impl.allQueueIds.length}`;
         impl.allQueueIds.push(queueId);
+        epochTracker.push(queueId);
         return queueId;
       },
       close: () => {
@@ -69,26 +72,30 @@ function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatu
       interrupt: async () => {
         impl.interrupted = (impl.interrupted || 0) + 1;
       },
-      // Mirrors session.js's real forceIdle: pure local bookkeeping reset,
-      // no CLI call, but it does fire onStateChange('idle') same as the
-      // real one so a test can assert the row.state flip that rides in on
-      // it (registry.forceIdle's own comment).
+      // Mirrors session.js's real forceIdle: local bookkeeping reset plus
+      // a result-generation bump so a late `result` cannot steal a tag
+      // pushed after recovery (result-epoch.js).
       forceIdle: () => {
         impl.forceIdleCalls = (impl.forceIdleCalls || 0) + 1;
+        epochTracker.forceIdle();
         callbacks.onStateChange('idle');
       },
       listQueue: () => impl.queue || [],
       removeQueued: (queueId) => {
         impl.lastRemoveQueued = queueId;
+        epochTracker.remove(queueId);
         return impl.removeQueuedResult ?? true;
       },
       reorderQueue: (queueIds) => {
         impl.lastReorderQueue = queueIds;
+        epochTracker.reorderTail(queueIds);
       },
       sendNow: async (queueId) => {
         impl.lastSendNow = queueId;
+        epochTracker.reorderTail([queueId]);
         return impl.sendNowResult ?? true;
       },
+      debugSnapshot: () => epochTracker.snapshot(),
       setMode: async (m) => {
         if (rejectModes.has(m)) {
           throw new Error(`Cannot set permission mode to ${m} because the session was not launched with the required flag`);
@@ -141,7 +148,16 @@ function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatu
       },
     };
   };
-  impl.emitMessage = (msg) => callbacks.onMessage(msg);
+  impl.emitMessage = (msg) => {
+    const message = msg && typeof msg === 'object' ? { ...msg } : msg;
+    if (message && message.type === 'result') {
+      const consumed = epochTracker.consumeFifo();
+      epochTracker.applyResultStamp(message, consumed);
+    } else if (message) {
+      epochTracker.stamp(message);
+    }
+    callbacks.onMessage(message);
+  };
   impl.emitState = (state) => callbacks.onStateChange(state);
   impl.emitError = (err) => callbacks.onError(err);
   // Mirrors session.js's canUseTool routing for ExitPlanMode: registers a
@@ -362,6 +378,43 @@ test('forceIdle clears pendingResultTags and fails any delegation still waiting 
 test('forceIdle on an unknown session id rejects instead of throwing synchronously', async () => {
   registry._reset();
   await assert.rejects(() => registry.forceIdle('does-not-exist'));
+});
+
+// Residual after the 2026-08-24 FIFO fix: forceIdle fails/clears tags, but
+// the abandoned turn can still emit a `result`. A newly pushed/delegated
+// turn sitting at pendingResultTags[0] used to be shift()'d off by that
+// late result and relayed to the wrong origin.
+test('a late result after forceIdle does not steal a newly pushed delegation tag', async () => {
+  registry._reset();
+  const originAImpl = fakeStartSession();
+  const originA = registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: originAImpl });
+  const originBImpl = fakeStartSession();
+  const originB = registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: originBImpl });
+  const targetImpl = fakeStartSession();
+  const target = registry.createSession({ cwd: '/tmp/proj', name: 'Target', startSessionImpl: targetImpl });
+
+  registry.delegateTask(originA.id, 'Target', 'task from A');
+  assert.equal(target.pendingResultTags.length, 1);
+  await registry.forceIdle(target.id);
+  assert.equal(target.pendingResultTags.length, 0);
+  assert.match(originAImpl.lastInput, /ERROR:.*manually unstuck/);
+
+  registry.delegateTask(originB.id, 'Target', 'task from B');
+  assert.equal(target.pendingResultTags.length, 1);
+  assert.equal(target.pendingResultTags[0].tag.fromId, originB.id);
+
+  // Late result for A's abandoned turn - must not pop B's tag or relay to B.
+  targetImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'late reply meant for A' }] } });
+  targetImpl.emitMessage({ type: 'result' });
+  assert.equal(target.pendingResultTags.length, 1, 'B\'s tag must still be waiting for B\'s own result');
+  assert.equal(target.pendingResultTags[0].tag.fromId, originB.id);
+  assert.equal(originBImpl.lastInput, undefined, 'B must not receive A\'s late reply as its delegated answer');
+
+  targetImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'reply to B' }] } });
+  targetImpl.emitMessage({ type: 'result' });
+  assert.equal(target.pendingResultTags.length, 0);
+  assert.match(originBImpl.lastInput, /reply to B/);
+  assert.doesNotMatch(originBImpl.lastInput, /late reply meant for A/);
 });
 
 test('listQueue/removeQueued/reorderQueue/sendNow all delegate to the session handle', async () => {
@@ -683,6 +736,45 @@ test('a plan-mode approval request reaches clients, and accepting it resolves th
   const resolved = registry.resolveApproval(row.id, requestMsg.request.requestId, { behavior: 'allow' });
   assert.equal(resolved, true);
   assert.deepEqual(await decisionPromise, { behavior: 'allow' });
+});
+
+test('two overlapping approval requests both survive attach and resolve independently', async () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  const first = startSessionImpl.emitApprovalRequest({ plan: 'first' });
+  const second = startSessionImpl.emitApprovalRequest({ plan: 'second' });
+  const live = ws.sent.filter((m) => m.type === 'cockpit:approval-request');
+  assert.equal(live.length, 2);
+  assert.equal(live[0].request.input.plan, 'first');
+  assert.equal(live[1].request.input.plan, 'second');
+  assert.equal(registry.getDebugInfo(row.id).pendingApprovalCount, 2);
+  assert.equal(registry.getDebugInfo(row.id).pendingApprovalToolName, 'ExitPlanMode');
+
+  const reconnect = fakeWs();
+  registry.attachClient(row.id, reconnect);
+  const replayed = reconnect.sent.filter((m) => m.type === 'cockpit:approval-request');
+  assert.equal(replayed.length, 2, 'a reconnecting client must see both pending prompts, not only the latest');
+  assert.equal(replayed[0].request.requestId, live[0].request.requestId);
+  assert.equal(replayed[1].request.requestId, live[1].request.requestId);
+
+  assert.equal(registry.resolveApproval(row.id, live[0].request.requestId, { behavior: 'allow' }), true);
+  assert.deepEqual(await first, { behavior: 'allow' });
+  assert.equal(registry.getDebugInfo(row.id).pendingApprovalCount, 1);
+
+  const afterFirst = fakeWs();
+  registry.attachClient(row.id, afterFirst);
+  const remaining = afterFirst.sent.filter((m) => m.type === 'cockpit:approval-request');
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].request.input.plan, 'second');
+
+  assert.equal(registry.resolveApproval(row.id, live[1].request.requestId, { behavior: 'deny' }), true);
+  assert.deepEqual(await second, { behavior: 'deny' });
+  assert.equal(registry.getDebugInfo(row.id).pendingApprovalCount, 0);
+  assert.equal(registry.getDebugInfo(row.id).hasPendingApproval, false);
 });
 
 test('resolveApproval on an unknown request id or session returns false rather than throwing', () => {
@@ -1140,12 +1232,21 @@ test('findByName matches case-insensitively within a cwd, and never across cwds 
   assert.equal(registry.findByName('/tmp/a', '   '), null, 'a whitespace-only name must never match');
 });
 
-test('delegateTask pushes the task into the named target session and throws on unknown name, self-delegation, or a cross-cwd target', () => {
+test('findByName matches equivalent cwd spellings (trailing slash, Windows drive case)', () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp/proj', name: 'Claude', startSessionImpl: fakeStartSession() });
+  assert.equal(registry.findByName('/tmp/proj/', 'Claude')?.id, row.id, 'trailing slash must not hide a same-project session');
+  if (process.platform === 'win32') {
+    const win = registry.createSession({ cwd: 'D:\\Dev\\proj', name: 'Win', startSessionImpl: fakeStartSession() });
+    assert.equal(registry.findByName('d:\\dev\\proj', 'Win')?.id, win.id, 'drive-letter case must not hide a same-project session');
+  }
+});
+
+test('delegateTask pushes the task into the named target session and throws on unknown name or self-delegation', () => {
   registry._reset();
   const claude = registry.createSession({ cwd: '/tmp/proj', name: 'Claude', startSessionImpl: fakeStartSession() });
   const grokImpl = fakeStartSession();
   const grok = registry.createSession({ cwd: '/tmp/proj', name: 'Grok', startSessionImpl: grokImpl });
-  registry.createSession({ cwd: '/tmp/other', name: 'Other', startSessionImpl: fakeStartSession() });
 
   const result = registry.delegateTask(claude.id, 'Grok', 'summarize main.py');
   assert.equal(result.targetId, grok.id);
@@ -1157,10 +1258,34 @@ test('delegateTask pushes the task into the named target session and throws on u
   assert.equal(grok.pendingResultTags.length, 1);
   assert.equal(grok.pendingResultTags[0].tag.fromId, claude.id);
   assert.equal(grok.pendingResultTags[0].tag.fromName, 'Claude');
+  assert.match(
+    grokImpl.lastInput,
+    /handshake secret/,
+    'the header must cite the handshake-trust check as a checkable fact, not leave the trust chain purely implicit'
+  );
 
   assert.throws(() => registry.delegateTask(claude.id, 'NoSuchName', 'hi'), /no session named/);
   assert.throws(() => registry.delegateTask(claude.id, 'Claude', 'hi'), /cannot delegate to the same session/);
-  assert.throws(() => registry.delegateTask(claude.id, 'Other', 'hi'), /no session named/, 'a same-named session in a different cwd must not be reachable (same-cwd-only v1 scope)');
+});
+
+test('delegateTask reaches a same-named session in a different cwd via the handshake-trust fallback, but not an untrusted one', () => {
+  registry._reset();
+  const claude = registry.createSession({ cwd: '/tmp/proj', name: 'Claude', startSessionImpl: fakeStartSession() });
+  const otherImpl = fakeStartSession();
+  const other = registry.createSession({ cwd: '/tmp/other', name: 'Other', startSessionImpl: otherImpl });
+
+  // Trusted by construction (both created locally) - cross-cwd now works.
+  const result = registry.delegateTask(claude.id, 'Other', 'hi');
+  assert.equal(result.targetId, other.id, 'a trusted session outside the origin cwd must be reachable by name');
+
+  // Revoke Other's trust - it must go back to being unreachable by name,
+  // same as if it did not exist, not just refused after being found.
+  registry.setSessionHandshake(other.id, 'garbage-does-not-match');
+  assert.throws(
+    () => registry.delegateTask(claude.id, 'Other', 'hi'),
+    /no session named/,
+    'an untrusted cross-cwd namesake must not be reachable at all'
+  );
 });
 
 // 2026-08-24 review fix, exercised through delegateTask: the TARGET's queue is

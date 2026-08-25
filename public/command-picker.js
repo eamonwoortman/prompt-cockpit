@@ -49,7 +49,12 @@ export function initCommandPicker({ textarea, dropdown, getCommands }) {
     if (!text.startsWith('/')) return null;
     const firstToken = text.slice(0, pos);
     if (/\s/.test(firstToken)) return null; // past the command name into its arguments
-    return firstToken.slice(1);
+    const name = firstToken.slice(1);
+    // Cockpit's `/ask <Name>: <text>` is client-side (ask-picker.js), not
+    // an SDK slash command. Yield as soon as the token is exactly `ask`
+    // so this list does not sit on top of the session-name picker.
+    if (/^ask$/i.test(name)) return null;
+    return name;
   }
 
   function render() {

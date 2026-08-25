@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnGrokAgent, killGrokProcess } from './grok-acp.js';
 import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction } from './grok-messages.js';
 import { createGrokExtensions } from './grok-extensions.js';
+import { createResultEpochTracker } from './result-epoch.js';
 
 const CLIENT_INFO = { name: 'claude-prompt-cockpit', version: '0.1.0' };
 
@@ -96,6 +97,7 @@ export function startGrokSession({
   // still queued or running - mid-turn that minted two promptIndexes
   // for one message (promptIndex 2 and 3, same body, ~4s apart).
   let openPromptText = null;
+  const resultEpoch = createResultEpochTracker();
   // A turn's bill can arrive twice: `_x.ai/session_notification`
   // (turn_completed) during the prompt, and again on the prompt result's
   // `_meta.usage`. Count it once.
@@ -151,6 +153,7 @@ export function startGrokSession({
             if (billedThisTurn) continue;
             billedThisTurn = true;
           }
+          resultEpoch.stamp(message);
           onMessage(message);
         }
       });
@@ -241,13 +244,26 @@ export function startGrokSession({
       usage: result._meta.usage,
     }, sessionId, { model })) {
       if (message.message && message.message.usage) billedThisTurn = true;
+      resultEpoch.stamp(message);
       onMessage(message);
     }
   }
 
-  async function runPrompt(text) {
+  async function runPrompt(text, meta) {
     await ready;
-    if (closed || !connection) return;
+    let didConsume = false;
+    const consume = () => {
+      if (didConsume) return { meta: null, stale: false };
+      didConsume = true;
+      return resultEpoch.consume(meta);
+    };
+    // Abandoned before it started (forceIdle while this was queued on
+    // promptTail): do not send session/prompt, but still consume so a
+    // later live turn's result cannot FIFO-match this slot.
+    if (closed || !connection || meta.epoch !== resultEpoch.epoch) {
+      consume();
+      return;
+    }
     promptInFlight = true;
     billedThisTurn = false;
     try {
@@ -260,30 +276,39 @@ export function startGrokSession({
       // turn_completed notification was missing, so a method-name change
       // cannot zero the stats strip again.
       emitUsageFromPromptResult(result);
+      const consumed = consume();
       const stopReason = (result && result.stopReason) || 'end_turn';
+      const message = turnResultMessage(sessionId, stopReason);
+      resultEpoch.applyResultStamp(message, consumed);
+      if (consumed.stale) {
+        onMessage(message);
+        return;
+      }
       pendingTurns = Math.max(0, pendingTurns - 1);
       if (openPromptText === text && pendingTurns === 0) openPromptText = null;
-      onMessage(turnResultMessage(sessionId, stopReason));
+      onMessage(message);
       onStateChange(pendingTurns > 0 ? 'running' : 'idle');
+    } catch (err) {
+      consume();
+      throw err;
     } finally {
       promptInFlight = false;
     }
   }
 
   function pushInput(text) {
-    // `null` (not `undefined`) specifically means "did not enqueue anything
-    // - no result will ever come for this call". session-registry.js's
-    // pushTurn checks for this exact sentinel to decide whether to add a
-    // pendingResultTags entry; `undefined` stays the ordinary "pushed, but
-    // grok has no queueId to report" return for the success path below, so
-    // the two must not be conflated (see the 2026-08-24 review finding #2 -
-    // both of these early-returns used to fall through pushTurn silently,
-    // leaving a permanent FIFO entry nothing would ever shift off).
+    // `null` specifically means "did not enqueue anything - no result will
+    // ever come for this call". session-registry.js's pushTurn checks for
+    // this exact sentinel to decide whether to add a pendingResultTags
+    // entry (see the 2026-08-24 review finding #2). Success returns a
+    // queueId so registry matching is not positional-only.
     if (closed) return null;
     // Same body already queued or running: a second Enter (or Grok treating
     // mid-turn session/prompt as queue+send-now plus our chained retry)
     // must not mint another user turn.
     if (openPromptText === text && pendingTurns > 0) return null;
+    const queueId = randomUUID();
+    const meta = resultEpoch.push(queueId);
     const wireMessage = {
       type: 'user',
       message: { role: 'user', content: text },
@@ -292,19 +317,20 @@ export function startGrokSession({
     turnCounter += 1;
     pendingTurns += 1;
     openPromptText = text;
-    onMessage({ ...wireMessage, turnIndex: turnCounter });
+    onMessage({ ...wireMessage, turnIndex: turnCounter, queueId, _cockpitEpoch: meta.epoch, _cockpitQueueId: queueId });
     onStateChange('running');
     // Cancel the in-flight prompt so the next session/prompt is not
     // delivered on top of a still-running turn (that path cancelled the
     // old turn and then recorded the new text twice).
     if (promptInFlight) interrupt();
-    promptTail = promptTail.then(() => runPrompt(text)).catch((err) => {
+    promptTail = promptTail.then(() => runPrompt(text, meta)).catch((err) => {
       if (closed) return;
       pendingTurns = Math.max(0, pendingTurns - 1);
       if (pendingTurns === 0) openPromptText = null;
       onStateChange('error');
       onError(err);
     });
+    return queueId;
   }
 
   function close() {
@@ -421,6 +447,7 @@ export function startGrokSession({
       currentMode,
       promptInFlight,
       openPromptText: openPromptText != null,
+      ...resultEpoch.snapshot(),
     };
   }
 
@@ -428,8 +455,10 @@ export function startGrokSession({
   // for the failure mode. Local bookkeeping reset only, doesn't touch the
   // process/connection.
   function forceIdle() {
+    resultEpoch.forceIdle();
     pendingTurns = 0;
     if (openPromptText != null) openPromptText = null;
+    interrupt();
     onStateChange('idle');
   }
 

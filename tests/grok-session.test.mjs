@@ -248,6 +248,46 @@ test('duplicate pushInput while a prompt is in flight is dropped', async () => {
   await flush();
 });
 
+test('pushInput returns a queueId on success and null when closed or deduped', async () => {
+  const hangPrompt = {};
+  const { session } = startFake({}, { hangPrompt });
+  await flush();
+  await flush();
+  const id = session.pushInput('hello grok');
+  assert.equal(typeof id, 'string');
+  await flush();
+  await flush();
+  assert.equal(session.pushInput('hello grok'), null, 'duplicate in-flight prompt is not tagged');
+  hangPrompt.resolve();
+  await flush();
+  await flush();
+  session.close();
+  assert.equal(session.pushInput('after close'), null);
+});
+
+test('forceIdle marks a late in-flight result stale and still runs a newly pushed prompt', async () => {
+  const hangPrompt = {};
+  const { session, messages, fake } = startFake({}, { hangPrompt });
+  await flush();
+  await flush();
+  session.pushInput('first');
+  await flush();
+  await flush();
+  session.forceIdle();
+  assert.ok(fake.requests.some((r) => r.notify && r.method === 'session/cancel'));
+  const secondId = session.pushInput('second');
+  assert.equal(typeof secondId, 'string');
+  hangPrompt.resolve({ stopReason: 'cancelled' });
+  await flush();
+  await flush();
+  const results = messages.filter((m) => m.type === 'result');
+  assert.ok(results.some((m) => m._cockpitStale === true), 'abandoned first turn must arrive as stale');
+  assert.ok(results.some((m) => m._cockpitStale !== true), 'second turn must still emit a live result');
+  const prompts = fake.requests.filter((r) => r.method === 'session/prompt');
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[1].params.prompt[0].text, 'second');
+});
+
 test('a new pushInput while a prompt is in flight cancels the current turn', async () => {
   const hangPrompt = {};
   const { session, fake } = startFake({}, { hangPrompt });

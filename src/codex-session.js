@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { getCodexAppServerManager } from './codex-app-server.js';
 import { codexNotificationToMessages } from './codex-messages.js';
+import { createResultEpochTracker } from './result-epoch.js';
 
 function unsupported(name) {
   return async () => { throw new Error(`${name} is not supported on Codex sessions yet`); };
@@ -57,6 +58,7 @@ export function startCodexSession({
   let closed = false;
   let pumping = false;
   const pending = [];
+  const resultEpoch = createResultEpochTracker();
   const pendingApprovals = new Map();
   const completedTurns = new Map();
   const completionWaiters = new Map();
@@ -107,7 +109,10 @@ export function startCodexSession({
 
   const unsubscribe = manager.subscribe((method, params) => {
     if (closed || !threadId || !eventBelongsToTurn(params, threadId, activeTurnId)) return;
-    for (const message of codexNotificationToMessages(method, params, threadId, { model: currentModel })) onMessage(message);
+    for (const message of codexNotificationToMessages(method, params, threadId, { model: currentModel })) {
+      resultEpoch.stamp(message);
+      onMessage(message);
+    }
     if (method === 'turn/started' && params.turn?.id) activeTurnId = params.turn.id;
     if (method === 'turn/completed') settleTurn(params.turn?.id || activeTurnId, params);
   });
@@ -188,7 +193,10 @@ export function startCodexSession({
 
   async function runTurn(entry) {
     await ready;
-    if (closed) return;
+    if (closed || entry.epoch !== resultEpoch.epoch) {
+      resultEpoch.consume(entry.id);
+      return;
+    }
     onStateChange('running');
     const params = {
       threadId,
@@ -204,6 +212,7 @@ export function startCodexSession({
     await waitForTurn(activeTurnId);
     completedTurns.delete(activeTurnId);
     activeTurnId = null;
+    resultEpoch.consume(entry.id);
   }
 
   async function pump() {
@@ -216,10 +225,13 @@ export function startCodexSession({
         try {
           await runTurn(entry);
         } catch (err) {
-          onMessage({
+          const message = {
             type: 'result', subtype: 'error', is_error: true, session_id: threadId,
             num_turns: 1, stop_reason: 'failed', result: '', error: String(err?.message || err),
-          });
+          };
+          const consumed = resultEpoch.consume(entry.id);
+          resultEpoch.applyResultStamp(message, consumed);
+          onMessage(message);
           onError(err);
         }
       }
@@ -233,11 +245,13 @@ export function startCodexSession({
   function pushInput(text) {
     if (closed) return undefined;
     const id = randomUUID();
+    const meta = resultEpoch.push(id);
     turnCounter += 1;
-    pending.push({ id, text });
+    pending.push({ id, text, epoch: meta.epoch });
     onMessage({
       type: 'user', session_id: threadId,
       message: { role: 'user', content: text }, turnIndex: turnCounter, queueId: id,
+      _cockpitEpoch: meta.epoch, _cockpitQueueId: id,
     });
     emitQueue();
     onStateChange('running');
@@ -310,12 +324,14 @@ export function startCodexSession({
     const index = pending.findIndex((entry) => entry.id === id);
     if (index < 0) return false;
     pending.splice(index, 1);
+    resultEpoch.remove(id);
     emitQueue();
     return true;
   }
   function reorderQueue(ids) {
     const positions = new Map(ids.map((id, index) => [id, index]));
     pending.sort((a, b) => (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+    resultEpoch.reorderTail(ids);
     emitQueue();
   }
   async function sendNow(id) {
@@ -323,6 +339,7 @@ export function startCodexSession({
     if (index < 0) return false;
     const [entry] = pending.splice(index, 1);
     pending.unshift(entry);
+    resultEpoch.reorderTail([id]);
     emitQueue();
     return true;
   }
@@ -331,7 +348,13 @@ export function startCodexSession({
     pushInput,
     close,
     interrupt,
-    forceIdle: () => onStateChange('idle'),
+    forceIdle: () => {
+      resultEpoch.forceIdle();
+      pending.length = 0;
+      emitQueue();
+      interrupt().catch(() => {});
+      onStateChange('idle');
+    },
     setMode: async (mode) => { currentMode = mode; },
     resolveApproval,
     getMode: () => currentMode,
@@ -339,7 +362,7 @@ export function startCodexSession({
     removeQueued,
     reorderQueue,
     sendNow,
-    debugSnapshot: () => ({ threadId, activeTurnId, queuedTurns: pending.length, currentMode }),
+    debugSnapshot: () => ({ threadId, activeTurnId, queuedTurns: pending.length, currentMode, ...resultEpoch.snapshot() }),
     query: {
       supportedModels: async () => {
         const result = await manager.request('model/list', { limit: 100, includeHidden: false });

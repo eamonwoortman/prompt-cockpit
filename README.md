@@ -22,7 +22,7 @@ npm install   # first time only
 npm start
 ```
 
-Open [http://localhost:4317](http://localhost:4317). Set `PORT` if 4317 is taken (`PORT=4318 npm start`).
+Open the URL printed in the console - `http://localhost:4317/?op=<KEYSTRING>` - not the bare `localhost:4317`. The `op=` value is a per-process operator token; the page reads it once, stores it in `localStorage`, and strips it from the address bar. Without it, `/api/*` calls come back `401`. Set `PORT` if 4317 is taken (`PORT=4318 npm start`).
 
 ## First session
 

@@ -109,6 +109,7 @@ export function initSettings({
   detailPaneCheckbox,
   pendingTurnsBadgeCheckbox,
   closeSessionButton,
+  resetSessionButton,
   onAutoCollapseChange,
   onTurnChartEnabledChange,
   onTaskPanelEnabledChange,
@@ -116,6 +117,7 @@ export function initSettings({
   onDetailPaneEnabledChange,
   onPendingTurnsBadgeEnabledChange,
   onCloseSession,
+  onResetSession,
   onOpen,
 }) {
   const settings = loadSettings();
@@ -218,11 +220,12 @@ export function initSettings({
   modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
   enableModalDrag(modal);
 
-  // Tabs (General / MCP / Plugins) - each tab button's data-settings-tab
-  // matches a panel's data-settings-tab-panel; switching just flips which
-  // panel is visible and which button carries .active. Doesn't reset to
-  // "general" on close/reopen - staying on the tab you were just looking
-  // at (e.g. MCP) across opens is more useful than snapping back.
+  // Tabs (Display / Project / MCP / Plugins / Stats) - each tab button's
+  // data-settings-tab matches a panel's data-settings-tab-panel; switching
+  // just flips which panel is visible and which button carries .active.
+  // Doesn't reset to "display" on close/reopen - staying on the tab you
+  // were just looking at (e.g. MCP) across opens is more useful than
+  // snapping back.
   const tabButtons = [...modal.querySelectorAll('[data-settings-tab]')];
   const tabPanels = [...modal.querySelectorAll('[data-settings-tab-panel]')];
   for (const btn of tabButtons) {
@@ -252,6 +255,11 @@ export function initSettings({
   closeSessionButton.addEventListener('click', () => {
     close();
     onCloseSession();
+  });
+
+  resetSessionButton.addEventListener('click', () => {
+    close();
+    onResetSession();
   });
 
   function close() {

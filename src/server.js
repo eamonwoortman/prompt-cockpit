@@ -19,6 +19,7 @@ import { registerHistoryRoutes } from './routes/history.js';
 import { registerSystemRoutes } from './routes/system.js';
 import { registerSessionActionRoutes } from './routes/session-actions.js';
 import { serveStatic } from './static-files.js';
+import { checkOperatorToken, getOperatorToken } from './operator-auth.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
@@ -64,6 +65,15 @@ async function handleRequest(req, res) {
   }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
+  // Operator token is the process credential (see operator-auth.js).
+  // Session tokens still gate /api/sessions/:id/*; this is the layer those
+  // token-free routes (browse, spawn, history, handshake) were missing.
+  // Static files stay Origin/Host only so the shell can load and then
+  // send the header (or `?op=` from the console URL).
+  if (url.pathname.startsWith('/api/') && !checkOperatorToken(req, url)) {
+    res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ error: 'invalid or missing operator token' }));
+  }
   const handled = await router.handle(req, res, url);
   if (handled) return;
   return serveStatic(req, res, url);
@@ -93,6 +103,12 @@ server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname !== '/ws') {
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  if (!checkOperatorToken(req, url)) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
   }
@@ -179,6 +195,7 @@ export { server, PORT, HOST, seedSessionDefaults };
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   server.listen(PORT, HOST, () => {
-    console.log(`claude-prompt-cockpit listening on http://${HOST}:${PORT}`);
+    const op = getOperatorToken();
+    console.log(`prompt-cockpit listening on http://${HOST}:${PORT}/?op=${op}`);
   });
 }

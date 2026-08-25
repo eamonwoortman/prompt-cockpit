@@ -5,6 +5,7 @@
 // full past session. Launched by stream-view.js's Agent-row click handler
 // (see openAgentTab in app.js) via window.open, so this always runs in its
 // own tab/window, never embedded in the main app shell.
+import '/operator-auth.js';
 import { renderMessage, resetStreamView } from '/stream-view.js';
 
 const params = new URLSearchParams(window.location.search);

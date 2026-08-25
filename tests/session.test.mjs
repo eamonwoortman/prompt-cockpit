@@ -80,6 +80,15 @@ test('turnIndex counts pushInput() calls starting from turnIndexOffset', async (
   assert.deepEqual(turnIndexes(), [6, 7]);
 });
 
+test('startSession appends the /ask system-prompt anchor to the claude_code preset', () => {
+  const { getOptions } = startFakeSession();
+  const systemPrompt = getOptions().systemPrompt;
+  assert.equal(systemPrompt.type, 'preset');
+  assert.equal(systemPrompt.preset, 'claude_code');
+  assert.match(systemPrompt.append, /Prompt Cockpit/);
+  assert.match(systemPrompt.append, /\/ask/);
+});
+
 test('a conversation_reset message (/clear) resets turnIndex back to 1, not the pre-clear offset', async () => {
   // Regression test for the residual rewind edge: /clear starts a fresh
   // conversation, so turnCounter has to restart with it or every rewind
@@ -175,6 +184,34 @@ test('interrupt() calls the SDK handle without closing the input queue - pushInp
 // bug found while testing the Stop button. The two are only
 // distinguishable by pendingTurns: the sentinel's result is the only one
 // that can ever arrive while pendingTurns is still 0.
+test('a late result after forceIdle is marked stale and does not decrement a newly pushed turn', async () => {
+  const { handle, session, messages, states } = startFakeSession();
+  handle.push({ type: 'system', subtype: 'init', permissionMode: 'default', session_id: 's1' });
+  await flush();
+
+  session.pushInput('abandoned turn');
+  assert.equal(states[states.length - 1], 'running');
+  session.forceIdle();
+  assert.equal(states[states.length - 1], 'idle');
+  assert.equal(handle.interruptCalls, 1);
+
+  const secondId = session.pushInput('new turn');
+  assert.equal(typeof secondId, 'string');
+  assert.equal(states[states.length - 1], 'running');
+
+  handle.push({ type: 'result', subtype: 'success', num_turns: 1, result: 'late A' });
+  await flush();
+  const late = messages.filter((m) => m.type === 'result').at(-1);
+  assert.equal(late._cockpitStale, true);
+  assert.equal(states[states.length - 1], 'running', 'the new turn is still in flight');
+
+  handle.push({ type: 'result', subtype: 'success', num_turns: 1, result: 'B' });
+  await flush();
+  const live = messages.filter((m) => m.type === 'result').at(-1);
+  assert.equal(live._cockpitStale, undefined);
+  assert.equal(states[states.length - 1], 'idle');
+});
+
 test('a real turn interrupted before producing anything (num_turns:0) still settles state back to idle', async () => {
   const { handle, session, messages, states } = startFakeSession();
   handle.push({ type: 'system', subtype: 'init', permissionMode: 'default', session_id: 's1' });

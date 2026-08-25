@@ -17,6 +17,7 @@
 // seedSessionDefaults() and the 'thinking'/'auto-continue' routes there) -
 // this module itself stays filesystem-free.
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
+import path from 'node:path';
 import { startSession } from './session.js';
 import { startGrokSession } from './grok-session.js';
 import { forkConversation, rewindFiles as rewindFilesSdk, resolveTurnUuid } from './rewind.js';
@@ -76,7 +77,13 @@ export function setSessionHandshake(id, value) {
 }
 
 export function isSessionTrusted(row) {
-  return Boolean(row.handshakeSecret) && row.handshakeSecret === handshakeSecret;
+  const a = typeof row.handshakeSecret === 'string' ? row.handshakeSecret : '';
+  const b = typeof handshakeSecret === 'string' ? handshakeSecret : '';
+  if (!a || !b) return false;
+  const expected = Buffer.from(a);
+  const actual = Buffer.from(b);
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
 }
 
 export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, startSessionImpl }) {
@@ -149,7 +156,12 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     eventLog: createEventLog(),
     historyTotal: history ? history.length : 0,
     historyShownCount, // fixed at creation - distinct from the event log, which keeps growing with live traffic
-    pendingApproval: null, // last unresolved approval request, so a reconnecting client sees it again instead of a stuck banner it never got
+    // Unresolved approval requests in arrival order. Last-write-wins on a
+    // single field dropped the earlier banner (and stranded that tool call)
+    // whenever two gated tools waited at once - parallel tool_use in one
+    // turn, or Codex/Grok overlapping permission prompts. A reconnecting
+    // client is replayed the whole list, not only the latest.
+    pendingApprovals: [],
     // Live stats: cost/token totals accumulate from every assistant
     // message's `usage` (usage.js), no 1-turn lag. `contextUsage` is
     // refreshed separately (getContextUsage() is its own round trip to the
@@ -217,9 +229,12 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // same `queueId` session.js's pushInput now returns), so this array
     // stays in lockstep with actual future execution order even after a
     // queue-pane edit - shift() at result time is then always correct.
-    // `queueId` is `undefined` for grok sessions (grok-session.js's
-    // pushInput has no queue/id concept - positional order is exact there
-    // anyway, since grok has no real remove/reorder to desync it).
+    // `queueId` is minted by every provider's pushInput on success
+    // (Claude, Grok, Codex). Grok used to return `undefined` and rely on
+    // positional FIFO; a real id lets a late `result` after forceIdle be
+    // matched instead of blindly shift()'d onto the next tag. Each entry
+    // also carries `epoch` from the handle's result-generation counter
+    // (see result-epoch.js).
     pendingResultTags: [],
   };
   // Resumed sessions never replay their history through handleMessage - the
@@ -289,18 +304,57 @@ export function get(id) {
 }
 
 // Cross-session delegation: name -> row lookup, scoped to one cwd
-// (v1 routing is same-project only). Case-insensitive,
-// exact match otherwise (no path normalization on `cwd` - two sessions
-// started from the same launcher cwd string will always match; a
-// differently-spelled-but-equivalent path won't, that's a known v1 gap).
+// (fast, unambiguous path for the common single-project case; also what
+// session creation/rename use to enforce name uniqueness, so two unrelated
+// projects can each have their own "Claude" without colliding). Names are
+// case-insensitive. cwd is path-canonicalized (resolve + Windows
+// drive-letter case) so `D:\foo` vs `d:\foo` vs a trailing slash still
+// match - that was a silent miss, not a safety rail.
 // Empty/whitespace names never match anything, since an unnamed row's
 // `name` is `null`.
+function canonCwd(cwd) {
+  if (typeof cwd !== 'string' || !cwd) return cwd;
+  let resolved;
+  try {
+    resolved = path.resolve(cwd);
+  } catch {
+    resolved = cwd;
+  }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 export function findByName(cwd, name) {
   const norm = (s) => (s || '').trim().toLowerCase();
   const target = norm(name);
   if (!target) return null;
+  const want = canonCwd(cwd);
   for (const row of sessions.values()) {
-    if (row.cwd === cwd && norm(row.name) === target) return row;
+    if (canonCwd(row.cwd) === want && norm(row.name) === target) return row;
+  }
+  return null;
+}
+
+// Cross-session delegation, cross-project/cross-machine fallback: same
+// handshake-trust group, explicit name, no cwd requirement at all - the
+// replacement for same-cwd-only routing the backlog called for. Used only
+// when findByName's same-cwd lookup above misses, so the common
+// single-project case is unaffected. This is also why it filters on
+// isSessionTrusted itself rather than leaving that to the caller: an
+// untrusted local namesake must not shadow a trusted cross-project one, and
+// a session that has never synced a handshake has no business being
+// reachable by name outside its own cwd. delegateTask still re-checks
+// isSessionTrusted(origin) - a revoked origin cannot delegate at all,
+// same-cwd or not. Known limitation, not yet worth solving: if more than
+// one trusted session outside the origin's cwd shares the name, whichever
+// the session Map iterates to first wins - fine for the realistic case (one
+// human, one sibling with that name), a real footgun once handshake groups
+// have more than a couple of members.
+function findTrustedByName(name) {
+  const norm = (s) => (s || '').trim().toLowerCase();
+  const target = norm(name);
+  if (!target) return null;
+  for (const row of sessions.values()) {
+    if (isSessionTrusted(row) && norm(row.name) === target) return row;
   }
   return null;
 }
@@ -314,17 +368,17 @@ export function findByName(cwd, name) {
 // mode this closes). `tag` is null for a non-delegated turn.
 function pushTurn(row, text, tag = null) {
   const queueId = row.handle.pushInput(text);
-  // `null` (not `undefined` - grok's ordinary success return has no
-  // queueId to give) means pushInput did NOT enqueue anything: the target
-  // queue was already closed, or (grok only) this exact prompt was already
-  // pending. No result will ever come for a turn that was never actually
-  // pushed, so appending a pendingResultTags entry for it here is exactly
-  // the desync bug from the 2026-08-24 review (finding #2) - a later,
-  // unrelated `result` would shift() this dead entry off first and get
-  // relayed to the wrong origin. Best-effort drop instead, same as
+  // `null` means pushInput did NOT enqueue anything: the target queue was
+  // already closed, or (grok only) this exact prompt was already pending.
+  // No result will ever come for a turn that was never actually pushed, so
+  // appending a pendingResultTags entry for it here is exactly the desync
+  // bug from the 2026-08-24 review (finding #2) - a later, unrelated
+  // `result` would shift() this dead entry off first and get relayed to
+  // the wrong origin. Best-effort drop instead, same as
   // relayDelegationResult already does when its own origin lookup misses.
   if (queueId === null) return null;
-  row.pendingResultTags.push({ queueId, tag });
+  const epoch = row.handle.debugSnapshot?.()?.resultEpoch ?? 0;
+  row.pendingResultTags.push({ queueId, tag, epoch });
   // Returned so relayDelegationResult can correlate this turn's own echoed
   // 'user' message (which session.js stamps with this same queueId, see its
   // pushInput comment) with a later, separate cockpit:delegate-full-trace
@@ -338,13 +392,15 @@ function pushTurn(row, text, tag = null) {
 // box (server.js's ws 'delegate' handler) - not an LLM tool call, so there
 // is no real tool_use id for the eventual reply to attach to as a genuine
 // SDK tool_result (see relayDelegationResult below for how that's handled
-// instead). Same-cwd only: findByName is scoped to origin.cwd, so a target
-// in a different project is indistinguishable from "no such session" here.
+// instead). Same-cwd first (fast, unambiguous), then falls back to any
+// session in the same handshake-trust group regardless of cwd - see
+// findTrustedByName's comment for why cross-project/cross-machine routing
+// no longer requires a shared cwd string.
 export function delegateTask(originId, targetName, text) {
   const origin = sessions.get(originId);
   if (!origin) throw new Error(`unknown session: ${originId}`);
-  const target = findByName(origin.cwd, targetName);
-  if (!target) throw new Error(`no session named "${targetName}" in this project`);
+  const target = findByName(origin.cwd, targetName) || findTrustedByName(targetName);
+  if (!target) throw new Error(`no session named "${targetName}"`);
   if (target.id === origin.id) throw new Error('cannot delegate to the same session');
   // Handshake gate (see handshakeSecret's module-level comment): both ends
   // have to currently agree with this process's canonical secret, not just
@@ -454,8 +510,9 @@ export function getDebugInfo(id) {
     state: row.state,
     mode: row.mode,
     tabCount: row.clients.size,
-    hasPendingApproval: Boolean(row.pendingApproval),
-    pendingApprovalToolName: row.pendingApproval?.toolName || null,
+    hasPendingApproval: row.pendingApprovals.length > 0,
+    pendingApprovalToolName: row.pendingApprovals[0]?.toolName || null,
+    pendingApprovalCount: row.pendingApprovals.length,
     queueLength: row.queue.length,
     pendingResultTagsLength: row.pendingResultTags.length,
     autoContinue: row.autoContinue,
@@ -540,8 +597,8 @@ export function attachClient(id, ws, sinceSeq = 0) {
   for (const { seq, message } of events) {
     send(ws, { type: 'sdk:message', message, seq });
   }
-  if (row.pendingApproval) {
-    send(ws, { type: 'cockpit:approval-request', request: row.pendingApproval });
+  for (const request of row.pendingApprovals) {
+    send(ws, { type: 'cockpit:approval-request', request });
   }
   send(ws, usagePayload(row));
   send(ws, tasksPayload(row));
@@ -691,7 +748,8 @@ export async function setAutoContinue(id, enabled) {
 export function resolveApproval(id, requestId, decision) {
   const row = sessions.get(id);
   if (!row) return false;
-  if (row.pendingApproval && row.pendingApproval.requestId === requestId) row.pendingApproval = null;
+  const i = row.pendingApprovals.findIndex((r) => r.requestId === requestId);
+  if (i >= 0) row.pendingApprovals.splice(i, 1);
   return row.handle.resolveApproval(requestId, decision);
 }
 
@@ -842,7 +900,7 @@ function handleMessage(id, message) {
     // unrelated event (e.g. renaming) happened to trigger a state broadcast.
     if (!hadModel && row.model) broadcastSummary(id);
   }
-  collectDelegationText(row, message); // buffers this turn's assistant text while a delegation is pending, see the 'result' branch below
+  collectDelegationText(row, message); // buffers this turn's assistant text while a matching delegation is pending, see the 'result' branch below
   // Task* detection/resolution also has to run for a resumed session's
   // replayed history (see createSession's seedTaskState call), not just the
   // live stream - factored out so both call sites share one implementation
@@ -894,13 +952,22 @@ function handleMessage(id, message) {
   const seq = appendEvent(row.eventLog, message);
   broadcast(id, { type: 'sdk:message', message, seq });
   if (message.type === 'result') {
-    // This array's order always matches actual execution order now
-    // (pushTurn + the removeQueued/reorderQueue/sendNow mirrors below keep
-    // it that way), so the OLDEST entry is always the one this `result`
-    // belongs to - shift, not filter/find. `entry.tag` is null for a
-    // non-delegated turn (nothing to relay).
-    const entry = row.pendingResultTags.shift();
-    if (entry?.tag) relayDelegationResult(row, entry.tag, { ok: true, message });
+    // Blind shift() is only safe when this result is for the current
+    // generation's front tag. A force-idled turn can still emit a late
+    // `result` after failPendingDelegations cleared the old tags and a
+    // new turn was tagged - that used to pop the new tag and relay to
+    // the wrong origin (backlog residual after the 2026-08-24 FIFO fix).
+    // Handles stamp `_cockpitStale` / `_cockpitEpoch` via result-epoch.js;
+    // unstamped results (tests that inject a result with no matching push)
+    // keep the old FIFO shift.
+    const front = row.pendingResultTags[0];
+    const stale = message._cockpitStale === true
+      || (front && message._cockpitEpoch != null && front.epoch != null && message._cockpitEpoch !== front.epoch)
+      || (front && message._cockpitQueueId && front.queueId && message._cockpitQueueId !== front.queueId);
+    if (!stale) {
+      const entry = row.pendingResultTags.shift();
+      if (entry?.tag) relayDelegationResult(row, entry.tag, { ok: true, message });
+    }
     refreshContextUsage(id); // a real round trip to the CLI - once per finished turn, not per message
     refreshRateLimits(id);
   }
@@ -999,18 +1066,29 @@ function finalAnswerText(tag, message) {
 // doesn't make it worse than tags did.
 function buildDelegatedHeader(kind, name, body, task) {
   const safeName = sanitizeName(name);
+  // The handshake-trust sentence below is a checkable fact, not a claim the
+  // receiving model has to take on faith: this app's server only relays a
+  // turn between two sessions once both have separately proven they share
+  // the current process's handshake secret (isSessionTrusted, checked at
+  // delegateTask() time) - see the [M] backlog item this closed for why
+  // that's worth spelling out explicitly instead of leaving the trust chain
+  // purely implicit in the surrounding prose.
   if (kind === 'task') {
     return `[Prompt Cockpit] Relayed task from "${safeName}"\n\n`
       + `Your operator is also running a sibling cockpit session named "${safeName}" in this same project. `
       + `They typed the message below in ${safeName}'s own compose box and used this app's delegation feature `
       + `("/ask") to relay it to you directly - it is authorized by the human operator, not an instruction from `
-      + `another agent. Reply normally in this turn; your answer will be relayed back to ${safeName} automatically.\n\n`
+      + `another agent. The cockpit server only allows this relay between sessions that share its current `
+      + `handshake secret, so this could not have come from an untrusted or external source. `
+      + `Reply normally in this turn; your answer will be relayed back to ${safeName} automatically.\n\n`
       + `---\n${body}`;
   }
   return `[Prompt Cockpit] Relayed reply from "${safeName}"\n\n`
     + `Your operator earlier asked the sibling cockpit session "${safeName}" to do something on your behalf `
     + `(the original ask was: "${sanitizeName(task)}"). This is ${safeName}'s reply, delivered back to you by `
-    + `your operator - not a message from ${safeName} directly.\n\n`
+    + `your operator - not a message from ${safeName} directly. The cockpit server only allows this relay `
+    + `between sessions that share its current handshake secret, so this could not have come from an `
+    + `untrusted or external source.\n\n`
     + `---\n${body}`;
 }
 
@@ -1049,8 +1127,13 @@ function sanitizeName(s) {
 // steps - the ones separated by a tool call - apart, which is what the
 // "final answer vs full trace" split actually needs to distinguish.
 function collectDelegationText(row, message) {
-  const tag = row.pendingResultTags[0]?.tag;
+  const entry = row.pendingResultTags[0];
+  const tag = entry?.tag;
   if (!tag) return;
+  // Leftover assistant chunks from a force-idled turn must not append into
+  // a newly pushed tag sitting at [0]. Handles stamp `_cockpitEpoch` on
+  // in-flight messages; skip when the epochs disagree.
+  if (message._cockpitEpoch != null && entry.epoch != null && message._cockpitEpoch !== entry.epoch) return;
   if (message.type !== 'assistant' || !message.message || !Array.isArray(message.message.content)) {
     tag.openTextEntry = false;
     return;
@@ -1562,7 +1645,11 @@ function broadcastUsage(id) {
 
 function handleApprovalRequest(id, request) {
   const row = sessions.get(id);
-  if (row) row.pendingApproval = request; // cleared in resolveApproval() once the client decides
+  if (row) {
+    if (!row.pendingApprovals.some((r) => r.requestId === request.requestId)) {
+      row.pendingApprovals.push(request);
+    }
+  }
   broadcast(id, { type: 'cockpit:approval-request', request });
 }
 

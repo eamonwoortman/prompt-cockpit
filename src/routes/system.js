@@ -13,9 +13,9 @@ import { fetchAccountLimits } from '../account-limits.js';
 export function registerSystemRoutes(router) {
   // The per-process delegation handshake secret -
   // see session-registry.js's own module-level comment for the full
-  // rationale. No session token gate (there's no one session it belongs
-  // to), same as /api/browse below - Host/Origin allowlisting is the actual
-  // boundary here, per server.js's isSpoofedRequest.
+  // rationale. No session token (there's no one session it belongs to);
+  // the process operator token (server.js / operator-auth.js) is required,
+  // same as /api/browse.
   router.get('/api/handshake', async (req, res) => {
     return respondJson(res, 200, { secret: getHandshakeSecret() });
   });

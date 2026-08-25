@@ -13,9 +13,28 @@ import { setSessionDefaults } from '../src/session-defaults.js';
 import { settingsPath } from '../src/settings-file.js';
 import { readAllowRules, addAllowRule } from '../src/permission-rules.js';
 
+process.env.COCKPIT_OPERATOR_TOKEN = process.env.COCKPIT_OPERATOR_TOKEN || 'test-operator-token-16plus';
 process.env.PORT = process.env.PORT || '4319';
 const { server, PORT, HOST, seedSessionDefaults } = await import('../src/server.js');
+const { getOperatorToken } = await import('../src/operator-auth.js');
 const ORIGIN = `http://${HOST}:${PORT}`;
+
+const origFetch = globalThis.fetch;
+globalThis.fetch = (url, opts = {}) => {
+  const href = String(url);
+  if (href.includes('/api/')) {
+    const headers = new Headers(opts.headers || {});
+    if (!headers.has('x-cockpit-operator')) headers.set('x-cockpit-operator', getOperatorToken());
+    opts = { ...opts, headers };
+  }
+  return origFetch(url, opts);
+};
+
+function wsUrl(pathAndQuery) {
+  const u = new URL(pathAndQuery, ORIGIN);
+  if (!u.searchParams.has('op')) u.searchParams.set('op', getOperatorToken());
+  return `ws://${HOST}:${PORT}${u.pathname}?${u.searchParams.toString()}`;
+}
 
 before(() => new Promise((resolve) => server.listen(PORT, HOST, resolve)));
 after(() => new Promise((resolve) => server.close(resolve)));
@@ -97,13 +116,17 @@ test('GET /stream-join.js and /permissions.js serve the shared src modules', asy
   assert.match(await perm.text(), /export const PERMISSION_MODES/);
 });
 
-test('GET /api/resumable returns an array without needing auth (loopback-only, not internet-exposed)', async () => {
+test('GET /api/resumable requires the operator token, then returns an array', async () => {
+  const noOp = await fetch(`${ORIGIN}/api/resumable`, { headers: { 'x-cockpit-operator': '' } });
+  assert.equal(noOp.status, 401);
+  const wrong = await fetch(`${ORIGIN}/api/resumable`, { headers: { 'x-cockpit-operator': 'nope' } });
+  assert.equal(wrong.status, 401);
   const res = await fetch(`${ORIGIN}/api/resumable`);
   assert.equal(res.status, 200);
   assert.ok(Array.isArray(await res.json()));
 });
 
-test('GET /api/history/:sessionId/markdown on an unknown session id returns an empty-transcript markdown, not an error (same graceful-empty behavior as the underlying SDK read), no auth required (same boundary as /api/history)', async () => {
+test('GET /api/history/:sessionId/markdown on an unknown session id returns an empty-transcript markdown, not an error (same graceful-empty behavior as the underlying SDK read)', async () => {
   const sessionId = 'definitely-not-a-real-session-id';
   const res = await fetch(`${ORIGIN}/api/history/${sessionId}/markdown?cwd=/tmp`);
   assert.equal(res.status, 200);
@@ -666,15 +689,24 @@ test('ws upgrade from a foreign Origin is rejected', async () => {
   await assertRejectedUpgrade(ws);
 });
 
-test('ws upgrade with the right Origin but no token is rejected', async () => {
-  const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?id=x`, {
+test('ws upgrade with the right Origin but no session token is rejected', async () => {
+  const ws = new WebSocket(wsUrl('/ws?id=x'), {
     headers: { Origin: ORIGIN },
   });
   await assertRejectedUpgrade(ws);
 });
 
-test('ws upgrade with the right Origin but a wrong token is rejected', async () => {
-  const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?id=x&token=definitely-wrong`, {
+test('ws upgrade with the right Origin but a wrong session token is rejected', async () => {
+  const ws = new WebSocket(wsUrl('/ws?id=x&token=definitely-wrong'), {
+    headers: { Origin: ORIGIN },
+  });
+  await assertRejectedUpgrade(ws);
+});
+
+test('ws upgrade with a valid session token but no operator token is rejected', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?id=${row.id}&token=${row.token}`, {
     headers: { Origin: ORIGIN },
   });
   await assertRejectedUpgrade(ws);
@@ -856,7 +888,7 @@ test('a delegate ws payload with an unknown target name gets a cockpit:delegate-
   registry._reset();
   const row = registry.createSession({ cwd: '/tmp', name: 'Claude', startSessionImpl: fakeStartSession });
 
-  const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?id=${row.id}&token=${row.token}`, {
+  const ws = new WebSocket(wsUrl(`/ws?id=${row.id}&token=${row.token}`), {
     headers: { Origin: ORIGIN },
   });
   try {
@@ -879,11 +911,14 @@ test('a delegate ws payload with an unknown target name gets a cockpit:delegate-
   }
 });
 
-// The global handshake routes have no session token
-// (there's no one session they belong to - see routes/system.js's own
-// comment), so this just proves Origin/Host-allowed requests reach them and
-// get a real value back, same coverage level as the rest of this file gives
-// /mode etc's happy path.
+// Handshake has no session token (no one session owns it) but does
+// require the process operator token - the default fetch wrapper below
+// supplies it; the 401 case is covered with an explicit empty header.
+test('GET /api/handshake without an operator token is 401', async () => {
+  const res = await fetch(`${ORIGIN}/api/handshake`, { headers: { 'x-cockpit-operator': '' } });
+  assert.equal(res.status, 401);
+});
+
 test('GET /api/handshake returns the current secret, and POST /api/handshake/regenerate rotates it', async () => {
   const before = await fetch(`${ORIGIN}/api/handshake`);
   assert.equal(before.status, 200);

@@ -9,6 +9,7 @@
 // in app.js. tool-call-store.js's WeakMap-per-container keying keeps this
 // modal's records isolated from whatever's showing live in #stream.
 import { renderMessage, resetStreamView } from '/stream-view.js';
+import { appendOperatorQuery } from '/operator-auth.js';
 import { initDetailPane } from '/detail-pane.js';
 
 export function initHistoryPane({ modal, body, closeButton, titleEl, exportButton }) {
@@ -37,6 +38,7 @@ export function initHistoryPane({ modal, body, closeButton, titleEl, exportButto
     detailPane.reset(body); // clear whatever the previously-viewed session (or a failed fetch) left showing before this one's data arrives
     modal.style.display = 'flex';
     const qs = new URLSearchParams({ cwd: cwd || '', provider: provider || 'claude' });
+    appendOperatorQuery(qs);
     if (exportButton) exportButton.href = `/api/history/${sessionId}/markdown?${qs}`;
     try {
       const res = await fetch(`/api/history/${sessionId}?${qs}`);

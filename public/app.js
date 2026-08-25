@@ -1,11 +1,13 @@
 // Launcher (cwd picker + resume list), websocket wiring, and the core five
 // features' client-side glue. Rendering lives in stream-view.js, input in
 // compose.js/file-picker.js, modals in dir-browser.js/diff-view.js.
+import { getOperatorToken, appendOperatorQuery, initOperatorGate } from '/operator-auth.js';
 import { renderMessage, resetStreamView, prependHistory, isScrolledToBottom, setAutoCollapsePreviousGroup } from '/stream-view.js';
 import { initCompose } from '/compose.js';
 import { initFilePicker } from '/file-picker.js';
 import { initDropTarget } from '/drop-target.js';
 import { initCommandPicker } from '/command-picker.js';
+import { initAskPicker } from '/ask-picker.js';
 import { initModelPicker } from '/model-picker.js';
 import { initDirBrowser } from '/dir-browser.js';
 import { initDiffView } from '/diff-view.js';
@@ -77,6 +79,7 @@ const autoContinueLabel = document.getElementById('autoContinueLabel');
 const autoContinueBtn = document.getElementById('autoContinueBtn');
 const rateLimitBanner = document.getElementById('rateLimitBanner');
 const closeSessionBtn = document.getElementById('closeSessionBtn');
+const resetSessionBtn = document.getElementById('resetSessionBtn');
 const settingsBtn = document.getElementById('settingsBtn');
 const approvalBanner = document.getElementById('approvalBanner');
 const approvalPlain = document.getElementById('approvalPlain');
@@ -147,6 +150,16 @@ const sessionListPane = initSessionListPane({
   handshakeValue: document.getElementById('handshakeValue'),
   handshakeCopyBtn: document.getElementById('handshakeCopyBtn'),
   handshakeRegenBtn: document.getElementById('handshakeRegenBtn'),
+});
+
+const operatorGate = initOperatorGate({
+  banner: document.getElementById('operatorGate'),
+  input: document.getElementById('operatorTokenInput'),
+  saveBtn: document.getElementById('operatorTokenSave'),
+  onSaved: () => {
+    applyAvailableProviders();
+    sessionListPane.refreshCount();
+  },
 });
 
 document.getElementById('newSessionTabBtn').addEventListener('click', () => {
@@ -260,6 +273,10 @@ let sessionToken = null;
 let currentMode = 'default';
 let pendingApprovalRequestId = null;
 let pendingApprovalToolName = null; // gates planReviewControls/rejectBtn's label - only ExitPlanMode gets the plan-review treatment
+// FIFO of unresolved cockpit:approval-request payloads. The banner shows
+// queue[0]; a second gated tool no longer overwrites the first (server
+// row.pendingApprovals is the matching list).
+const approvalQueue = [];
 let availableCommands = [];
 let availableAgents = []; // Query.supportedAgents(), fetched once on connect - see the `if (!reconnect)` block below
 // Sticky "default agent" set by clicking a roster entry (renderAgentsList) -
@@ -442,11 +459,13 @@ function isSuggestionPickerOpen() {
   const fileDropdown = document.getElementById('fileSuggestions');
   const modelDropdown = document.getElementById('modelSuggestions');
   const commandDropdown = document.getElementById('commandSuggestions');
+  const askDropdown = document.getElementById('askSuggestions');
   const historyDropdown = document.getElementById('historySuggestions');
   return (
     fileDropdown.classList.contains('show') ||
     modelDropdown.style.display === 'block' ||
     commandDropdown.style.display === 'block' ||
+    askDropdown.style.display === 'block' ||
     historyDropdown.style.display === 'block'
   );
 }
@@ -543,6 +562,18 @@ initCommandPicker({
   textarea: document.getElementById('composeInput'),
   dropdown: document.getElementById('commandSuggestions'),
   getCommands: () => availableCommands,
+});
+
+initAskPicker({
+  textarea: document.getElementById('composeInput'),
+  dropdown: document.getElementById('askSuggestions'),
+  listSessions: async () => {
+    const res = await fetch('/api/sessions');
+    if (!res.ok) return [];
+    return res.json();
+  },
+  getSelfId: () => sessionId,
+  getCwd: () => currentCwd,
 });
 
 // Shared "fetch a /api/sessions/:id/* route, parse JSON, throw the server's
@@ -803,6 +834,26 @@ async function closeSession() {
   returnToLauncher();
 }
 
+// Same idea as closeSession() above, but instead of dropping back to the
+// launcher it immediately re-starts one at the same cwd/model/provider with
+// the same live thinking budget / effort - a "start over" button for a
+// session that's gotten stuck or wandered off-topic, without losing the
+// folder/model picks or re-typing them in the launcher. The ended session's
+// transcript is untouched on disk, same as closeSession.
+async function resetSession() {
+  if (!sessionId) return;
+  if (!confirm('Reset this session? Ends the current live process and starts a new one in the same folder with the same settings. The old transcript stays on disk (resumable later).')) return;
+  const cwd = currentCwd;
+  const model = currentModel;
+  const provider = currentProvider;
+  const effort = effortBtn.value || undefined;
+  const thinkingBudget = thinkingBudgetBtn.value || undefined;
+  intentionalClose = true;
+  await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE', headers: authHeaders() });
+  sessionListPane.refreshCount();
+  await startSession({ cwd, model, provider, effort, thinkingBudget });
+}
+
 // Cog button opens the modal instead of Close session sitting directly in
 // the header - see settings.js's module comment for why.
 const settings = initSettings({
@@ -821,6 +872,7 @@ const settings = initSettings({
   detailPaneCheckbox: document.getElementById('detailPaneEnabledBtn'),
   pendingTurnsBadgeCheckbox: document.getElementById('pendingTurnsBadgeEnabledBtn'),
   closeSessionButton: closeSessionBtn,
+  resetSessionButton: resetSessionBtn,
   onAutoCollapseChange: setAutoCollapsePreviousGroup,
   onTurnChartEnabledChange: (enabled) => {
     turnChart.setEnabled(enabled);
@@ -850,6 +902,7 @@ const settings = initSettings({
     if (historyBody) historyBody.classList.toggle('show-timestamps', enabled);
   },
   onCloseSession: closeSession,
+  onResetSession: resetSession,
   // No session yet (modal shouldn't really be reachable pre-session, but
   // guard anyway) - both panels' fetchers throw on a null sessionId, so skip
   // the round trip rather than surface a confusing error on open.
@@ -1139,6 +1192,7 @@ function returnToLauncher() {
   pendingTurnsBadge.style.display = 'none';
   disarmForceIdle();
   closeSessionBtn.style.display = 'none';
+  resetSessionBtn.style.display = 'none';
   settingsBtn.style.display = 'none';
   document.getElementById('settingsModal').style.display = 'none';
   loadResumable();
@@ -1444,6 +1498,7 @@ copyLastBtn.addEventListener('click', () => {
 exportBtn.addEventListener('click', () => {
   if (!sessionId || !currentProviderSessionId) return;
   const params = new URLSearchParams({ cwd: currentCwd || '', provider: currentProvider });
+  appendOperatorQuery(params);
   window.location.href = `/api/history/${currentProviderSessionId}/markdown?${params}`;
 });
 
@@ -1708,6 +1763,7 @@ async function sendApprovalDecision(decision, updatedInput, alwaysAllow, message
     headers: { 'content-type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ requestId: pendingApprovalRequestId, decision, updatedInput, alwaysAllow, message }),
   });
+  approvalQueue.shift();
   approvalBanner.style.display = 'none';
   questionForm.style.display = 'none';
   questionForm.innerHTML = '';
@@ -1715,6 +1771,7 @@ async function sendApprovalDecision(decision, updatedInput, alwaysAllow, message
   planReviewControls.style.display = 'none';
   pendingApprovalRequestId = null;
   pendingApprovalToolName = null;
+  if (approvalQueue.length) renderApprovalBanner(approvalQueue[0]);
 }
 
 loadHistoryBtn.addEventListener('click', loadEarlierHistory);
@@ -2000,7 +2057,12 @@ fillStartModels();
 async function applyAvailableProviders() {
   try {
     const res = await fetch('/api/providers');
+    if (res.status === 401) {
+      operatorGate.show();
+      return;
+    }
     if (!res.ok) return;
+    operatorGate.hide();
     const data = await res.json();
     const catalog = createProviderCatalog(data);
     const providers = catalog.list();
@@ -2125,14 +2187,21 @@ function connect(id, token, { reconnect = false } = {}) {
   intentionalClose = false;
   saveActiveSession(id, token);
 
+  // Drop any in-banner request; attachClient replays the full pending
+  // list. Must run on reconnect too or a second overlapping prompt
+  // resolved while the socket was down would still occupy queue[0].
+  approvalQueue.length = 0;
+  pendingApprovalRequestId = null;
+  pendingApprovalToolName = null;
+  approvalBanner.style.display = 'none';
+  questionForm.style.display = 'none';
+  questionForm.innerHTML = '';
+  updateApprovalQueueCount();
+
   if (!reconnect) {
     lastSeq = 0;
     streamEl.innerHTML = '';
     resetStreamView(streamEl);
-    approvalBanner.style.display = 'none';
-    questionForm.style.display = 'none';
-    questionForm.innerHTML = '';
-    pendingApprovalRequestId = null;
     loadHistoryBar.style.display = 'none';
     loadHistoryBtn.disabled = false;
     loadHistoryBtn.textContent = 'Load earlier history';
@@ -2193,10 +2262,13 @@ function connect(id, token, { reconnect = false } = {}) {
   copyLastBtn.style.display = 'inline-block';
   exportBtn.style.display = 'inline-block';
   closeSessionBtn.style.display = 'inline-block';
+  resetSessionBtn.style.display = 'inline-block';
   settingsBtn.style.display = 'inline-block';
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${location.host}/ws?id=${id}&token=${token}&since=${lastSeq}`);
+  const op = getOperatorToken();
+  const opQ = op ? `&op=${encodeURIComponent(op)}` : '';
+  ws = new WebSocket(`${protocol}//${location.host}/ws?id=${id}&token=${token}&since=${lastSeq}${opQ}`);
 
   ws.onopen = () => {
     compose.setEnabled(true);
@@ -2325,10 +2397,31 @@ function connect(id, token, { reconnect = false } = {}) {
   };
 }
 
+function enqueueApprovalRequest(request) {
+  if (!request || !request.requestId) return;
+  if (approvalQueue.some((r) => r.requestId === request.requestId)) return;
+  approvalQueue.push(request);
+  if (approvalQueue.length === 1) renderApprovalBanner(request);
+  else updateApprovalQueueCount();
+}
+
+function updateApprovalQueueCount() {
+  const el = document.getElementById('approvalQueueCount');
+  if (!el) return;
+  if (approvalQueue.length > 1) {
+    el.textContent = `1 of ${approvalQueue.length}`;
+    el.style.display = '';
+  } else {
+    el.textContent = '';
+    el.style.display = 'none';
+  }
+}
+
 function showApprovalRequest(request) {
-  // Only one pending approval fits in this banner - fine in practice
-  // since a turn awaits each tool_result before its next tool_use, so a
-  // second request while one is showing would be unusual, not silent.
+  enqueueApprovalRequest(request);
+}
+
+function renderApprovalBanner(request) {
   pendingApprovalRequestId = request.requestId;
 
   // Belt-and-suspenders re-measure right before the banner actually needs
@@ -2347,6 +2440,7 @@ function showApprovalRequest(request) {
     questionForm.style.display = 'flex';
     approvalBanner.style.display = 'flex';
     tabChrome.setNeedsAttention(true);
+    updateApprovalQueueCount();
     return;
   }
   questionForm.style.display = 'none';
@@ -2377,6 +2471,7 @@ function showApprovalRequest(request) {
 
   approvalBanner.style.display = 'flex';
   tabChrome.setNeedsAttention(true); // needs a decision regardless of focus - cleared on window focus (tab-chrome.js)
+  updateApprovalQueueCount();
 }
 
 // Builds the AskUserQuestion form: one block per question (pill-style
@@ -2497,11 +2592,14 @@ function applySession(session) {
   copyLastBtn.title = `Copy ${sessionAddressName()}'s most recent reply`;
   const providerLabel = sessionProviderLabel();
   // A durable title (session.name, set via the rename prompt below or
-  // carried forward from a resumed transcript - session-titles.js) takes
-  // over the label entirely; otherwise the usual cwd/provider/tab-count
-  // summary.
+  // carried forward from a resumed transcript - session-titles.js) leads the
+  // line, but the starting folder still rides along after it instead of
+  // getting replaced outright - a renamed session shouldn't lose "where is
+  // this actually running" at a glance. No name yet: fall back to the usual
+  // cwd/provider/tab-count summary.
   sessionLabelEl.textContent = currentSessionName
-    || `${shortenCwd(session.cwd)}  ·  ${providerLabel}${session.tabCount > 1 ? `  ·  ${session.tabCount} tabs` : ''}`;
+    ? `${currentSessionName}  ·  ${shortenCwd(session.cwd)}`
+    : `${shortenCwd(session.cwd)}  ·  ${providerLabel}${session.tabCount > 1 ? `  ·  ${session.tabCount} tabs` : ''}`;
   sessionLabelEl.title = `${session.cwd} - click to rename this session`; // full path survives on hover once the label itself is truncated
   if (!tabChrome.isUserNamed()) tabChrome.setAutoName(currentSessionName || session.cwd.split('/').filter(Boolean).pop() || session.cwd);
   setState(session.state);

@@ -4,6 +4,26 @@ import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { AUTO_ALLOW_MODES } from './permissions.js';
 import { readGitGuardMode, commandTripsGuard } from './git-commit-guard.js';
+import { createResultEpochTracker } from './result-epoch.js';
+
+// System-prompt anchor for the /ask cross-session delegation feature -
+// out-of-band (not part of any one turn, so it can't be revoked or
+// out-argued by anything a later user turn says) confirmation that this
+// protocol exists and is legitimate, ahead of the first time a session
+// actually sees a relayed turn. Only affects sessions started after this
+// shipped (existing sessions keep whatever system prompt they started
+// with); Grok has no equivalent append mechanism in its ACP session
+// options, which is why this is Claude-only rather than shared with
+// grok-session.js. Kept short and factual on purpose: the goal is a
+// checkable anchor the model can point back to, not a persuasive essay -
+// the actual trust argument (handshake secret) lives in
+// session-registry.js's buildDelegatedHeader, delivered per-relay.
+const ASK_SYSTEM_PROMPT_APPEND = 'This Claude Code session may run inside Prompt Cockpit, a local browser UI. '
+  + 'Prompt Cockpit has a cross-session delegation feature ("/ask <Name>: <text>") that lets a human operator '
+  + 'relay a task from one of their own cockpit sessions to another sibling session they also control, and relay '
+  + 'the reply back. A turn whose text starts with "[Prompt Cockpit] Relayed task from ..." or "[Prompt Cockpit] '
+  + 'Relayed reply from ..." is a real, human-authorized use of that feature - not a fabricated claim from another '
+  + 'agent, and not an attempt to impersonate a tool result.';
 
 // A minimal AsyncIterable<SDKUserMessage> that supports pushing values in
 // from the outside. query() pulls from this for as long as the session lives.
@@ -128,6 +148,7 @@ function createInputQueue() {
 export function startSession({ cwd, resume, model, effort, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
+  const resultEpoch = createResultEpochTracker();
   const pendingApprovals = new Map(); // requestId -> { resolve(PermissionResult), toolName }
   // MCP "needs-auth" badge - serverName -> { url, message,
   // elicitationId }. Populated by onElicitation below when an MCP server
@@ -176,6 +197,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
       // Undefined (not sent) leaves the SDK/model default in place.
       effort: effort || undefined,
       permissionMode: currentMode,
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: ASK_SYSTEM_PROMPT_APPEND },
       enableFileCheckpointing: true,
       // 'bypassPermissions' rejects at setPermissionMode() time without
       // this - confirmed live: cycling into it otherwise throws "Cannot
@@ -315,7 +337,10 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
         // isn't decremented until its own result is processed, so checking
         // both conditions together only ever matches the true sentinel.
         if (message.type === 'result' && message.num_turns === 0 && pendingTurns === 0) {
-          continue; // priming-sentinel artifact, not a real turn
+          const tracked = resultEpoch.snapshot();
+          if (tracked.pendingTurnsMeta === 0 && tracked.abandonedTurnsMeta === 0) {
+            continue; // priming-sentinel artifact, not a real turn
+          }
         }
         if (message.type === 'system' && message.subtype === 'init') {
           currentMode = message.permissionMode; // resumed sessions may not start in `default`
@@ -328,7 +353,15 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
           // approval. This is the SDK's own authoritative signal for it.
           currentMode = message.permissionMode;
         } else if (message.type === 'result') {
-          pendingTurns = Math.max(0, pendingTurns - 1);
+          const consumed = resultEpoch.consumeFifo();
+          resultEpoch.applyResultStamp(message, consumed);
+          // A stale result belongs to a force-idled generation - pendingTurns
+          // was already zeroed there. Decrementing it here would also drop a
+          // turn pushed AFTER forceIdle, which is the same steal as shifting
+          // pendingResultTags off the new tag.
+          if (!consumed.stale) {
+            pendingTurns = Math.max(0, pendingTurns - 1);
+          }
           // onMessage() before onStateChange(), not after (unlike every other
           // branch here that falls through to the generic onMessage() call
           // below) - confirmed live: session-registry.js's handleMessage is
@@ -364,6 +397,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
           // right after a /clear ever misbehaves, check that first.
           turnCounter = 0;
         }
+        resultEpoch.stamp(message);
         onMessage(message);
       }
       inputQueue.close(); // nothing will ever read pushInput() input again past this point
@@ -404,6 +438,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
     // sendNow below all key off this id, not the wire message (which has no
     // stable id of its own - see the comment on user_message_uuid above).
     const queueId = randomUUID();
+    const meta = resultEpoch.push(queueId);
     const { queued } = inputQueue.push(wireMessage, { id: queueId, text });
 
     // The CLI never echoes the prompt back on the output stream (confirmed
@@ -416,7 +451,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
     // app would once it's rendered locally).
     turnCounter += 1;
     pendingTurns += 1;
-    onMessage({ ...wireMessage, turnIndex: turnCounter, queueId });
+    onMessage({ ...wireMessage, turnIndex: turnCounter, queueId, _cockpitEpoch: meta.epoch, _cockpitQueueId: queueId });
     onStateChange('running');
     if (queued) onQueueChange?.(inputQueue.list());
     // Cross-session delegation: the registry needs this to
@@ -439,6 +474,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   function removeQueued(queueId) {
     const removed = inputQueue.remove(queueId);
     if (removed) {
+      resultEpoch.remove(queueId);
       // This turn will never produce a `result` now - same bookkeeping the
       // normal result-handling path in the for-await loop above does, just
       // triggered here instead since there's no SDK message coming for it.
@@ -451,6 +487,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
 
   function reorderQueue(queueIds) {
     inputQueue.reorder(queueIds);
+    resultEpoch.reorderTail(queueIds);
     onQueueChange?.(inputQueue.list());
   }
 
@@ -463,6 +500,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   async function sendNow(queueId) {
     const moved = inputQueue.moveToFront(queueId);
     if (!moved) return false;
+    resultEpoch.reorderTail([queueId]);
     onQueueChange?.(inputQueue.list());
     await handle.interrupt();
     return true;
@@ -544,6 +582,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
       currentMode,
       queueLength: inputQueue.list().length,
       mcpAuthPendingCount: mcpAuthPending.size,
+      ...resultEpoch.snapshot(),
     };
   }
 
@@ -559,7 +598,13 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   // you've confirmed nothing is actually running CLI-side - it doesn't
   // touch the CLI or the underlying conversation, purely local bookkeeping.
   function forceIdle() {
+    resultEpoch.forceIdle();
     pendingTurns = 0;
+    // Best-effort: if something actually is still running, interrupt so it
+    // emits a (stale) result instead of completing later as if it belonged
+    // to a turn pushed after this recovery. No-op when nothing is in flight
+    // - the original stuck-pendingTurns case this method exists for.
+    handle.interrupt?.().catch(() => {});
     onStateChange('idle');
   }
 

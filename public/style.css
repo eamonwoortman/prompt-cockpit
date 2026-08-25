@@ -42,6 +42,25 @@
     gap: 12px;
     font-size: 14px;
   }
+  #operatorGate {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    background: #3a2f12;
+    border-bottom: 1px solid #6a5320;
+    font-size: 13px;
+  }
+  #operatorTokenInput {
+    flex: 1;
+    max-width: 360px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-monospace, monospace;
+  }
   #sessionLabel { cursor: pointer; }
   #sessionLabel:hover { text-decoration: underline dotted; }
   .model-badge {
@@ -267,13 +286,15 @@
     border-top: 1px solid var(--border);
   }
   .settings-danger p { margin: 2px 0 0; color: var(--muted); font-size: 12px; max-width: 380px; }
-  #closeSessionBtn.danger {
+  #closeSessionBtn.danger,
+  #resetSessionBtn.danger {
     background: transparent;
     border-color: var(--error);
     color: var(--error);
     white-space: nowrap;
   }
-  #closeSessionBtn.danger:hover { background: var(--error); color: white; }
+  #closeSessionBtn.danger:hover,
+  #resetSessionBtn.danger:hover { background: var(--error); color: white; }
 
   .settings-section { display: flex; flex-direction: column; gap: 6px; }
   .settings-section-header { display: flex; align-items: center; justify-content: space-between; }
@@ -612,6 +633,12 @@
     display: flex;
     gap: 10px;
     align-items: center;
+  }
+  #approvalQueueCount {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
   }
   #approvalPlain pre {
     flex: 1;
@@ -1642,7 +1669,7 @@
   #fileSuggestionsFiles li.suggestion-empty { color: var(--muted); cursor: default; }
   #fileSuggestionsFiles li.suggestion-empty:hover { background: none; color: var(--muted); }
 
-  #commandSuggestions, #modelSuggestions, #historySuggestions {
+  #commandSuggestions, #askSuggestions, #modelSuggestions, #historySuggestions {
     display: none;
     position: absolute;
     bottom: 60px;
@@ -1665,7 +1692,18 @@
     font-size: 12.5px;
     z-index: 5;
   }
-  #commandSuggestions li, #modelSuggestions li, #historySuggestions li {
+  #askSuggestions {
+    width: min(360px, calc(100% - 32px));
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12.5px;
+    z-index: 5;
+  }
+  #commandSuggestions li, #askSuggestions li, #modelSuggestions li, #historySuggestions li {
     padding: 5px 8px;
     border-radius: 4px;
     cursor: pointer;
@@ -1674,9 +1712,11 @@
     align-items: baseline;
   }
   #commandSuggestions li.active, #commandSuggestions li:hover,
+  #askSuggestions li.active, #askSuggestions li:hover,
   #modelSuggestions li.active, #modelSuggestions li:hover,
   #historySuggestions li.active, #historySuggestions li:hover { background: var(--accent); }
   #commandSuggestions li.active .cmd-desc, #commandSuggestions li:hover .cmd-desc,
+  #askSuggestions li.active .cmd-desc, #askSuggestions li:hover .cmd-desc,
   #modelSuggestions li.active .cmd-desc, #modelSuggestions li:hover .cmd-desc,
   #historySuggestions li.active .cmd-desc, #historySuggestions li:hover .cmd-desc { color: white; }
   #modelSuggestions .cmd-name, #historySuggestions .cmd-name { font-family: ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1686,7 +1726,8 @@
      description gets whatever width is left and wraps to 2 lines instead
      of cutting off mid-word on line 1 - skill descriptions in particular
      are full sentences, not short tags. */
-  #commandSuggestions .cmd-name { flex: 0 0 auto; font-family: ui-monospace, monospace; white-space: nowrap; }
+  #commandSuggestions .cmd-name, #askSuggestions .cmd-name { flex: 0 0 auto; font-family: ui-monospace, monospace; white-space: nowrap; }
+  #askSuggestions .cmd-desc { color: var(--muted); font-size: 11.5px; }
   #commandSuggestions .cmd-desc {
     flex: 1 1 auto;
     min-width: 0;
