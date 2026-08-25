@@ -310,6 +310,8 @@ function appendToolCallRow(container, block, usageInfo, parent, turnPointIndex, 
 
   const wrap = document.createElement('div');
   wrap.className = 'msg tool-row tool-row-pending';
+  wrap.setAttribute('role', 'button');
+  wrap.tabIndex = -1;
   wrap.dataset.toolKind = classifyTool(block.name);
   wrap.dataset.toolCallId = block.id;
   if (turnPointIndex != null) wrap.dataset.turnPoint = String(turnPointIndex);
@@ -583,6 +585,7 @@ function attachDelegatedTrace(container, queueId, label, text, onShowDelegatedTr
   const roleRow = wrap.querySelector(':scope > .role');
   if (roleRow) {
     const btn = document.createElement('button');
+    btn.type = 'button';
     btn.className = 'trace-toggle-btn';
     btn.textContent = '⤢ Expand answer';
     btn.title = 'Show the full reply (narration included) - by default only the final answer is relayed into this session';
@@ -703,6 +706,7 @@ function openGroup(container, firedAtMs = null) {
 
   const wrap = document.createElement('div');
   wrap.className = 'msg group collapsible';
+  wrap.setAttribute('aria-expanded', 'true');
   const roleRow = document.createElement('div');
   roleRow.className = 'role';
   const roleText = document.createElement('span');
@@ -806,6 +810,7 @@ function renderGroupSummary(group) {
 function setGroupExpanded(group, expanded) {
   group.expanded = expanded;
   group.wrap.classList.toggle('expanded', expanded);
+  group.wrap.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   renderGroupSummary(group);
 }
 
@@ -925,6 +930,7 @@ function appendBlock(container, cls, roleLabel, text, actions = [], parent = con
   }
   for (const action of actions) {
     const btn = document.createElement('button');
+    btn.type = 'button';
     btn.className = 'msg-action';
     btn.textContent = action.label;
     if (action.title) btn.title = action.title;

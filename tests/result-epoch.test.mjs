@@ -55,6 +55,26 @@ test('stamp uses abandoned-in-flight meta so leftover assistant text keeps the o
   assert.equal(msg._cockpitQueueId, 'a');
 });
 
+// forceIdle abandons the whole remaining pending list. Grok's runPrompt
+// closes over the exact meta object push() returned; after forceIdle that
+// object must read as stale so a prompt sitting on promptTail is skipped
+// instead of firing after recovery. Callers with a local unsent queue
+// remove() those ids first so they never land here.
+test('forceIdle abandons every pending meta, including still-queued ones', () => {
+  const t = createResultEpochTracker();
+  t.push('stuck');
+  const heldRef = t.push('still-queued');
+  t.forceIdle();
+  assert.equal(t.epoch, 1);
+  const abandonedQueued = t.consume(heldRef);
+  assert.equal(abandonedQueued.stale, true);
+  assert.equal(abandonedQueued.queueId, 'still-queued');
+  const abandonedHead = t.consumeFifo();
+  assert.equal(abandonedHead.stale, true);
+  assert.equal(abandonedHead.queueId, 'stuck');
+  assert.equal(t.consumeFifo().meta, null);
+});
+
 test('remove drops a queued id so a later fifo consume cannot hit it', () => {
   const t = createResultEpochTracker();
   t.push('in-flight');

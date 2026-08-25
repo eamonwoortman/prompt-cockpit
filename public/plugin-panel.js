@@ -29,15 +29,15 @@ export function initPluginPanel({ listEl, reloadButton, warningEl, fetchPlugins,
         if (warningEl) {
           if (result.error_count) {
             warningEl.textContent = `${result.error_count} plugin(s) failed to load - see terminal/logs for details.`;
-            warningEl.style.display = 'block';
+            warningEl.hidden = false;
           } else {
-            warningEl.style.display = 'none';
+            warningEl.hidden = true;
           }
         }
       } catch (err) {
         if (warningEl) {
           warningEl.textContent = `Could not reload plugins: ${err.message || err}`;
-          warningEl.style.display = 'block';
+          warningEl.hidden = false;
         }
       } finally {
         reloadButton.disabled = false;
@@ -47,7 +47,7 @@ export function initPluginPanel({ listEl, reloadButton, warningEl, fetchPlugins,
   }
 
   async function refresh() {
-    if (warningEl) warningEl.style.display = 'none';
+    if (warningEl) warningEl.hidden = true;
     await panel.refresh();
   }
 

@@ -50,6 +50,20 @@ by hand: `compactBtn`'s red state and tooltip, and `stats-panel.js`'s
 context bar color, both track `context.autoCompact.warnPercent` instead of
 the old independently-hardcoded 80/20/50 constants.
 
+## Turn-chart y-axis scale
+
+`turn-chart.test.mjs` covers the pure helpers behind the cost-graph axis
+(`niceScaleMax`, `formatAxisTick` in `public/turn-chart.js`): rounding a raw
+bar-max onto 1/2/2.5/5/10 (including fractional dollar amounts and
+thousands of tokens), and compact `$` / `K` / `M` tick labels. The DOM
+drawing (gridlines, left-side labels, metric switching) is client-side and
+hand-verified only, same convention as the rest of `public/*.js`.
+
+**Not covered by unit tests, hand-verified only:** that the axis tracks the
+metric dropdown (cost vs tokens in/out/cached), that "exclude cache misses
+from scale" still sets the labeled max, and that the viewport slider does
+not rescale the axis (it is a transcript-scroll thumb, not a zoom).
+
 ## Message timestamps toggle
 
 Entirely client-side (`public/settings.js`, `public/stream-view.js`,

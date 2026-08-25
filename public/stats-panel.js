@@ -71,7 +71,7 @@ export function initStatsPanel({ el }) {
       parts.push(`<span title="Plan 5-hour window utilization">${Math.round(fiveHour.utilization)}% 5h${resetLabel}</span>`);
     }
     el.innerHTML = parts.join('<span class="stat-sep">·</span>');
-    el.style.display = 'flex';
+    el.hidden = false;
   }
 
   // Same shape as ~/.claude/statusline-command.py's context segment: a
@@ -112,7 +112,7 @@ export function initStatsPanel({ el }) {
 
   function reset() {
     el.innerHTML = '';
-    el.style.display = 'none';
+    el.hidden = true;
   }
 
   return { update, reset };

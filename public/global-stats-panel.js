@@ -306,6 +306,7 @@ function renderAccountLimitsSection() {
   title.textContent = 'Account limits';
   const refreshBtn = document.createElement('button');
   refreshBtn.type = 'button';
+  refreshBtn.className = 'btn';
   refreshBtn.textContent = 'Refresh';
   refreshBtn.title = 'Runs claude -p "/usage" (a few seconds) - reflects your plan quota across every device signed into this account, not just local transcripts';
   header.append(title, refreshBtn);

@@ -288,6 +288,27 @@ test('forceIdle marks a late in-flight result stale and still runs a newly pushe
   assert.equal(prompts[1].params.prompt[0].text, 'second');
 });
 
+test('forceIdle skips a prompt that was still queued on promptTail', async () => {
+  const hangPrompt = {};
+  const { session, fake, states } = startFake({}, { hangPrompt });
+  await flush();
+  await flush();
+  session.pushInput('first');
+  await flush();
+  await flush();
+  session.pushInput('second');
+  await flush();
+  await flush();
+  session.forceIdle();
+  assert.equal(states[states.length - 1], 'idle');
+  hangPrompt.resolve({ stopReason: 'cancelled' });
+  await flush();
+  await flush();
+  const prompts = fake.requests.filter((r) => r.method === 'session/prompt');
+  assert.equal(prompts.length, 1, 'queued second prompt must not be sent after forceIdle');
+  assert.equal(prompts[0].params.prompt[0].text, 'first');
+});
+
 test('a new pushInput while a prompt is in flight cancels the current turn', async () => {
   const hangPrompt = {};
   const { session, fake } = startFake({}, { hangPrompt });

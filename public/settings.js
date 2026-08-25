@@ -26,6 +26,7 @@ const DEFAULTS = {
   turnChartEnabled: false,
   turnChartMetric: 'cost',
   turnChartExcludeCacheMisses: false,
+  turnChartAxisPosition: 'left', // 'left' | 'right' - which side of the cost graph shows y-axis labels
   taskPanelEnabled: false,
   showMessageTimestamps: false,
   // Default ON, unlike the other two panels above - Decision 3 (tool-call
@@ -40,6 +41,9 @@ const DEFAULTS = {
   // the settings-modal machinery, since there's no checkbox/select for this,
   // just a drag handle.
   detailPaneWidth: 380,
+  // Same drag-resized/patchSettings-only persistence as detailPaneWidth
+  // above - session-list-pane.js's own resize handle.
+  sessionListPaneWidth: 380,
 };
 
 function makeFolderId() {
@@ -213,7 +217,7 @@ export function initSettings({
   }
 
   cogButton.addEventListener('click', () => {
-    modal.style.display = 'flex';
+    if (!modal.open) modal.showModal();
     if (onOpen) onOpen();
   });
   closeButton.addEventListener('click', close);
@@ -231,8 +235,12 @@ export function initSettings({
   for (const btn of tabButtons) {
     btn.addEventListener('click', () => {
       const target = btn.dataset.settingsTab;
-      for (const b of tabButtons) b.classList.toggle('active', b === btn);
-      for (const p of tabPanels) p.style.display = p.dataset.settingsTabPanel === target ? 'flex' : 'none';
+      for (const b of tabButtons) {
+        const on = b === btn;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      }
+      for (const p of tabPanels) p.hidden = p.dataset.settingsTabPanel !== target;
     });
   }
 
@@ -263,7 +271,7 @@ export function initSettings({
   });
 
   function close() {
-    modal.style.display = 'none';
+    if (modal.open) modal.close();
   }
 
   // Shared by the checkbox above and app.js's turnChartToggleBtn (the "same

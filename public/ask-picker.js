@@ -94,6 +94,8 @@ export function initAskPicker({ textarea, dropdown, listSessions, getSelfId, get
     dropdown.innerHTML = '';
     items.forEach((session, i) => {
       const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', i === activeIndex ? 'true' : 'false');
       li.className = i === activeIndex ? 'active' : '';
       const name = document.createElement('span');
       name.className = 'cmd-name';
@@ -108,7 +110,7 @@ export function initAskPicker({ textarea, dropdown, listSessions, getSelfId, get
       });
       dropdown.append(li);
     });
-    dropdown.style.display = 'block';
+    dropdown.classList.add('show');
   }
 
   function select(i) {
@@ -118,7 +120,7 @@ export function initAskPicker({ textarea, dropdown, listSessions, getSelfId, get
   }
 
   function onKeydown(event) {
-    if (dropdown.style.display !== 'block') return;
+    if (!dropdown.classList.contains('show')) return;
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       activeIndex = Math.min(activeIndex + 1, items.length - 1);
@@ -132,12 +134,14 @@ export function initAskPicker({ textarea, dropdown, listSessions, getSelfId, get
       event.stopPropagation();
       select(activeIndex);
     } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
       close();
     }
   }
 
   function close() {
-    dropdown.style.display = 'none';
+    dropdown.classList.remove('show');
     dropdown.innerHTML = '';
     items = [];
     activeIndex = -1;

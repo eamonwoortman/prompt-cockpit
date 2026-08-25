@@ -98,6 +98,8 @@ export function initFilePicker({ textarea, dropdown, getSessionId, getSessionTok
     foldersEl.innerHTML = '';
     virtualFolders.forEach((folder, i) => {
       const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', i === activeFolderIndex ? 'true' : 'false');
       li.textContent = `${folder.icon} ${folder.label}`;
       li.className = i === activeFolderIndex ? 'active' : '';
       li.addEventListener('mousedown', (e) => {
@@ -128,8 +130,14 @@ export function initFilePicker({ textarea, dropdown, getSessionId, getSessionTok
       // needs the full relative path shown.
       li.textContent = item.source === 'cwd' ? item.path : basename(item.path);
       li.title = item.path; // full insertion path on hover, for anyone who wants to double-check
+      li.setAttribute('role', 'option');
       li.className = item.source !== 'cwd' ? 'suggestion-screenshot' : ''; // class name predates multi-folder support - still just means "not the local folder"
-      if (i === rightActiveIndex) li.classList.add('active');
+      if (i === rightActiveIndex) {
+        li.classList.add('active');
+        li.setAttribute('aria-selected', 'true');
+      } else {
+        li.setAttribute('aria-selected', 'false');
+      }
       li.addEventListener('mousedown', (e) => {
         e.preventDefault(); // keep focus in textarea, don't fire blur before we insert
         selectFile(i);
@@ -186,6 +194,8 @@ export function initFilePicker({ textarea, dropdown, getSessionId, getSessionTok
       event.stopPropagation(); // don't let compose.js send the message
       selectFile(rightActiveIndex);
     } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
       close();
     }
   }

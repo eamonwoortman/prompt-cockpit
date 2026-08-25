@@ -82,11 +82,13 @@ export function initHistorySearch({ textarea, dropdown, getEntries, fuzzyScore, 
       empty.className = 'cmd-desc';
       empty.textContent = getEntries().length ? 'No matches' : 'No prompt history yet for this folder';
       dropdown.append(empty);
-      dropdown.style.display = 'block';
+      dropdown.classList.add('show');
       return;
     }
     filtered.forEach((text, i) => {
       const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', i === activeIndex ? 'true' : 'false');
       li.className = i === activeIndex ? 'active' : '';
       const name = document.createElement('span');
       name.className = 'cmd-name';
@@ -99,7 +101,7 @@ export function initHistorySearch({ textarea, dropdown, getEntries, fuzzyScore, 
       });
       dropdown.append(li);
     });
-    dropdown.style.display = 'block';
+    dropdown.classList.add('show');
   }
 
   // Selecting loads the prompt back into the box for review/editing, same
@@ -128,7 +130,7 @@ export function initHistorySearch({ textarea, dropdown, getEntries, fuzzyScore, 
 
   function close() {
     open = false;
-    dropdown.style.display = 'none';
+    dropdown.classList.remove('show');
     dropdown.innerHTML = '';
     filtered = [];
     activeIndex = -1;

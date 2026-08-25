@@ -17,7 +17,7 @@ export function initTaskPanel({ panel, listEl }) {
 
   function setEnabled(next) {
     enabled = next;
-    panel.style.display = enabled ? 'block' : 'none';
+    panel.hidden = !enabled;
     if (enabled) render();
   }
 

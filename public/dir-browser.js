@@ -27,8 +27,11 @@ export function initDirBrowser({ modal, pathLabel, list, upButton, selectButton,
     list.innerHTML = '';
     for (const entry of data.entries) {
       const li = document.createElement('li');
-      li.textContent = entry.name;
-      li.addEventListener('click', () => load(entry.path));
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = entry.name;
+      btn.addEventListener('click', () => load(entry.path));
+      li.append(btn);
       list.append(li);
     }
   }
@@ -44,11 +47,11 @@ export function initDirBrowser({ modal, pathLabel, list, upButton, selectButton,
 
   function open(startPath, onSelectOverride) {
     activeOnSelect = onSelectOverride || onSelect;
-    modal.style.display = 'flex';
+    if (!modal.open) modal.showModal();
     load(startPath || '');
   }
   function close() {
-    modal.style.display = 'none';
+    if (modal.open) modal.close();
   }
 
   return { open, close };

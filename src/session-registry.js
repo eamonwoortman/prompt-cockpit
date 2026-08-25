@@ -647,8 +647,23 @@ export async function setPermissionMode(id, mode) {
 // in on the interrupted turn's own `result` message the same way a normal
 // completion does, broadcast separately by the row's existing message
 // handling, not by this call.
+//
+// session.js's interrupt() (the client's Stop button) also drains its own
+// local input queue now, not just the in-flight turn - "stop" means stop
+// everything. It does that synchronously, before this call even returns, so
+// by the time row.handle.interrupt() resolves the queue is already empty -
+// row.pendingResultTags (registry-only bookkeeping session.js has no
+// knowledge of) would go stale for exactly those dropped turns otherwise,
+// the same desync removeQueued() above already guards against for a single
+// manual removal. Snapshot which ids are about to be dropped first so they
+// can be spliced out (and any delegation told its task was cancelled) right
+// alongside.
 export async function interruptTurn(id) {
-  return queryPassthrough(id, (row) => row.handle.interrupt());
+  return queryPassthrough(id, async (row) => {
+    const queuedIds = row.handle.listQueue().map((e) => e.id);
+    await row.handle.interrupt();
+    for (const queueId of queuedIds) dropResultTag(row, queueId);
+  });
 }
 
 // Manual last-resort recovery for the "pendingTurnsCount never reaches 0"
@@ -1410,23 +1425,25 @@ export function listQueue(id) {
   return row.handle.listQueue();
 }
 
+// Shared by removeQueued() below and interruptTurn(): queueId's turn will
+// now never run, so it will never produce a `result` either - drop its
+// pendingResultTags entry so a LATER turn's result doesn't get mismatched
+// against it (the same desync review flagged for plain
+// shift()-without-bookkeeping), and if it was a delegation, tell its origin
+// now rather than leaving it waiting forever for a reply that was just
+// cancelled out from under it.
+function dropResultTag(row, queueId) {
+  const i = row.pendingResultTags.findIndex((e) => e.queueId === queueId);
+  if (i === -1) return;
+  const [entry] = row.pendingResultTags.splice(i, 1);
+  if (entry.tag) relayDelegationResult(row, entry.tag, { ok: false, errorText: 'the delegated task was removed from the queue before it ran' });
+}
+
 export async function removeQueued(id, queueId) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
   const removed = await row.handle.removeQueued(queueId);
-  if (removed) {
-    // This queueId's turn will now never run, so it will never
-    // produce a `result` either - drop its pendingResultTags entry so a
-    // LATER turn's result doesn't get mismatched against it (the same
-    // desync review flagged for plain shift()-without-bookkeeping), and if
-    // it was a delegation, tell its origin now rather than leaving it
-    // waiting forever for a reply that was just cancelled out from under it.
-    const i = row.pendingResultTags.findIndex((e) => e.queueId === queueId);
-    if (i !== -1) {
-      const [entry] = row.pendingResultTags.splice(i, 1);
-      if (entry.tag) relayDelegationResult(row, entry.tag, { ok: false, errorText: 'the delegated task was removed from the queue before it ran' });
-    }
-  }
+  if (removed) dropResultTag(row, queueId);
   return removed;
 }
 
@@ -1439,9 +1456,8 @@ export async function removeQueued(id, queueId) {
 // shift() relies on (nothing reorders an entry out of that slot except a
 // 'result' actually consuming it). Both handle.reorderQueue() and
 // handle.sendNow() only ever touch session.js's `pending` sub-queue, which
-// by construction never contains the in-flight entry (createInputQueue's
-// module comment: a push that lands while the consumer is already waiting
-// is handed straight to it and never enters `pending` at all) - so neither
+// by construction never contains the in-flight entry (createInputQueue
+// shifts a message out of pending when it hands it to the CLI) - so neither
 // operation can ever change what result arrives next, no matter what ids
 // the caller passes.
 //

@@ -65,23 +65,21 @@ export function initOperatorGate({ banner, input, saveBtn, onSaved } = {}) {
   if (!banner || !input || !saveBtn) return { show() {}, hide() {} };
 
   function show() {
-    banner.style.display = '';
+    banner.hidden = false;
     input.value = getOperatorToken();
     input.focus();
   }
   function hide() {
-    banner.style.display = 'none';
+    banner.hidden = true;
   }
 
-  saveBtn.addEventListener('click', () => {
+  banner.addEventListener('submit', (event) => {
+    event.preventDefault();
     const value = input.value.trim();
     if (!value) return;
     setOperatorToken(value);
     hide();
     onSaved?.();
-  });
-  input.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') saveBtn.click();
   });
 
   if (!getOperatorToken()) show();

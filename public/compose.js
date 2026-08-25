@@ -154,7 +154,15 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
     historyIndex = -1; // actual typing (not an arrow-key-driven value swap, which never fires 'input') detaches from history browsing
     autosize();
   });
-  sendButton.addEventListener('click', send);
+  const form = sendButton.closest('form');
+  if (form) {
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      send();
+    });
+  } else {
+    sendButton.addEventListener('click', send);
+  }
 
   // Not the native `resize` handle: that one lives at an element's own
   // bottom-right corner, and this box is pinned to the viewport bottom -

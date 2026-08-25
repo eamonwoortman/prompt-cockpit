@@ -7,167 +7,114 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="/style.css" />
 </head>
-<body>
-  <header>
-    <strong id="appTitle">Prompt Cockpit</strong>
-    <span id="sessionLabel"></span>
-    <span id="sessionLabelError" class="mcp-error" style="display:none"></span>
-    <!-- Model + reasoning-effort/thinking-budget in use, live for the whole
-         session (not just the Settings modal) - see applyModelBadge in
-         app.js. Click reopens Settings on the Display tab, same spot these
-         values are actually changed from, rather than duplicating the
-         controls up here. Hidden until a session is live (returnToLauncher
-         resets it), same pattern as diffBtn/closeSessionBtn. -->
-    <span id="modelBadge" class="model-badge" style="display:none" title="Model / reasoning effort / thinking budget in use"></span>
-    <span id="rateLimitBanner" class="rate-limit-banner" style="display:none"></span>
+<body data-screen="launcher">
+  <header class="app-header">
+    <h1 id="appTitle">Prompt Cockpit</h1>
+    <button type="button" id="sessionLabel"></button>
+    <span id="sessionLabelError" class="mcp-error" hidden></span>
+    <span id="modelBadge" class="model-badge session-chrome" hidden title="Model / reasoning effort / thinking budget in use"></span>
+    <span id="rateLimitBanner" class="rate-limit-banner session-chrome" hidden></span>
     <div class="spacer"></div>
-    <label id="autoContinueLabel" style="display:none" title="Same as the desktop app's checkbox: when the plan usage limit rejects a turn, automatically send Continue once it resets">
+    <label id="autoContinueLabel" class="session-chrome" hidden title="When the plan usage limit rejects a turn, automatically send Continue once it resets">
       <input type="checkbox" id="autoContinueBtn" /> Auto-continue
     </label>
-    <button id="diffBtn" style="display:none" title="View uncommitted changes in the workspace">Diff</button>
-    <!-- Server-wide, always visible (not gated on a live session in this
-         tab - the whole point is seeing what else is running elsewhere).
-         sessionCountBtn's count and sessionListPane's rows both come from
-         GET /api/sessions (session-list-pane.js) - no per-session token
-         needed, see that route's server.js comment. -->
-    <button id="sessionCountBtn" title="All sessions on this server">… sessions</button>
-    <button id="newSessionTabBtn" title="Open a new tab to start another session">+ New tab</button>
-    <button id="settingsBtn" style="display:none" title="Settings">⚙</button>
+    <button type="button" id="diffBtn" class="btn session-chrome" title="View uncommitted changes in the workspace">Diff</button>
+    <button type="button" id="sessionCountBtn" class="btn" title="All sessions on this server">… sessions</button>
+    <button type="button" id="newSessionTabBtn" class="btn" title="Open a new tab to start another session">+ New tab</button>
+    <button type="button" id="settingsBtn" class="btn session-chrome" title="Settings" aria-label="Settings">⚙</button>
   </header>
-  <div id="operatorGate" style="display:none">
+  <form id="operatorGate" hidden>
     <span>Open the URL printed in the server console, or paste the operator token:</span>
+    <label class="visually-hidden" for="operatorTokenInput">Operator token</label>
     <input id="operatorTokenInput" type="password" autocomplete="off" spellcheck="false" />
-    <button type="button" id="operatorTokenSave">Save</button>
-  </div>
+    <button type="submit" id="operatorTokenSave" class="btn btn-primary">Save</button>
+  </form>
 
-  <div id="launcher">
-    <select id="startProviderSelect" title="Which coding agent to use">
-      <option value="claude">Claude</option>
-      <option value="grok">Grok</option>
-    </select>
-    <h2>Start a session</h2>
-    <div class="cwd-row">
-      <input id="cwdInput" type="text" placeholder="/path/to/project" />
-      <select id="recentFoldersSelect" title="Pre-fill from a recently used folder">
-        <option value="">…</option>
+  <div id="launcher" class="launcher-chrome">
+    <form id="launcherForm">
+      <label class="visually-hidden" for="startProviderSelect">Provider</label>
+      <select id="startProviderSelect" title="Which coding agent to use">
+        <option value="claude">Claude</option>
+        <option value="grok">Grok</option>
       </select>
-      <button id="browseBtn" title="Browse for a project folder">Browse</button>
-    </div>
-    <div class="start-row">
-      <input id="startNameInput" type="text" placeholder="Name (e.g. Claude)" title="Lets another session /ask this one by name" />
-      <select id="startModelSelect">
-        <option value="">Default model</option>
-        <option value="sonnet">Sonnet</option>
-        <option value="opus">Opus</option>
-        <option value="haiku">Haiku</option>
-      </select>
-      <!-- Claude gets two distinct dials, Grok gets one:
-           - startClaudeEffortSelect: Claude-only reasoning-effort tier
-             (Default/Low.../Max, the Agent SDK's `effort` option) - shown
-             only when the provider picker is on Claude, hidden for Grok
-             (whose own effort concept lives in the shared slot below).
-             Sent at creation time, folded into POST /api/sessions' `effort`
-             field same as Grok's (session.js now forwards it into query()'s
-             options - see session.js/session-registry.js CLAUDE_EFFORTS).
-           - startEffortSelect: Claude's thinking-token budget (Off/4k/10k/
-             32k) OR Grok's reasoning tier (Low..Extra high) - one shared
-             slot, repopulated per-provider by fillStartEffort() in app.js.
-             Grok's value rides the same creation-time `effort` field above;
-             Claude's thinking budget has no creation-time param (it's
-             always a live Query call), so it rides in separately via a
-             follow-up POST .../thinking call once the session id comes
-             back (see startSession). -->
-      <select id="startClaudeEffortSelect" title="Claude's reasoning effort for this session" style="display:none"></select>
-      <select id="startEffortSelect" title="Reasoning effort for this session"></select>
-      <button id="startBtn" title="Start a new session">Start</button>
-    </div>
+      <h2>Start a session</h2>
+      <div class="cwd-row">
+        <label class="visually-hidden" for="cwdInput">Project folder</label>
+        <input id="cwdInput" type="text" placeholder="/path/to/project" />
+        <label class="visually-hidden" for="recentFoldersSelect">Recent folders</label>
+        <select id="recentFoldersSelect" title="Pre-fill from a recently used folder">
+          <option value="">…</option>
+        </select>
+        <button type="button" id="browseBtn" class="btn" title="Browse for a project folder">Browse</button>
+      </div>
+      <div class="start-row">
+        <label class="visually-hidden" for="startNameInput">Session name</label>
+        <input id="startNameInput" type="text" placeholder="Name (e.g. Claude)" title="Lets another session /ask this one by name" />
+        <label class="visually-hidden" for="startModelSelect">Model</label>
+        <select id="startModelSelect">
+          <option value="">Default model</option>
+          <option value="sonnet">Sonnet</option>
+          <option value="opus">Opus</option>
+          <option value="haiku">Haiku</option>
+        </select>
+        <label class="visually-hidden" for="startClaudeEffortSelect">Claude reasoning effort</label>
+        <select id="startClaudeEffortSelect" title="Claude's reasoning effort for this session" hidden></select>
+        <label class="visually-hidden" for="startEffortSelect">Reasoning effort</label>
+        <select id="startEffortSelect" title="Reasoning effort for this session"></select>
+        <button type="submit" id="startBtn" class="btn btn-primary" title="Start a new session">Start</button>
+      </div>
+    </form>
 
     <h2>Click to resume</h2>
     <ul id="resumeList"></ul>
   </div>
 
-  <div id="loadHistoryBar">
-    <button id="loadHistoryBtn" title="Load earlier messages from this session">Load earlier history</button>
+  <div id="loadHistoryBar" class="session-chrome" hidden>
+    <button type="button" id="loadHistoryBtn" class="btn" title="Load earlier messages from this session">Load earlier history</button>
   </div>
 
-  <!-- Trajectory-style layout: #stream (flat one-line tool-call rows) beside
-       a permanently-docked detail pane (#detailPane) for whichever row is
-       selected - the app's first side-by-side layout, see the @media
-       fallback below #detailPane's rules for the narrow-viewport case.
-       Toggled via #detailPaneToggleBtn (agentsBar row) + settings.js's
-       detailPaneEnabled, same pattern as #turnChartPanel. -->
-  <div id="streamWrap">
+  <div id="streamWrap" class="session-chrome">
     <div id="stream"></div>
     <div id="detailPane" class="detail-pane">
       <div id="detailPaneResizeHandle" class="detail-pane-resize-handle" title="Drag to resize"></div>
       <div class="detail-pane-header">
         <span id="detailPaneLabel" class="detail-pane-header-label">No tool call selected yet</span>
-        <button id="detailPaneFollowLiveBtn" title="Jump to the most recent tool call">● live</button>
-        <button id="detailPaneCollapseBtn" title="Collapse detail pane">✕</button>
+        <button type="button" id="detailPaneFollowLiveBtn" class="btn" title="Jump to the most recent tool call">● live</button>
+        <button type="button" id="detailPaneCollapseBtn" class="btn" title="Collapse detail pane" aria-label="Collapse detail pane">✕</button>
       </div>
-      <div class="detail-pane-tabs">
-        <button type="button" class="detail-tab active" data-tab="summary" title="Show summary">Summary</button>
-        <button type="button" class="detail-tab" data-tab="payload" title="Show raw request payload">Payload</button>
-        <button type="button" class="detail-tab" data-tab="result" title="Show tool result">Result</button>
-        <button type="button" class="detail-tab" data-tab="timing" title="Show timing breakdown">Timing</button>
+      <div class="detail-pane-tabs" role="tablist">
+        <button type="button" class="detail-tab active" data-tab="summary" role="tab" aria-selected="true" title="Show summary">Summary</button>
+        <button type="button" class="detail-tab" data-tab="payload" role="tab" aria-selected="false" title="Show raw request payload">Payload</button>
+        <button type="button" class="detail-tab" data-tab="result" role="tab" aria-selected="false" title="Show tool result">Result</button>
+        <button type="button" class="detail-tab" data-tab="timing" role="tab" aria-selected="false" title="Show timing breakdown">Timing</button>
       </div>
       <div id="detailPaneBody" class="detail-pane-body"></div>
     </div>
   </div>
-  <!-- Deliberately NOT nested inside #streamWrap/#launcher (both of which
-       toggle display:none depending on session state - see connect()/
-       returnToLauncher() in app.js): a display:none ancestor hides this too
-       regardless of its own position, and the whole point is that the
-       header's sessionCountBtn works the same on the launcher screen as
-       mid-session. Fixed-positioned instead of an in-flow flex sibling of
-       #detailPane for that reason - see session-list-pane.js, which sets
-       `top` at open time to sit just under the header. Reuses the
-       .detail-pane header/body styling via the shared class. -->
+  <!-- Fixed overlay so the launcher's display:none does not hide it. top is set in session-list-pane.js from the header height. -->
   <div id="sessionListPane" class="detail-pane">
+    <div id="sessionListResizeHandle" class="detail-pane-resize-handle" title="Drag to resize"></div>
     <div class="detail-pane-header">
       <span class="detail-pane-header-label">All sessions</span>
-      <button id="sessionListCloseBtn" title="Close">✕</button>
+      <button type="button" id="sessionListCloseBtn" class="btn" title="Close" aria-label="Close session list">✕</button>
     </div>
-    <!-- This process's delegation handshake secret -
-         copy it and paste into a sibling session's own Settings panel (or,
-         eventually, an SSH'd remote cockpit's) to mark that session trusted
-         for /ask delegation. Pairing is manual-only for now - see
-         session-registry.js's handshakeSecret comment. -->
-    <div class="settings-row" id="handshakeRow" style="padding: 8px 12px; border-bottom: 1px solid var(--border);">
+    <div class="settings-row" id="handshakeRow">
       <span title="Sessions must share this value to delegate tasks to each other">Handshake</span>
-      <code id="handshakeValue" style="flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px;"></code>
-      <button id="handshakeCopyBtn" type="button">Copy</button>
-      <button id="handshakeRegenBtn" type="button" title="Rotate the secret - every session not re-synced afterward loses delegation trust">↻</button>
+      <code id="handshakeValue"></code>
+      <button type="button" id="handshakeCopyBtn" class="btn">Copy</button>
+      <button type="button" id="handshakeRegenBtn" class="btn" title="Rotate the secret - every session not re-synced afterward loses delegation trust" aria-label="Regenerate handshake">↻</button>
     </div>
     <div id="sessionListBody" class="detail-pane-body"></div>
   </div>
   <div id="copyToast">Copied</div>
-  <!-- Sits directly above the compose box, not under the header - a
-       decision needing your eyes belongs where your eyes already are
-       (about to type), not somewhere you have to look away to find. -->
-  <div id="approvalBanner">
+  <div id="approvalBanner" class="session-chrome" hidden>
     <div id="approvalPlain">
       <div id="approvalMessageRow">
         <strong id="approvalHeading"></strong>
-        <span id="approvalQueueCount" style="display:none"></span>
+        <span id="approvalQueueCount" hidden></span>
         <pre id="approvalDetail"></pre>
       </div>
-      <!-- Decision row - always-allow scope + Accept/No - kept on its own
-           row, left-aligned under the message rather than trailing at the
-           end of the (variable-width) message row above, so it's in the
-           same place every time regardless of how long the tool's JSON
-           input happens to be. -->
       <div id="approvalDecisionRow">
-        <!-- Backlog.md's permission "always allow this tool" gap, per-tool-name
-             only (no input/cwd pattern matching - still flagged as needing its
-             own design call). "Always in this project" persists to
-             settings.local.json's permissions.allow (src/permission-rules.js) -
-             the CLI's own rule engine picks it up on the next session start and
-             this cockpit never has to prompt for that tool in this project
-             again; revoke it from the Settings modal's General tab. Tool name
-             filled in per-request (app.js's showApprovalRequest). Hidden by
-             default since #approvalPlain itself is hidden for AskUserQuestion,
-             which always needs a real per-call answer regardless of this. -->
         <label id="alwaysAllowLabel">
           Always allow <span id="alwaysAllowToolName"></span>
           <select id="alwaysAllowScope">
@@ -176,258 +123,149 @@
             <option value="project">always in this project</option>
           </select>
         </label>
-        <button id="approveBtn" title="Approve and continue with this plan">Accept this</button>
-        <button id="rejectBtn" title="Reject this plan and send feedback">No</button>
+        <button type="button" id="approveBtn" title="Approve and continue with this plan">Accept this</button>
+        <button type="button" id="rejectBtn" title="Reject this plan and send feedback">No</button>
       </div>
-      <!-- Plan review ("preview + comment/revise, not just approve/reject" -
-           Grok CLI's /view-plan equivalent). Shown only
-           for ExitPlanMode (showApprovalRequest); a plain Bash/Write
-           approval has no use for either field. Two independent verbs, not
-           one text box: "Request changes" reuses the existing deny path
-           (ExitPlanMode's PermissionResult already supports a `message` the
-           model reads as feedback - previously always the hardcoded "Not
-           approved by user."), while the note field rides on approval
-           instead, queued as a real follow-up turn right after (session.js's
-           pushInput/the visible-queue work) since an `allow` PermissionResult
-           has no message field of its own for the model to see. -->
-      <div id="planReviewControls" style="display:none">
+      <div id="planReviewControls" hidden>
+        <label class="visually-hidden" for="planFeedbackText">Requested changes</label>
         <textarea id="planFeedbackText" placeholder="What should change? (used by Request changes below)"></textarea>
+        <label class="visually-hidden" for="planNoteText">Optional note after approving</label>
         <input type="text" id="planNoteText" placeholder="Optional note to send right after approving (e.g. also validate with a second agent)" />
       </div>
     </div>
-    <!-- AskUserQuestion gets its own real form instead of the generic
-         allow/deny above - built dynamically in app.js's renderQuestionForm,
-         since the question/option set is different every time. This is the
-         fix for the tool "not working at all": previously it rendered here
-         as a plain allow/deny with no questions or options visible at all,
-         so a click sent back an empty answer and the model read that as
-         "the user did not answer the questions". -->
-    <div id="questionForm"></div>
+    <form id="questionForm" hidden></form>
   </div>
-  <!-- Subagent roster (Query.supportedAgents()) - shown only when the
-       session actually has any. Click an entry to set it as the sticky
-       "default agent": every message you send afterward gets prefixed with
-       an instruction to delegate via the Task tool to that subagent_type
-       (see app.js's selectedAgentName/onSend), until you click it again (or
-       a different entry) to change/clear it. Sits directly above the
-       compose box for the same reason approvalBanner does (see its own
-       comment above). -->
-  <div id="agentsBar">
+  <div id="agentsBar" class="session-chrome">
     <div id="agentsBarRow">
-      <!-- Per-turn cost graph toggle (turn-chart.js) - leftmost of the row;
-           also mirrored as a checkbox in the settings modal (see
-           #turnChartEnabledBtn below). -->
-      <button id="turnChartToggleBtn" title="Toggle per-turn cost graph">📊 Cost graph</button>
-      <!-- Docked tool-call detail pane toggle (detail-pane.js) - default ON
-           (unlike the other two, per Decision 3), also mirrored as a
-           checkbox in the settings modal (#detailPaneEnabledBtn below). -->
-      <button id="detailPaneToggleBtn" title="Toggle the tool-call detail pane">🔍 Detail pane</button>
-      <!-- Task list toggle (task-panel.js) - sits between the cost graph
-           toggle and the Agents button. No settings-modal mirror (unlike
-           turnChart/detailPane above): hidden until app.js's cockpit:tasks
-           handler sees the first task, since a session that never creates
-           one has nothing to toggle.
-           session-registry.js reconstructs the list server-side from
-           TaskCreate/TaskUpdate/TaskList tool calls and pushes it live, so
-           there's nothing to fetch here on open. -->
-      <button id="taskPanelToggleBtn" title="Toggle task list">📋 Tasks</button>
-      <!-- Agents roster toggle - now right-aligned (margin-left: auto in
-           CSS) instead of leading the row. -->
-      <button id="agentsBtn" title="Choose a subagent to run this turn">Agents</button>
+      <button type="button" id="turnChartToggleBtn" class="btn" title="Toggle per-turn cost graph" aria-pressed="false">📊 Cost graph</button>
+      <button type="button" id="detailPaneToggleBtn" class="btn" title="Toggle the tool-call detail pane" aria-pressed="true">🔍 Detail pane</button>
+      <button type="button" id="taskPanelToggleBtn" class="btn" title="Toggle task list" aria-pressed="false" hidden>📋 Tasks</button>
+      <button type="button" id="agentsBtn" class="btn" title="Choose a subagent to run this turn" aria-expanded="false" hidden>Agents</button>
     </div>
-    <ul id="agentsList"></ul>
+    <ul id="agentsList" hidden></ul>
   </div>
-  <!-- Task list (task-panel.js) - docked just above the compose box, same
-       spot/pattern as turnChartPanel below. Off by default; toggled only by
-       taskPanelToggleBtn above (see its own comment re: no settings mirror). -->
-  <div id="taskPanel">
+  <div id="taskPanel" class="session-chrome" hidden>
     <div class="controls"><span>Tasks:</span></div>
     <ul id="taskList"></ul>
   </div>
-  <!-- Visible input queue (queue-panel.js) - docked just above the compose
-       box, same spot as taskPanel above. No toggle: hidden whenever the
-       queue is empty (session idle, or nothing typed ahead of a running
-       turn), shown the instant a cockpit:queue push has at least one entry. -->
-  <div id="queuePanel">
+  <div id="queuePanel" class="session-chrome" hidden>
     <div class="controls"><span>Queued (behind the running turn):</span></div>
     <ul id="queueList"></ul>
   </div>
-  <!-- Per-turn cost graph (turn-chart.js) - docked just above the compose
-       box per plan, not in the header stats strip: it's a "how did I get
-       here" view of the transcript you're about to keep typing into, not a
-       glanceable summary. Off by default; toggled by turnChartToggleBtn
-       above or the settings checkbox. -->
-  <div id="turnChartPanel">
+  <div id="turnChartPanel" class="session-chrome" hidden>
     <div class="controls">
       <span>Per-turn usage:</span>
+      <label class="visually-hidden" for="turnChartMetric">Chart metric</label>
       <select id="turnChartMetric"></select>
       <label id="turnChartExcludeCacheMissLabel" title="Cache-miss turns run far more tokens than a normal turn - leave them in the bars but drop them from the y-axis scale, so they don't squash everything else flat">
         <input type="checkbox" id="turnChartExcludeCacheMissBtn" /> Exclude cache misses from scale
       </label>
     </div>
-    <svg id="turnChart" width="900" height="60"></svg>
-    <div id="turnChartSlider"><div id="turnChartSliderThumb"></div></div>
-  </div>
-  <!-- Activity dot (stateIcon) + live cost/token/cache/context/quota strip
-       (stats-panel.js) - moved down here from the header so they sit right
-       above the compose box, the "what's this run costing me right now"
-       view closest to where you're about to type the next message. The
-       folder/tab name (sessionLabel) stays up in the header. Pure markup
-       move - both elements are only ever referenced by getElementById in
-       app.js, so nothing else needed to change. -->
-  <div id="activityBar">
-    <span id="stateLabel" class="state"><span id="stateIcon"></span></span>
-    <!-- Turns-in-flight badge (session-registry.js's pendingTurnsCount) -
-         debug option, off by default (see #pendingTurnsBadgeEnabledBtn in
-         the settings modal below); when enabled, hidden whenever the count
-         is 0, otherwise shows the raw count right next to the spinner it
-         explains. Click = "it's spinning and nothing is in flux from my
-         point of view" - posts to the force-idle route (registry.forceIdle)
-         that resets the counter directly instead of waiting on a `result`
-         message that, per that comment, may never come. Deliberately a
-         click-to-assert rather than automatic: only the human watching the
-         actual CLI output can know nothing is really running. -->
-    <button id="pendingTurnsBadge" style="display:none" title="Turns cockpit still thinks are in flight. Click if nothing is actually running to force it back to idle."></button>
-    <!-- Cancel the running turn - lives right next to the
-         |\-/ activity spinner it's cancelling, not down in composeSendGroup
-         next to Send anymore (too easy to fat-finger right after Enter).
-         Same row height as stateLabel/statsPanel, not the tall #compose
-         button footprint it used to share with Send. Arm-then-confirm
-         behavior (click, then click again within ~2s) is unchanged - only
-         its position and sizing moved, see app.js's armStop/disarmStop. -->
-    <button id="stopBtn" style="display:none" title="Cancel the running turn (Esc)">Stop</button>
-    <span id="statsPanel"></span>
-    <!-- Static (not part of stats-panel.js's innerHTML, which is rebuilt on
-         every usage push - a button living inside that HTML would be fine,
-         but a future note/input field there would lose focus/value on the
-         next tick). Runs the CLI's own /compact as a plain slash-command
-         message, same path as typing it - there is no separate SDK method
-         for it. Hidden until a session exists, same as diffBtn. -->
-    <button id="compactBtn" style="display:none" title="Run /compact now to free up context">Compact</button>
-    <!-- Diagnostic capture for "spinner spins, nothing running" reports
-         (backlog) - lives right next to the spinner it's reporting on, same
-         row as stateLabel, for the same reason stopBtn does. Grabs both
-         client-side state (ws readiness, last seq seen) and a server-side
-         debug snapshot (src/routes/session-actions.js's 'debug' action,
-         which exposes session.js/grok-session.js's internal pendingTurns -
-         the counter the spinner is actually driven by, not just the last
-         state value the row happened to broadcast) and copies both as one
-         JSON blob to the clipboard so it can be pasted straight into a bug
-         report instead of asking for devtools output. -->
-    <button id="reportStuckBtn" style="display:none" title="Copy a diagnostic snapshot of the live session state (for reporting a stuck spinner or similar)">🐛 Report state</button>
-    <button id="copyLastBtn" style="display:none" title="Copy the most recent reply">Copy reply</button>
-    <button id="exportBtn" style="display:none" title="Download the whole transcript as markdown">Export .md</button>
-  </div>
-  <div id="compose">
-    <div id="composeResizeHandle" title="Drag to resize"></div>
-    <!-- Two-pane @ picker (file-picker.js): left lists the two virtual
-         folders (Local folder / Screenshots), right shows that folder's
-         files - switching which folder is highlighted on the left updates
-         the right pane live, no typing required. -->
-    <div id="fileSuggestions">
-      <ul id="fileSuggestionsFolders"></ul>
-      <ul id="fileSuggestionsFiles"></ul>
+    <div class="turn-chart-body">
+      <div id="turnChartAxis" class="turn-chart-axis"></div>
+      <div class="turn-chart-plot">
+        <svg id="turnChart" width="900" height="60"></svg>
+        <div id="turnChartSlider"><div id="turnChartSliderThumb"></div></div>
+      </div>
+      <div id="turnChartAxisRight" class="turn-chart-axis turn-chart-axis-right" hidden></div>
     </div>
-    <ul id="commandSuggestions"></ul>
-    <ul id="askSuggestions"></ul>
-    <ul id="modelSuggestions"></ul>
-    <!-- Persisted prompt history + fuzzy search (history-search.js) - Ctrl+R
-         while focused in composeInput, shell reverse-search
-         convention. Reuses #commandSuggestions/#modelSuggestions' own CSS
-         (.cmd-name/.cmd-desc, dropdown positioning) under its own id, same
-         as modelSuggestions already does under commandSuggestions'. -->
-    <ul id="historySuggestions"></ul>
+  </div>
+  <div id="activityBar" class="session-chrome">
+    <span id="stateLabel" class="state"><span id="stateIcon"></span></span>
+    <button type="button" id="pendingTurnsBadge" class="session-chrome" hidden title="Turns cockpit still thinks are in flight. Click if nothing is actually running to force it back to idle."></button>
+    <button type="button" id="stopBtn" class="session-chrome" hidden title="Cancel the running turn (Esc)">Stop</button>
+    <span id="statsPanel" hidden></span>
+    <button type="button" id="compactBtn" class="btn session-chrome" title="Run /compact now to free up context">Compact</button>
+    <button type="button" id="reportStuckBtn" class="btn session-chrome" title="Copy a diagnostic snapshot of the live session state (for reporting a stuck spinner or similar)">🐛 Report state</button>
+    <button type="button" id="copyLastBtn" class="btn session-chrome" title="Copy the most recent reply">Copy reply</button>
+    <button type="button" id="exportBtn" class="btn session-chrome" title="Download the whole transcript as markdown">Export .md</button>
+  </div>
+  <form id="compose" class="session-chrome">
+    <div id="composeResizeHandle" title="Drag to resize"></div>
+    <div id="fileSuggestions" class="dropdown-panel" role="group">
+      <ul id="fileSuggestionsFolders" role="listbox" aria-label="Folders"></ul>
+      <ul id="fileSuggestionsFiles" role="listbox" aria-label="Files"></ul>
+    </div>
+    <ul id="commandSuggestions" class="dropdown-panel" role="listbox" aria-label="Commands"></ul>
+    <ul id="askSuggestions" class="dropdown-panel" role="listbox" aria-label="Ask targets"></ul>
+    <ul id="modelSuggestions" class="dropdown-panel" role="listbox" aria-label="Models"></ul>
+    <ul id="historySuggestions" class="dropdown-panel" role="listbox" aria-label="Prompt history"></ul>
+    <label class="visually-hidden" for="composeInput">Message</label>
     <textarea id="composeInput" placeholder="Message... (Enter to send, Shift+Enter for newline, @ for files, / for commands)"></textarea>
     <div id="composeSendGroup">
-      <select id="modeBtn" style="display:none" title="Pick a mode directly, or press Shift+Tab to cycle"></select>
-      <!-- Query.setMaxThinkingTokens(tokens, display) moved entirely into the
-           Settings modal (thinkingControlsGroup) - not surfaced here at all,
-           see settingsModal below. -->
-      <button id="sendBtn" title="Send message">Send</button>
+      <label class="visually-hidden" for="modeBtn">Permission mode</label>
+      <select id="modeBtn" class="session-chrome" title="Pick a mode directly, or press Shift+Tab to cycle"></select>
+      <button type="submit" id="sendBtn" class="btn btn-primary" title="Send message">Send</button>
     </div>
-  </div>
+  </form>
 
-  <div id="dirBrowserModal" class="modal">
+  <dialog id="dirBrowserModal" class="modal" aria-labelledby="dirBrowserTitle">
     <div class="modal-box">
-      <header class="modal-body" id="dirPath"></header>
+      <header class="modal-header" id="dirBrowserTitle"><span id="dirPath"></span></header>
       <div class="modal-body">
-        <button id="dirUpBtn" title="Go to parent folder">.. up</button>
+        <button type="button" id="dirUpBtn" class="btn" title="Go to parent folder">.. up</button>
         <ul id="dirList"></ul>
       </div>
       <footer>
-        <button id="dirCancelBtn" title="Cancel folder selection">Cancel</button>
-        <button id="dirSelectBtn" class="primary" title="Use this folder as the session's working directory">Select this folder</button>
+        <button type="button" id="dirCancelBtn" class="btn" title="Cancel folder selection">Cancel</button>
+        <button type="button" id="dirSelectBtn" class="btn btn-primary" title="Use this folder as the session's working directory">Select this folder</button>
       </footer>
     </div>
-  </div>
+  </dialog>
 
-  <div id="diffModal" class="modal">
+  <dialog id="diffModal" class="modal" aria-labelledby="diffTitle">
     <div class="modal-box">
-      <header class="modal-body"><strong>Workspace diff</strong></header>
+      <header class="modal-header"><strong id="diffTitle">Workspace diff</strong></header>
       <div class="modal-body"><div id="diffBody"></div></div>
       <footer>
-        <button id="diffCloseBtn" title="Close diff view">Close</button>
+        <button type="button" id="diffCloseBtn" class="btn" title="Close diff view">Close</button>
       </footer>
     </div>
-  </div>
+  </dialog>
 
-  <div id="historyModal" class="modal">
+  <dialog id="historyModal" class="modal" aria-labelledby="historyTitle">
     <div class="modal-box">
-      <header class="modal-body"><strong id="historyTitle"></strong></header>
+      <header class="modal-header"><strong id="historyTitle"></strong></header>
       <div class="modal-body modal-body-row">
-        <div id="historyBody" style="display:flex;flex-direction:column;gap:6px;"></div>
-        <!-- Same Trajectory-row + detail-pane UX as the live #stream/#detailPane
-             pair (history-pane.js reuses stream-view.js's renderMessage
-             verbatim, so rows render fixed-height "for free"; this gives
-             clicking one somewhere to land). Independent initDetailPane()
-             instance, own WeakMap-isolated tool-call records - see
-             tool-call-store.js, keyed per container. -->
+        <div id="historyBody"></div>
         <div id="historyDetailPane" class="detail-pane enabled">
           <div class="detail-pane-header">
             <span id="historyDetailPaneLabel" class="detail-pane-header-label">No tool call selected yet</span>
-            <button id="historyDetailPaneFollowLiveBtn" type="button" title="Jump to the most recent tool call">● live</button>
+            <button type="button" id="historyDetailPaneFollowLiveBtn" class="btn" title="Jump to the most recent tool call">● live</button>
           </div>
-          <div class="detail-pane-tabs">
-            <button type="button" class="detail-tab active" data-tab="summary" title="Show summary">Summary</button>
-            <button type="button" class="detail-tab" data-tab="payload" title="Show raw request payload">Payload</button>
-            <button type="button" class="detail-tab" data-tab="result" title="Show tool result">Result</button>
-            <button type="button" class="detail-tab" data-tab="timing" title="Show timing breakdown">Timing</button>
+          <div class="detail-pane-tabs" role="tablist">
+            <button type="button" class="detail-tab active" data-tab="summary" role="tab" aria-selected="true" title="Show summary">Summary</button>
+            <button type="button" class="detail-tab" data-tab="payload" role="tab" aria-selected="false" title="Show raw request payload">Payload</button>
+            <button type="button" class="detail-tab" data-tab="result" role="tab" aria-selected="false" title="Show tool result">Result</button>
+            <button type="button" class="detail-tab" data-tab="timing" role="tab" aria-selected="false" title="Show timing breakdown">Timing</button>
           </div>
           <div id="historyDetailPaneBody" class="detail-pane-body"></div>
         </div>
       </div>
       <footer>
-        <a id="historyExportBtn" download title="Download this transcript as markdown">Export .md</a>
-        <button id="historyCloseBtn" title="Close history view">Close</button>
+        <a id="historyExportBtn" class="btn" download title="Download this transcript as markdown">Export .md</a>
+        <button type="button" id="historyCloseBtn" class="btn" title="Close history view">Close</button>
       </footer>
     </div>
-  </div>
+  </dialog>
 
-  <div id="settingsModal" class="modal">
+  <dialog id="settingsModal" class="modal" aria-labelledby="settingsTitle">
     <div class="modal-box">
-      <header class="modal-body"><strong>Settings</strong></header>
+      <header class="modal-header"><strong id="settingsTitle">Settings</strong></header>
       <div class="modal-body settings-body">
-        <!-- Four tabs so the modal isn't one long scroll: display prefs,
-             project/session prefs, MCP server status/toggles, and the
-             plugin list/toggles - each was already its own self-contained
-             block, this just gives each its own pane instead of stacking
-             them. settings.js wires the click-to-switch (toggles .active +
-             each panel's display) generically off data-settings-tab /
-             data-settings-tab-panel, so splitting "general" into two panels
-             here needed no settings.js changes. -->
-        <div class="settings-tabs">
-          <button type="button" class="settings-tab active" data-settings-tab="project" title="Project and session settings">Project</button>
-          <button type="button" class="settings-tab" data-settings-tab="display" title="Display and thinking settings">Display</button>
-          <button type="button" class="settings-tab" data-settings-tab="mcp" title="MCP server settings">MCP</button>
-          <button type="button" class="settings-tab" data-settings-tab="plugins" title="Plugin settings">Plugins</button>
-          <button type="button" class="settings-tab" data-settings-tab="stats" title="Local usage stats across every project">Stats</button>
+        <div class="settings-tabs" role="tablist">
+          <button type="button" class="settings-tab active" data-settings-tab="project" role="tab" aria-selected="true" title="Project and session settings">Project</button>
+          <button type="button" class="settings-tab" data-settings-tab="display" role="tab" aria-selected="false" title="Display and thinking settings">Display</button>
+          <button type="button" class="settings-tab" data-settings-tab="mcp" role="tab" aria-selected="false" title="MCP server settings">MCP</button>
+          <button type="button" class="settings-tab" data-settings-tab="plugins" role="tab" aria-selected="false" title="Plugin settings">Plugins</button>
+          <button type="button" class="settings-tab" data-settings-tab="stats" role="tab" aria-selected="false" title="Local usage stats across every project">Stats</button>
         </div>
 
-        <div class="settings-tab-panel" data-settings-tab-panel="project">
+        <div class="settings-tab-panel" data-settings-tab-panel="project" role="tabpanel">
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Extra folders searchable in @</strong>
-              <button type="button" id="addCustomFolderBtn" title="Add a folder to the @ file picker">+ Add folder</button>
+              <button type="button" id="addCustomFolderBtn" class="btn" title="Add a folder to the @ file picker">+ Add folder</button>
             </div>
             <ul id="customFoldersList" class="settings-list"></ul>
           </div>
@@ -440,33 +278,22 @@
             </select>
             <span class="hint" title="Auto-denies Bash tool calls containing a Co-Authored-By trailer or a 'Generated with Claude Code' line. 'git commit / gh pr' only checks git commit and gh pr create/edit invocations; 'anywhere' checks every Bash command for either phrase. Project-scoped (settings.local.json), takes effect on this session's next matching Bash call.">?</span>
           </label>
-          <div id="gitGuardError" class="mcp-error" style="display: none;"></div>
-          <!-- Per-session delegation handshake -
-               THIS session's own trust status plus a paste-in field to
-               re-sync it, scoped to this session's own token (unlike the
-               server-wide copy shown in the "All sessions" pane, which has
-               no per-session auth to act through). See
-               session-registry.js's handshakeSecret comment. -->
-          <label class="settings-row">
-            <span>Delegation handshake</span>
-            <span id="handshakeStatus" class="hint"></span>
-          </label>
+          <div id="gitGuardError" class="mcp-error" hidden></div>
           <div class="settings-row">
-            <input id="handshakeInput" type="text" placeholder="paste handshake value" style="flex: 1 1 auto; min-width: 0;">
-            <button id="handshakeSaveBtn" type="button">Save</button>
+            <span>Delegation handshake</span>
+            <span id="handshakeStatus"></span>
+          </div>
+          <div class="settings-row">
+            <label class="visually-hidden" for="handshakeInput">Handshake value</label>
+            <input id="handshakeInput" type="text" placeholder="paste handshake value">
+            <button type="button" id="handshakeSaveBtn" class="btn">Save</button>
             <span class="hint" title="Sessions must share the same handshake value (Session list > Handshake) to send or receive /ask delegated tasks. Local sessions are trusted automatically when created; paste a value here to re-sync after a rotation, or an invalid value to revoke this session's own trust.">?</span>
           </div>
-          <div id="handshakeError" class="mcp-error" style="display: none;"></div>
+          <div id="handshakeError" class="mcp-error" hidden></div>
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Always-allowed tools in this project</strong>
             </div>
-            <!-- Populated from GET /api/sessions/:id/permissions on every
-                 modal open (app.js's onOpen, same lazy-refresh pattern as
-                 mcpPanel/pluginPanel) - src/permission-rules.js's
-                 settings.local.json-backed list, revocable per-row. Empty
-                 by default: this list only grows via "always in this
-                 project" on an approval prompt (#alwaysAllowScope above). -->
             <ul id="permissionRulesList" class="settings-list"></ul>
           </div>
           <div class="settings-row settings-danger">
@@ -474,18 +301,18 @@
               <strong>Reset session</strong>
               <p>Ends this session's live process and immediately starts a new one in the same folder with the same model/effort/thinking settings. The old transcript stays on disk (resumable later).</p>
             </div>
-            <button id="resetSessionBtn" class="danger" style="display:none" title="End this session and start a fresh one with the same settings">Reset session</button>
+            <button type="button" id="resetSessionBtn" class="btn btn-danger session-chrome" title="End this session and start a fresh one with the same settings">Reset session</button>
           </div>
           <div class="settings-row settings-danger">
             <div>
               <strong>Close session</strong>
               <p>Ends this session's live process - it stops being resumable from here, though it stays on disk like any other transcript.</p>
             </div>
-            <button id="closeSessionBtn" class="danger" style="display:none" title="End this session's live process">Close session</button>
+            <button type="button" id="closeSessionBtn" class="btn btn-danger session-chrome" title="End this session's live process">Close session</button>
           </div>
         </div>
 
-        <div class="settings-tab-panel" data-settings-tab-panel="display" style="display:none">
+        <div class="settings-tab-panel" data-settings-tab-panel="display" role="tabpanel" hidden>
           <label class="settings-row">
             <input type="checkbox" id="autoCollapsePreviousGroupBtn" />
             <span>Auto-collapse the previous tool call group when a new one starts</span>
@@ -497,6 +324,14 @@
           <label class="settings-row">
             <input type="checkbox" id="turnChartEnabledBtn" />
             <span>Show the per-turn cost graph above the compose box</span>
+          </label>
+          <label class="settings-row">
+            <span>Cost graph y-axis labels</span>
+            <select id="turnChartAxisPositionBtn">
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="both">Both</option>
+            </select>
           </label>
           <label class="settings-row">
             <input type="checkbox" id="showTimestampsBtn" />
@@ -518,57 +353,52 @@
               <select id="thinkingDisplayBtn"></select>
               <span class="hint" title="Default = thinking shown as-is. Summarized = a condensed version. Omitted = thinking still happens but isn't displayed. Only matters once a budget is set.">?</span>
             </label>
-            <div id="thinkingError" class="mcp-error" style="display: none;"></div>
+            <div id="thinkingError" class="mcp-error" hidden></div>
           </div>
-          <div id="effortControlsGroup" style="display:none">
+          <div id="effortControlsGroup" hidden>
             <label class="settings-row">
               <span>Effort</span>
               <select id="effortBtn" title="Reasoning effort for this session"></select>
             </label>
-            <div id="effortError" class="mcp-error" style="display: none;"></div>
+            <div id="effortError" class="mcp-error" hidden></div>
           </div>
         </div>
 
-        <div class="settings-tab-panel" data-settings-tab-panel="mcp" style="display:none">
+        <div class="settings-tab-panel" data-settings-tab-panel="mcp" role="tabpanel" hidden>
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>MCP Servers</strong>
-              <button id="mcpRefreshBtn" type="button" title="Refresh the MCP server list">Refresh</button>
+              <button type="button" id="mcpRefreshBtn" class="btn" title="Refresh the MCP server list">Refresh</button>
             </div>
-            <p id="mcpProviderNote" class="mcp-note" style="display:none">Grok MCP servers from <code>grok inspect</code> for this directory (~/.grok/config.toml plus Claude/Cursor compat). Toggle runs <code>grok mcp enable/disable</code>. There is no live reconnect; start a new session to be sure the agent picks up a change.</p>
+            <p id="mcpProviderNote" class="mcp-note" hidden>Grok MCP servers from <code>grok inspect</code> for this directory (~/.grok/config.toml plus Claude/Cursor compat). Toggle runs <code>grok mcp enable/disable</code>. There is no live reconnect; start a new session to be sure the agent picks up a change.</p>
             <ul id="mcpServerList" class="settings-list"></ul>
           </div>
         </div>
 
-        <div class="settings-tab-panel" data-settings-tab-panel="plugins" style="display:none">
+        <div class="settings-tab-panel" data-settings-tab-panel="plugins" role="tabpanel" hidden>
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Plugins</strong>
-              <button id="pluginReloadBtn" type="button" title="Reload plugins from disk">Reload plugins</button>
+              <button type="button" id="pluginReloadBtn" class="btn" title="Reload plugins from disk">Reload plugins</button>
             </div>
-            <p id="pluginProviderNote" class="mcp-note" style="display:none">Grok plugins from <code>grok inspect</code> (including Claude-compat plugins Grok loads). Toggle runs <code>grok plugin enable/disable</code>. Reload only refreshes this list; the live agent picks up plugin changes on the next session start.</p>
-            <p id="pluginWarning" class="settings-warning"></p>
+            <p id="pluginProviderNote" class="mcp-note" hidden>Grok plugins from <code>grok inspect</code> (including Claude-compat plugins Grok loads). Toggle runs <code>grok plugin enable/disable</code>. Reload only refreshes this list; the live agent picks up plugin changes on the next session start.</p>
+            <p id="pluginWarning" class="settings-warning" hidden></p>
             <ul id="pluginList" class="settings-list"></ul>
           </div>
         </div>
 
-        <!-- Local, all-projects usage stats (global-stats.js's aggregation
-             over ~/.claude/projects/**/*.jsonl) - NOT the CLI's own
-             ~/.claude/stats-cache.json, see that module's comment for why.
-             Lazy-loaded on first click of this tab (app.js), not on every
-             modal open - it's a real filesystem scan, not a cheap status
-             GET like the MCP/plugin panels. -->
-        <div class="settings-tab-panel" data-settings-tab-panel="stats" style="display:none">
+        <div class="settings-tab-panel" data-settings-tab-panel="stats" role="tabpanel" hidden>
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Usage stats</strong>
-              <span style="display:flex; gap:6px; align-items:center;">
+              <span class="settings-toolbar">
+                <label class="visually-hidden" for="statsRangeBtn">Time range</label>
                 <select id="statsRangeBtn" title="Time range">
                   <option value="all">All time</option>
                   <option value="30d">Last 30 days</option>
                   <option value="7d">Last 7 days</option>
                 </select>
-                <button id="statsRefreshBtn" type="button" title="Re-scan local session transcripts">Refresh</button>
+                <button type="button" id="statsRefreshBtn" class="btn" title="Re-scan local session transcripts">Refresh</button>
               </span>
             </div>
             <p class="mcp-note">Computed live from local session transcripts across every project (<code>~/.claude/projects</code>), not the CLI's own <code>/stats</code> cache - always fresh, but only as deep as whatever transcript files Claude Code hasn't pruned yet.</p>
@@ -577,10 +407,10 @@
         </div>
       </div>
       <footer>
-        <button id="settingsCloseBtn" title="Close settings">Done</button>
+        <button type="button" id="settingsCloseBtn" class="btn" title="Close settings">Done</button>
       </footer>
     </div>
-  </div>
+  </dialog>
 
   <script type="module" src="/app.js"></script>
 </body>

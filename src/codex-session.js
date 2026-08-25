@@ -259,7 +259,14 @@ export function startCodexSession({
     return id;
   }
 
+  function drainQueued() {
+    for (const entry of pending) resultEpoch.remove(entry.id);
+    pending.length = 0;
+    emitQueue();
+  }
+
   async function interrupt() {
+    drainQueued();
     if (!threadId || !activeTurnId || closed) return;
     await manager.request('turn/interrupt', { threadId, turnId: activeTurnId });
   }
@@ -349,9 +356,8 @@ export function startCodexSession({
     close,
     interrupt,
     forceIdle: () => {
+      drainQueued();
       resultEpoch.forceIdle();
-      pending.length = 0;
-      emitQueue();
       interrupt().catch(() => {});
       onStateChange('idle');
     },

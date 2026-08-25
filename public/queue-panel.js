@@ -13,13 +13,13 @@ export function initQueuePanel({ panel, listEl, onReorder, onRemove, onSendNow }
 
   function setQueue(next) {
     queue = next || [];
-    panel.style.display = queue.length ? 'block' : 'none';
+    panel.hidden = queue.length === 0;
     render();
   }
 
   function reset() {
     queue = [];
-    panel.style.display = 'none';
+    panel.hidden = true;
     listEl.innerHTML = '';
   }
 
@@ -39,6 +39,8 @@ export function initQueuePanel({ panel, listEl, onReorder, onRemove, onSendNow }
     li.append(text);
 
     const upBtn = document.createElement('button');
+    upBtn.type = 'button';
+    upBtn.className = 'btn';
     upBtn.textContent = '↑'; // up arrow
     upBtn.title = 'Move earlier';
     upBtn.disabled = i === 0;
@@ -46,6 +48,8 @@ export function initQueuePanel({ panel, listEl, onReorder, onRemove, onSendNow }
     li.append(upBtn);
 
     const downBtn = document.createElement('button');
+    downBtn.type = 'button';
+    downBtn.className = 'btn';
     downBtn.textContent = '↓'; // down arrow
     downBtn.title = 'Move later';
     downBtn.disabled = i === queue.length - 1;
@@ -53,12 +57,16 @@ export function initQueuePanel({ panel, listEl, onReorder, onRemove, onSendNow }
     li.append(downBtn);
 
     const sendNowBtn = document.createElement('button');
+    sendNowBtn.type = 'button';
+    sendNowBtn.className = 'btn';
     sendNowBtn.textContent = 'Send now';
     sendNowBtn.title = 'Interrupt the running turn and run this one next';
     sendNowBtn.addEventListener('click', () => onSendNow(entry.id));
     li.append(sendNowBtn);
 
     const dropBtn = document.createElement('button');
+    dropBtn.type = 'button';
+    dropBtn.className = 'btn';
     dropBtn.textContent = 'Drop';
     dropBtn.title = 'Remove from the queue - never sent';
     dropBtn.addEventListener('click', () => onRemove(entry.id));

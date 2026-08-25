@@ -5,6 +5,7 @@
 // over its DOM refs and returning a small method bag, no global event bus.
 import { renderBody, formatUsageInline } from '/stream-view.js';
 import { getToolCallRecord, getMostRecentToolCallRecord } from '/tool-call-store.js';
+import { initResizablePanel } from '/resizable-panel.js';
 
 // v1 has no Schema tab (Decision 4) - no client-side tool schema registry
 // exists to source it from. Nothing to render, nothing to wire.
@@ -55,57 +56,31 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     document.documentElement.style.setProperty('--detail-pane-offset', `${offset}px`);
   }
 
-  if (initialWidth != null && !isNarrowLayout()) {
-    panel.style.width = `${Math.max(initialWidth, MIN_WIDTH_PX)}px`;
-  }
+  // Sets the persisted width (if any) synchronously, before the first
+  // syncOffset() call below measures the panel - resizable-panel.js only
+  // ever touches panel.style.width itself, it doesn't know about
+  // --detail-pane-offset. During a later drag, the ResizeObserver just below
+  // catches every width change and re-syncs it - ordering only matters for
+  // this first call, which needs to see the real initial width, not the
+  // pre-resize CSS default it would otherwise briefly report.
+  initResizablePanel({ panel, handle: resizeHandle, minWidthPx: MIN_WIDTH_PX, initialWidth, onWidthChange, isNarrowLayout });
+
   syncOffset();
   window.addEventListener('resize', syncOffset);
   // The explicit syncOffset() calls above and scattered through setEnabled()/
-  // the drag handlers below/app.js's pre-banner re-measure are each correct
-  // individually, but they only cover the timing gaps we've actually caught
-  // in the wild - a resumed session where a pending approval banner can
-  // arrive before some other width-affecting change (class toggle, style
-  // write, breakpoint switch) has been re-measured slips through all of
-  // them. A ResizeObserver on the pane itself needs no call-site to remember
-  // it: it fires on the pane's real on-screen size the instant it changes,
-  // for any reason, so #approvalBanner's offset can never go stale. Kept
-  // alongside (not instead of) the explicit calls since those are cheap and
-  // some (the isNarrowLayout() 0-when-stacked case) encode logic a bare
-  // resize observation can't.
+  // app.js's pre-banner re-measure are each correct individually, but they
+  // only cover the timing gaps we've actually caught in the wild - a resumed
+  // session where a pending approval banner can arrive before some other
+  // width-affecting change (class toggle, style write, breakpoint switch)
+  // has been re-measured slips through all of them. A ResizeObserver on the
+  // pane itself needs no call-site to remember it: it fires on the pane's
+  // real on-screen size the instant it changes, for any reason (including a
+  // resizable-panel.js drag), so #approvalBanner's offset can never go
+  // stale. Kept alongside (not instead of) the explicit calls since those
+  // are cheap and some (the isNarrowLayout() 0-when-stacked case) encode
+  // logic a bare resize observation can't.
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(syncOffset).observe(panel);
-  }
-
-  if (resizeHandle) {
-    let dragStartX = null;
-    let dragStartWidth = null;
-
-    resizeHandle.addEventListener('mousedown', (event) => {
-      if (isNarrowLayout()) return; // handle is visually still there but inert in the stacked layout
-      event.preventDefault(); // don't let the drag start a text selection
-      dragStartX = event.clientX;
-      dragStartWidth = panel.getBoundingClientRect().width;
-      document.addEventListener('mousemove', onDragMove);
-      document.addEventListener('mouseup', onDragEnd);
-    });
-
-    function onDragMove(event) {
-      const maxPx = window.innerWidth * 0.7; // leaves #stream at least 30% of the viewport, same spirit as compose.js's 50vh cap on the other axis
-      // Dragging left (clientX decreases) grows the box - delta is inverted
-      // relative to a normal right-edge-of-a-left-docked-panel resize.
-      const target = Math.min(Math.max(dragStartWidth + (dragStartX - event.clientX), MIN_WIDTH_PX), maxPx);
-      panel.style.width = `${target}px`;
-      syncOffset();
-    }
-
-    function onDragEnd() {
-      document.removeEventListener('mousemove', onDragMove);
-      document.removeEventListener('mouseup', onDragEnd);
-      // Persisted once per drag (not per mousemove) - onWidthChange is
-      // app.js's patchSettings() call, cheap but no reason to hammer
-      // localStorage dozens of times a second while dragging.
-      onWidthChange?.(Math.round(panel.getBoundingClientRect().width));
-    }
   }
 
   // Explicit click on a row - always pins, whether the row clicked is the
@@ -348,7 +323,11 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   for (const btn of tabButtons) {
     btn.addEventListener('click', () => {
       activeTab = btn.dataset.tab;
-      for (const b of tabButtons) b.classList.toggle('active', b === btn);
+      for (const b of tabButtons) {
+        const on = b === btn;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      }
       render();
     });
   }
@@ -368,7 +347,11 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     currentRecord = null;
     textView = null;
     activeTab = 'summary';
-    for (const b of tabButtons) b.classList.toggle('active', b.dataset.tab === 'summary');
+    for (const b of tabButtons) {
+      const on = b.dataset.tab === 'summary';
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
     updateLiveIndicator();
     renderEmpty();
   }

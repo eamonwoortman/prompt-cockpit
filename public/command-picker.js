@@ -62,6 +62,8 @@ export function initCommandPicker({ textarea, dropdown, getCommands }) {
     dropdown.innerHTML = '';
     items.forEach((command, i) => {
       const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', i === activeIndex ? 'true' : 'false');
       li.className = i === activeIndex ? 'active' : '';
 
       const name = document.createElement('span');
@@ -79,7 +81,7 @@ export function initCommandPicker({ textarea, dropdown, getCommands }) {
       });
       dropdown.append(li);
     });
-    dropdown.style.display = 'block';
+    dropdown.classList.add('show');
   }
 
   function select(i) {
@@ -97,7 +99,7 @@ export function initCommandPicker({ textarea, dropdown, getCommands }) {
   }
 
   function onKeydown(event) {
-    if (dropdown.style.display !== 'block') return;
+    if (!dropdown.classList.contains('show')) return;
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       activeIndex = Math.min(activeIndex + 1, items.length - 1);
@@ -111,12 +113,14 @@ export function initCommandPicker({ textarea, dropdown, getCommands }) {
       event.stopPropagation(); // don't let compose.js send the message
       select(activeIndex);
     } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
       close();
     }
   }
 
   function close() {
-    dropdown.style.display = 'none';
+    dropdown.classList.remove('show');
     dropdown.innerHTML = '';
     items = [];
     activeIndex = -1;

@@ -170,11 +170,32 @@ test('Codex interrupt targets the active turn without stopping the shared app-se
   const { handle } = startOptions(manager);
   handle.pushInput('Long task');
   await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'active turn');
+  handle.pushInput('queued after');
+  assert.equal(handle.listQueue().length, 1);
 
   await handle.interrupt();
+  assert.equal(handle.listQueue().length, 0, 'Stop must drop the local queue, not leave it to run after');
   assert.deepEqual(manager.calls.find(([method]) => method === 'turn/interrupt'), [
     'turn/interrupt', { threadId: 'thread-new', turnId: 'turn-1' },
   ]);
+  manager.emit('turn/completed', {
+    threadId: 'thread-new', turn: { id: 'turn-1', status: 'interrupted' },
+  });
+  handle.close();
+});
+
+test('Codex forceIdle drops queued turns so they cannot run after recovery', async () => {
+  const manager = createManager();
+  manager.completeTurns = false;
+  const { handle, states } = startOptions(manager);
+  handle.pushInput('stuck');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'active turn');
+  handle.pushInput('queued');
+  assert.equal(handle.listQueue().length, 1);
+
+  handle.forceIdle();
+  assert.equal(handle.listQueue().length, 0);
+  assert.equal(states[states.length - 1], 'idle');
   manager.emit('turn/completed', {
     threadId: 'thread-new', turn: { id: 'turn-1', status: 'interrupted' },
   });

@@ -63,6 +63,11 @@ function fakeStartSession() {
     pushInput: () => {},
     close: () => {},
     interrupt: async () => { lastInterruptCalled = true; },
+    // interruptTurn() (session-registry.js) reads this before calling
+    // interrupt(), to splice pendingResultTags for anything Stop drops from
+    // the local queue - real sessions always have it (session.js's return
+    // shape), this stub just needs it to exist.
+    listQueue: () => [],
     setMode: async (m) => m,
     getMode: () => 'default',
     // Mirrors session.js's real resolveApproval shape closely enough for

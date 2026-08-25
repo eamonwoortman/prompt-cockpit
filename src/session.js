@@ -27,34 +27,65 @@ const ASK_SYSTEM_PROMPT_APPEND = 'This Claude Code session may run inside Prompt
 
 // A minimal AsyncIterable<SDKUserMessage> that supports pushing values in
 // from the outside. query() pulls from this for as long as the session lives.
-// Also the backing store for the visible input queue: `pending`
-// only ever holds entries pushed while nothing was already waiting on
-// next() - i.e. exactly the messages queued up behind a still-running turn,
-// which is also exactly what a "queue pane" should show. A push that lands
-// while the consumer IS already waiting (idle session) is handed straight
-// to it and never touches `pending` at all - correctly invisible, since
-// there's nothing queued in that case, just a turn about to start.
+// Also the backing store for the visible input queue: every push lands in
+// `pending` first, then pump() immediately re-dispatches it to a waiting
+// consumer if one exists AND nothing else is currently in flight (see
+// `inFlight` below) - so `pending` only ever holds, at rest, exactly the
+// messages actually queued up behind a still-in-flight turn, which is also
+// exactly what a "queue pane" should show. A push that gets pumped straight
+// back out (nothing in flight, someone waiting) never lingers in `pending`
+// long enough to be visible - correctly invisible, since there's nothing
+// queued in that case, just a turn about to start.
 function createInputQueue() {
   const pending = []; // { id, message, text } - id/text null for untracked pushes (the startup sentinel)
   let waiting = null;
   let closed = false;
+  // True while some message (tracked or the startup sentinel) has been
+  // handed to the SDK and no `result` has arrived for it yet. The SDK's
+  // input pump re-enters next() as soon as it finishes writing stdin - it
+  // does not wait for that turn's result - so without this gate a second
+  // write lands in the CLI's own queue and the CLI coalesces both into one
+  // result, stranding pendingTurns (and the spinner) one too high.
+  //
+  // Also gates the sentinel: a real pushInput while the sentinel result is
+  // still outstanding is the same coalescing risk, and would make the first
+  // result-type message no longer be the sentinel's.
+  let inFlight = false;
+
+  // Hands the head of `pending` to a waiting consumer if one exists and
+  // nothing else is currently in flight. Called after every push and every
+  // resultReceived so a queued message advances the instant the previous
+  // one's result arrives, rather than only when the SDK happens to call
+  // next() again (which, per the note above, it already did - long before
+  // the result showed up).
+  function pump() {
+    if (!waiting || pending.length === 0 || inFlight) return;
+    const entry = pending.shift();
+    inFlight = true;
+    const resolve = waiting;
+    waiting = null;
+    resolve({ value: entry.message, done: false });
+  }
 
   return {
     // `meta` ({id, text}) is how pushInput() makes an entry visible/
-    // addressable in the queue; the startup sentinel omits it and is always
-    // handed straight to the waiting consumer at session start anyway (see
-    // session.js's inputQueue.push() call below), so it never appears
-    // tracked or untracked in `pending` in practice.
+    // addressable in the queue; the startup sentinel omits it, and since
+    // it's always the very first thing pushed (nothing else can be in
+    // flight yet), pump() dispatches it immediately - it never lingers in
+    // `pending` long enough to appear tracked or untracked in practice.
     push(userMessage, meta) {
       if (closed) return { queued: false };
-      if (waiting) {
-        const resolve = waiting;
-        waiting = null;
-        resolve({ value: userMessage, done: false });
-        return { queued: false };
-      }
-      pending.push({ id: meta?.id ?? null, message: userMessage, text: meta?.text ?? null });
-      return { queued: true };
+      const entry = { id: meta?.id ?? null, message: userMessage, text: meta?.text ?? null };
+      pending.push(entry);
+      pump();
+      return { queued: pending.includes(entry) };
+    },
+    // Clears the in-flight slot so the next queued message (or the next
+    // push) can dispatch. Called on every `result` and from forceIdle
+    // (which assumes no result is coming for the current in-flight turn).
+    resultReceived() {
+      inFlight = false;
+      pump();
     },
     close() {
       if (closed) return;
@@ -119,8 +150,10 @@ function createInputQueue() {
     [Symbol.asyncIterator]() {
       return {
         next() {
-          if (pending.length > 0) {
-            return Promise.resolve({ value: pending.shift().message, done: false });
+          if (pending.length > 0 && !inFlight) {
+            const entry = pending.shift();
+            inFlight = true;
+            return Promise.resolve({ value: entry.message, done: false });
           }
           if (closed) {
             return Promise.resolve({ value: undefined, done: true });
@@ -183,6 +216,16 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   // first turn is still running used to get overwritten by the first
   // turn's `result` flipping state back to idle underneath it.
   let pendingTurns = 0;
+  // Flips true once the priming sentinel's own `result` (always num_turns:0)
+  // has been seen and swallowed. Because createInputQueue now serializes
+  // strictly - nothing else can ever reach the CLI before the sentinel's own
+  // result comes back - the first result-type message this session can
+  // possibly receive IS the sentinel's, unconditionally. That makes this a
+  // real identity check instead of the old pendingTurns===0 proxy, which a
+  // delayed sentinel result arriving after the user's first pushInput() had
+  // already incremented pendingTurns could defeat, misreading the sentinel's
+  // result as the real turn's and flipping to 'idle' mid-turn.
+  let sentinelResolved = false;
 
   const handle = queryImpl({
     prompt: inputQueue,
@@ -322,25 +365,20 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   (async () => {
     try {
       for await (const message of handle) {
-        // Bug (found via the interrupt feature): originally just
-        // `num_turns === 0`, on the assumption only the priming sentinel
-        // above could ever report zero turns. A real turn interrupted early
-        // enough - before the model produced anything - can *also* come
-        // back with num_turns:0, and this `continue` skips the pendingTurns
-        // decrement AND onMessage() below for it just the same as it does
-        // for the sentinel, so pendingTurns never returns to 0 and
-        // onStateChange('idle') never fires - the state spinner then runs
-        // forever even though nothing is actually in flight. The sentinel
-        // is pushed before any pushInput() call, so its result is the only
-        // one that can ever arrive while pendingTurns is still 0 - a real
-        // turn's pendingTurns was already incremented at push time and
-        // isn't decremented until its own result is processed, so checking
-        // both conditions together only ever matches the true sentinel.
-        if (message.type === 'result' && message.num_turns === 0 && pendingTurns === 0) {
-          const tracked = resultEpoch.snapshot();
-          if (tracked.pendingTurnsMeta === 0 && tracked.abandonedTurnsMeta === 0) {
-            continue; // priming-sentinel artifact, not a real turn
-          }
+        // First result-type message is the priming sentinel (num_turns:0):
+        // the input-queue gate blocks every later write until this arrives.
+        // A real turn interrupted before producing anything can also report
+        // num_turns:0; sentinelResolved keeps that from being swallowed too.
+        if (!sentinelResolved && message.type === 'result' && message.num_turns === 0) {
+          sentinelResolved = true;
+          inputQueue.resultReceived();
+          // Same reasoning as the real-result branch below: if a pushInput
+          // landed in `pending` before the sentinel cleared (fast enough to
+          // beat startup), resultReceived()'s pump() just dispatched it -
+          // broadcast so the queue panel doesn't show a phantom entry for a
+          // turn that's actually already running.
+          onQueueChange?.(inputQueue.list());
+          continue; // priming-sentinel artifact, not a real turn
         }
         if (message.type === 'system' && message.subtype === 'init') {
           currentMode = message.permissionMode; // resumed sessions may not start in `default`
@@ -353,6 +391,19 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
           // approval. This is the SDK's own authoritative signal for it.
           currentMode = message.permissionMode;
         } else if (message.type === 'result') {
+          // resultReceived() clears the in-flight gate and, if anything was
+          // waiting, immediately hands the next queued entry to the SDK
+          // (createInputQueue's pump()) - shrinking `pending` right here,
+          // not just when the queue pane itself causes a mutation
+          // (removeQueued/reorderQueue/sendNow below all broadcast their
+          // own edits). Without this, a queued turn that starts running the
+          // ordinary way - its predecessor just finished - never tells the
+          // client, so the queue panel keeps showing it as still queued
+          // (Drop does nothing useful on it either, since by the time the
+          // click lands there's nothing left in `pending` to remove) until
+          // some unrelated queue edit happens to trigger a fresh broadcast.
+          inputQueue.resultReceived();
+          onQueueChange?.(inputQueue.list());
           const consumed = resultEpoch.consumeFifo();
           resultEpoch.applyResultStamp(message, consumed);
           // A stale result belongs to a force-idled generation - pendingTurns
@@ -519,7 +570,23 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   // back down and fires onStateChange('idle') - nothing extra to do here.
   // Safe to call while idle (no-op turn to interrupt); the SDK just answers
   // with an empty receipt.
+  //
+  // This is the client's Stop button (session-actions.js's 'interrupt'
+  // route, mirroring Grok CLI's Esc/Ctrl+C) - "stop now" means stop
+  // everything, not just the active turn and then run whatever got typed in
+  // the meantime anyway. With createInputQueue's gate (see its comment), the
+  // CLI itself never holds more than the one in-flight turn - anything else
+  // pushed while busy is sitting in `pending`, never yet sent to the CLI -
+  // so draining it locally via removeQueued (same bookkeeping a manual
+  // per-item queue-pane removal would do: resultEpoch, pendingTurns,
+  // onQueueChange) is enough; there's no separate SDK-side queued backlog
+  // left to cancel.
+  function drainLocalQueue() {
+    for (const { id } of listQueue()) removeQueued(id);
+  }
+
   async function interrupt() {
+    drainLocalQueue();
     return handle.interrupt();
   }
 
@@ -586,25 +653,19 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
     };
   }
 
-  // Manual recovery for a `pendingTurns` that's stuck above 0 with nothing
-  // left to bring it back down - confirmed live: a message pushed while the
-  // previous turn's stream was still open can apparently get absorbed into
-  // that turn instead of producing its own separate `result`, permanently
-  // stranding this counter one too high with no SDK message ever coming to
-  // decrement it. interrupt() can't fix that case - it only ever resolves a
-  // turn genuinely still in flight, and there isn't one once this has
-  // happened. This is the last resort: reset the counter directly and flip
-  // to idle without waiting on the CLI at all. Only ever call this once
-  // you've confirmed nothing is actually running CLI-side - it doesn't
-  // touch the CLI or the underlying conversation, purely local bookkeeping.
+  // Last-resort unstick when pendingTurns is stuck above 0 with no result
+  // coming. Drain the local queue first (those turns were never sent to
+  // the CLI; same as Stop) so result-epoch only abandons the in-flight
+  // head. Then bump epoch, best-effort interrupt the CLI turn, and clear
+  // the in-flight gate so the next pushInput can dispatch. Does not wait
+  // on the CLI; only call once you've confirmed nothing is actually
+  // running CLI-side.
   function forceIdle() {
+    drainLocalQueue();
     resultEpoch.forceIdle();
-    pendingTurns = 0;
-    // Best-effort: if something actually is still running, interrupt so it
-    // emits a (stale) result instead of completing later as if it belonged
-    // to a turn pushed after this recovery. No-op when nothing is in flight
-    // - the original stuck-pendingTurns case this method exists for.
     handle.interrupt?.().catch(() => {});
+    inputQueue.resultReceived();
+    pendingTurns = 0;
     onStateChange('idle');
   }
 

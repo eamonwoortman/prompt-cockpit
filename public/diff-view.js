@@ -5,7 +5,7 @@ export function initDiffView({ modal, body, closeButton }) {
   closeButton.addEventListener('click', close);
 
   async function open(sessionId, token) {
-    modal.style.display = 'flex';
+    if (!modal.open) modal.showModal();
     body.textContent = 'Loading diff...';
     const res = await fetch(`/api/sessions/${sessionId}/diff`, { headers: { authorization: `Bearer ${token}` } });
     const data = await res.json();
@@ -34,7 +34,7 @@ export function initDiffView({ modal, body, closeButton }) {
   }
 
   function close() {
-    modal.style.display = 'none';
+    if (modal.open) modal.close();
   }
 
   return { open, close };

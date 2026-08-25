@@ -45,7 +45,7 @@ export function initModelPicker({ textarea, dropdown, fetchModels, getCurrentMod
       loading.className = 'cmd-desc';
       loading.textContent = 'Loading models…';
       dropdown.append(loading);
-      dropdown.style.display = 'block';
+      dropdown.classList.add('show');
     }
     try {
       items = await fetchModels();
@@ -67,6 +67,8 @@ export function initModelPicker({ textarea, dropdown, fetchModels, getCurrentMod
     dropdown.innerHTML = '';
     items.forEach((model, i) => {
       const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', i === activeIndex ? 'true' : 'false');
       li.className = i === activeIndex ? 'active' : '';
 
       const name = document.createElement('span');
@@ -84,7 +86,7 @@ export function initModelPicker({ textarea, dropdown, fetchModels, getCurrentMod
       });
       dropdown.append(li);
     });
-    dropdown.style.display = 'block';
+    dropdown.classList.add('show');
   }
 
   function select(i) {
@@ -111,13 +113,15 @@ export function initModelPicker({ textarea, dropdown, fetchModels, getCurrentMod
       event.stopPropagation(); // don't let compose.js send the message
       select(activeIndex);
     } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
       close();
     }
   }
 
   function close() {
     open = false;
-    dropdown.style.display = 'none';
+    dropdown.classList.remove('show');
     dropdown.innerHTML = '';
     items = [];
     activeIndex = -1;

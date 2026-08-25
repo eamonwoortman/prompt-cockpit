@@ -10,6 +10,8 @@
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import readline from 'node:readline';
 import { WebSocketServer } from 'ws';
 
 import * as registry from './session-registry.js';
@@ -193,9 +195,41 @@ export { server, PORT, HOST, seedSessionDefaults };
 // imported by tests - lets tests bind an ephemeral port and drive the same
 // Origin/token checks without a second process.
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+function copyToClipboard(text) {
+  const platform = process.platform;
+  const cmd =
+    platform === 'darwin' ? 'pbcopy' :
+    platform === 'win32' ? 'clip' :
+    'xclip -selection clipboard';
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, { shell: true, stdio: ['pipe', 'ignore', 'ignore'] });
+    child.on('error', reject);
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} exited ${code}`))));
+    child.stdin.end(text);
+  });
+}
+
 if (isMain) {
   server.listen(PORT, HOST, () => {
     const op = getOperatorToken();
-    console.log(`prompt-cockpit listening on http://${HOST}:${PORT}/?op=${op}`);
+    const url = `http://${HOST}:${PORT}/?op=${op}`;
+    console.log(`prompt-cockpit listening on ${url}`);
+
+    if (process.stdin.isTTY) {
+      console.log('Press c to copy the URL to clipboard.');
+      readline.emitKeypressEvents(process.stdin);
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on('keypress', (str, key) => {
+        if (key && key.ctrl && key.name === 'c') {
+          process.exit(0);
+        }
+        if (str === 'c') {
+          copyToClipboard(url)
+            .then(() => console.log('Copied!'))
+            .catch((err) => console.error(`Could not copy to clipboard: ${err.message}`));
+        }
+      });
+    }
   });
 }

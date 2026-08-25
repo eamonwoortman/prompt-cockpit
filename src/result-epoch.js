@@ -12,8 +12,10 @@
 // swallows the next real turn. Identity, not a count.
 //
 // Each successful pushInput records {queueId, epoch}. forceIdle increments
-// epoch and moves whatever was pending into `abandoned` (in-flight/queued
-// work that may still produce a result). A result is stamped with that
+// epoch and moves whatever is still pending into `abandoned` (work that
+// may still produce a result). Callers with a local unsent queue must
+// remove() those ids first - they will never emit, and leaving them here
+// would FIFO-steal later live results. A result is stamped with that
 // turn's epoch and `_cockpitStale` when the epoch no longer matches.
 //
 // Grok's runPrompt closes over the meta object and should consume() by

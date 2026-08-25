@@ -1516,6 +1516,37 @@ test('removeQueued drops the matching pendingResultTags entry and relays a cance
   assert.match(aImpl.lastInput, /ERROR: the delegated task was removed from the queue before it ran/);
 });
 
+// Regression test: interruptTurn() (the Stop button) used to call
+// row.handle.interrupt() alone - session.js's interrupt() now also drains
+// its OWN local queue (see its comment), but that's session.js's private
+// bookkeeping, invisible to the registry. row.pendingResultTags (registry-
+// only) was left stale for every turn Stop dropped, so a later unrelated
+// result could be mismatched against a cancelled tag, and a cancelled
+// delegation was never told its task got dropped.
+test('interruptTurn drops pendingResultTags for every turn the Stop-drained local queue held, relaying a cancellation notice for a delegation', async () => {
+  registry._reset();
+  const aImpl = fakeStartSession();
+  const a = registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
+  const bImpl = fakeStartSession();
+  const b = registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
+
+  registry.delegateTask(a.id, 'B', 'task from A');
+  const queueId = b.pendingResultTags[0].queueId;
+  assert.equal(b.pendingResultTags.length, 1);
+
+  // session.js's real interrupt() drains its local queue synchronously
+  // before handle.interrupt() is even invoked - interruptTurn() has to
+  // snapshot listQueue() first to still see what's about to be dropped
+  // (see its own comment); this fixture stands in for that pre-drain state.
+  bImpl.queue = [{ id: queueId, text: 'task from A' }];
+
+  await registry.interruptTurn(b.id);
+
+  assert.equal(bImpl.interrupted, 1);
+  assert.equal(b.pendingResultTags.length, 0, 'the dropped tag must not be left for a later unrelated result to be mismatched against');
+  assert.match(aImpl.lastInput, /ERROR: the delegated task was removed from the queue before it ran/);
+});
+
 // Follow-up finding while fixing sendNow above: reorderQueue's own mirror
 // had the identical defect. The real frontend's queueIds (public/queue-
 // panel.js's reorderBySwap, sourced from listQueue()) can never name the

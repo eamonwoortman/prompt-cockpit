@@ -19,6 +19,13 @@
 // highlight stays until another bar is clicked (or reset() runs, e.g. on
 // session switch) - there used to be a mousemove-driven hover version of
 // this but it didn't work reliably, so it's gone.
+//
+// Y-axis: labels and gridlines follow the metric currently in the dropdown
+// (cost dollars, or tokens in/out/cached), using the same max as the bars
+// themselves - including "exclude cache misses from scale." The viewport
+// slider below the bars is a transcript-scroll thumb, not a zoom; the
+// chart always shows the whole session (bucketed once n is large), so
+// dragging it does not rescale the axis.
 
 const CACHE_MISS_COLOR = '#f0648b';
 
@@ -36,16 +43,60 @@ const MIN_BAR_WIDTH = 3;
 // color (B8), so retuning that color (or any other metric's) can't
 // silently make cache-miss highlighting vanish.
 const METRIC_CONF = {
-  cost: { label: 'Cost ($)', get: (p) => p.costUsd, color: '#f0b90b', cacheMissColor: true },
-  in: { label: 'Tokens In', get: (p) => p.inputTokens, color: '#2dd4a7' },
-  out: { label: 'Tokens Out', get: (p) => p.outputTokens, color: '#5b8def' },
-  cache: { label: 'Tokens Cached', get: (p) => p.cacheReadTokens + p.cacheWriteTokens, color: '#8b929c' },
+  cost: { label: 'Cost ($)', get: (p) => p.costUsd, color: '#f0b90b', cacheMissColor: true, unit: 'usd' },
+  in: { label: 'Tokens In', get: (p) => p.inputTokens, color: '#2dd4a7', unit: 'tokens' },
+  out: { label: 'Tokens Out', get: (p) => p.outputTokens, color: '#5b8def', unit: 'tokens' },
+  cache: { label: 'Tokens Cached', get: (p) => p.cacheReadTokens + p.cacheWriteTokens, color: '#8b929c', unit: 'tokens' },
 };
 
-export function initTurnChart({ panel, svg, metricSelect, scrollContainer, excludeCacheMissCheckbox, sliderTrack, sliderThumb, onSelectToolCall }) {
+// 1 / 2 / 2.5 / 5 / 10 so axis labels stay round ($0.02, 2.5K) instead of
+// echoing the raw tallest-bar value.
+const NICE_STEPS = [1, 2, 2.5, 5, 10];
+
+export function niceScaleMax(rawMax) {
+  if (!(rawMax > 0) || !Number.isFinite(rawMax)) return 1;
+  const exp = Math.floor(Math.log10(rawMax));
+  const mag = 10 ** exp;
+  const f = rawMax / mag;
+  const step = NICE_STEPS.find((n) => f <= n) ?? 10;
+  return step * mag;
+}
+
+function trimFrac(s) {
+  return s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
+}
+
+export function formatAxisTick(unit, value) {
+  if (unit === 'usd') {
+    if (value === 0) return '$0';
+    const abs = Math.abs(value);
+    // 2.5-cent nice steps (and anything under a dime) need a third decimal
+    // or $0.025 rounds to a lying "$0.03" on a 2-decimal format.
+    if (abs < 0.01) return `$${trimFrac(value.toFixed(4))}`;
+    if (abs < 0.1) return `$${trimFrac(value.toFixed(3))}`;
+    return `$${value.toFixed(2)}`;
+  }
+  if (value === 0) return '0';
+  if (value >= 1e6) return `${trimFrac((value / 1e6).toFixed(1))}M`;
+  if (value >= 1e3) return `${trimFrac((value / 1e3).toFixed(1))}K`;
+  return String(Math.round(value));
+}
+
+export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosition, metricSelect, scrollContainer, excludeCacheMissCheckbox, sliderTrack, sliderThumb, onSelectToolCall }) {
   const points = []; // one per assistant message that carried a priced usage figure
   let enabled = false;
   let dragging = false;
+  // 'left' (default) | 'right' | 'both' - which side(s) of the plot show the
+  // axis labels. Two fixed elements flank .turn-chart-plot (axisEl on the
+  // left, axisRightEl on the right); this just toggles which one(s) render
+  // ticks and are visible, rather than moving a single element around.
+  // Settings-driven (settings.js's turnChartAxisPosition) rather than a
+  // fixed side, since a wide detail pane pushes the chart into a narrow
+  // column where the labels sometimes read better hugging the plot's other
+  // edge, or both edges - see index.html's Display tab row.
+  let axisPosition = initialAxisPosition || 'left';
+  if (axisEl) axisEl.hidden = axisPosition === 'right';
+  if (axisRightEl) axisRightEl.hidden = !(axisPosition === 'right' || axisPosition === 'both');
   // A prompt-cache-miss turn (info.writeTokens >= info.readTokens - not
   // necessarily the *first* turn of a session, despite the old "cold start"
   // name: a long idle gap or a context change can miss the cache mid-session
@@ -338,7 +389,7 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
 
   function setEnabled(next) {
     enabled = next;
-    panel.style.display = enabled ? 'block' : 'none';
+    panel.hidden = !enabled;
     if (enabled) render();
   }
 
@@ -359,7 +410,10 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
     svg.innerHTML = '';
     const conf = METRIC_CONF[metricSelect.value] || METRIC_CONF.cost;
     const n = points.length;
-    if (n === 0) return;
+    if (n === 0) {
+      renderAxis(conf, 0, svg.height.baseVal.value || 60);
+      return;
+    }
 
     const width = svg.clientWidth || 900;
     svg.setAttribute('width', width);
@@ -375,7 +429,7 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
     const step = width / bars.length;
     const barWidth = Math.max(1, step - 1);
 
-    let maxVal = 0;
+    let rawMax = 0;
     bars.forEach((bar) => {
       // scale is set by the normal turns only - see excludeCacheMisses's
       // comment above; in bucketed mode this re-sums just the non-miss
@@ -383,9 +437,24 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
       const v = excludeCacheMisses
         ? points.slice(bar.start, bar.end).reduce((acc, p) => (p.cacheMiss ? acc : acc + conf.get(p)), 0)
         : bar.sum;
-      if (v > maxVal) maxVal = v;
+      if (v > rawMax) rawMax = v;
     });
-    maxVal = maxVal * 1.1 || 1;
+    const maxVal = niceScaleMax(rawMax);
+
+    // Grid behind the bars so a bar's height can be read against the labels
+    // on the left, not just against its neighbors.
+    for (const frac of [1, 0.5, 0]) {
+      const y = frac === 0 ? height - 0.5 : frac === 1 ? 0.5 : height * (1 - frac);
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', 0);
+      line.setAttribute('x2', width);
+      line.setAttribute('y1', y);
+      line.setAttribute('y2', y);
+      line.setAttribute('stroke', 'rgba(255,255,255,0.12)');
+      line.setAttribute('stroke-width', '1');
+      line.setAttribute('pointer-events', 'none');
+      svg.append(line);
+    }
 
     bars.forEach((bar, i) => {
       if (bar.sum <= 0) return;
@@ -399,13 +468,61 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
       rect.setAttribute('width', barWidth);
       rect.setAttribute('height', h);
       // Prompt-cache-miss turns (or buckets containing one) get a distinct
-      // color instead of a hover tooltip - no hover-driven UI on this chart
-      // anymore (see module comment).
+      // color; there's no custom mousemove-driven hover on this chart (see
+      // module comment) but a plain SVG <title> costs nothing and gets a
+      // free native tooltip from the browser, so it stays even though the
+      // old JS hover highlight didn't.
       rect.setAttribute('fill', conf.cacheMissColor && bar.hasCacheMiss ? CACHE_MISS_COLOR : conf.color);
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      const bucketed = bar.end - bar.start > 1;
+      title.textContent = bucketed
+        ? `${conf.label}: ${formatAxisTick(conf.unit, bar.sum)} (${bar.end - bar.start} turns)`
+        : `${conf.label}: ${formatAxisTick(conf.unit, bar.sum)}`;
+      rect.append(title);
       svg.append(rect);
     });
 
+    renderAxis(conf, maxVal, height);
     updateSlider();
+  }
+
+  function renderAxis(conf, maxVal, height) {
+    const showLeft = axisPosition !== 'right';
+    const showRight = axisPosition === 'right' || axisPosition === 'both';
+    fillAxis(axisEl, showLeft, conf, maxVal, height);
+    fillAxis(axisRightEl, showRight, conf, maxVal, height);
+  }
+
+  function fillAxis(el, visible, conf, maxVal, height) {
+    if (!el) return;
+    if (el.hidden !== !visible) el.hidden = !visible;
+    if (!visible) return;
+    el.replaceChildren();
+    el.style.height = `${height}px`;
+    if (!maxVal) return;
+    const ticks = [
+      { frac: 1, align: 'top' },
+      { frac: 0.5, align: 'mid' },
+      { frac: 0, align: 'bottom' },
+    ];
+    for (const t of ticks) {
+      const span = document.createElement('span');
+      span.textContent = formatAxisTick(conf.unit, maxVal * t.frac);
+      span.dataset.align = t.align;
+      el.append(span);
+    }
+  }
+
+  // Called by app.js on the Settings-modal select's change event. Re-renders
+  // immediately (not just next render() call) so flipping the setting shows
+  // its effect right away even if the chart isn't otherwise about to redraw.
+  function setAxisPosition(position) {
+    axisPosition = position;
+    if (enabled && points.length) render();
+    else {
+      if (axisEl) axisEl.hidden = position === 'right';
+      if (axisRightEl) axisRightEl.hidden = !(position === 'right' || position === 'both');
+    }
   }
 
   // Positions the slider thumb (a persistent DOM element - see index.html's
@@ -422,5 +539,5 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
     sliderThumb.style.width = `${Math.max(4, frac * 100)}%`;
   }
 
-  return { addPoint, nextPointIndex, reset, setEnabled };
+  return { addPoint, nextPointIndex, reset, setEnabled, setAxisPosition };
 }

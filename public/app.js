@@ -34,16 +34,13 @@ import { createProviderCatalog } from '/provider-catalog.js';
 // introduce Codex before this browser has provider-specific controls for it.
 let providerCatalog = createProviderCatalog({ providers: ['claude', 'grok'] });
 
-const launcherEl = document.getElementById('launcher');
-const streamWrapEl = document.getElementById('streamWrap'); // #stream + #detailPane side-by-side row (index.html) - this, not #stream itself, now owns the pre-session/session display:none<->flex toggle, so an empty flex:1 row doesn't reserve space on the launcher screen before a session exists
 const streamEl = document.getElementById('stream');
-const composeEl = document.getElementById('compose');
 const sessionLabelEl = document.getElementById('sessionLabel');
 const stateLabelEl = document.getElementById('stateLabel');
 const stateIconEl = document.getElementById('stateIcon');
 const cwdInput = document.getElementById('cwdInput');
 const startNameInput = document.getElementById('startNameInput');
-const startBtn = document.getElementById('startBtn');
+
 const startProviderSelect = document.getElementById('startProviderSelect');
 const startModelSelect = document.getElementById('startModelSelect');
 const startEffortSelect = document.getElementById('startEffortSelect');
@@ -102,7 +99,6 @@ const turnChartToggleBtn = document.getElementById('turnChartToggleBtn');
 const taskPanelToggleBtn = document.getElementById('taskPanelToggleBtn');
 const detailPaneToggleBtn = document.getElementById('detailPaneToggleBtn');
 const copyToast = document.getElementById('copyToast');
-const activityBar = document.getElementById('activityBar');
 const statsPanel = initStatsPanel({ el: document.getElementById('statsPanel') });
 
 // Metric/exclude-cache-miss picks persist across reloads, same as the
@@ -145,11 +141,20 @@ const sessionListPane = initSessionListPane({
   body: document.getElementById('sessionListBody'),
   closeBtn: document.getElementById('sessionListCloseBtn'),
   countBtn: document.getElementById('sessionCountBtn'),
-  headerEl: document.querySelector('header'),
+  headerEl: document.querySelector('.app-header'),
   handshakeRow: document.getElementById('handshakeRow'),
   handshakeValue: document.getElementById('handshakeValue'),
   handshakeCopyBtn: document.getElementById('handshakeCopyBtn'),
   handshakeRegenBtn: document.getElementById('handshakeRegenBtn'),
+  getSelfId: () => sessionId,
+  // Real cross-tab switching isn't possible from script (see
+  // session-list-pane.js's module comment) - flag this tab the same way an
+  // unfocused finished turn already does, so the user can find it in their
+  // own tab strip.
+  onFocusRequested: () => tabChrome.setNeedsAttention(true),
+  resizeHandle: document.getElementById('sessionListResizeHandle'),
+  initialWidth: persistedTurnChartPrefs.sessionListPaneWidth,
+  onWidthChange: (width) => patchSettings({ sessionListPaneWidth: width }),
 });
 
 const operatorGate = initOperatorGate({
@@ -217,6 +222,9 @@ function openAgentTab(block) {
 const turnChart = initTurnChart({
   panel: document.getElementById('turnChartPanel'),
   svg: document.getElementById('turnChart'),
+  axisEl: document.getElementById('turnChartAxis'),
+  axisRightEl: document.getElementById('turnChartAxisRight'),
+  initialAxisPosition: persistedTurnChartPrefs.turnChartAxisPosition,
   metricSelect: turnChartMetricSelect,
   scrollContainer: streamEl,
   excludeCacheMissCheckbox: turnChartExcludeCacheMissCheckbox,
@@ -227,6 +235,21 @@ const turnChart = initTurnChart({
   // selectIndex.
   onSelectToolCall: selectLiveToolCall,
 });
+
+// Settings > Display's "Cost graph y-axis labels" select - same persist-only
+// wiring as turnChartMetricSelect above (no dedicated setter on settings.js,
+// just patchSettings), except there's no rebuild-on-init to race: unlike
+// metricSelect's <option>s, this select's options are static markup, so the
+// persisted value can just be applied directly with no synthetic change
+// event needed.
+const turnChartAxisPositionSelect = document.getElementById('turnChartAxisPositionBtn');
+if (turnChartAxisPositionSelect) {
+  turnChartAxisPositionSelect.value = persistedTurnChartPrefs.turnChartAxisPosition || 'left';
+  turnChartAxisPositionSelect.addEventListener('change', () => {
+    patchSettings({ turnChartAxisPosition: turnChartAxisPositionSelect.value });
+    turnChart.setAxisPosition(turnChartAxisPositionSelect.value);
+  });
+}
 
 if (persistedTurnChartPrefs.turnChartMetric && turnChartMetricSelect.querySelector(`option[value="${persistedTurnChartPrefs.turnChartMetric}"]`)) {
   turnChartMetricSelect.value = persistedTurnChartPrefs.turnChartMetric;
@@ -449,25 +472,9 @@ function authHeaders() {
   return { authorization: `Bearer ${sessionToken}` };
 }
 
-// file-picker/model-picker/command-picker each toggle their own dropdown's
-// visibility as their open/closed signal (classList 'show' for the former,
-// style.display for the latter two - predates any shared convention, not
-// worth normalizing just for this read). Checked from compose.js's history
-// recall so Up/Down navigating an open suggestion list doesn't also swap
-// in a history entry underneath it.
+// All suggestion pickers use the .show class (see .dropdown-panel in style.css).
 function isSuggestionPickerOpen() {
-  const fileDropdown = document.getElementById('fileSuggestions');
-  const modelDropdown = document.getElementById('modelSuggestions');
-  const commandDropdown = document.getElementById('commandSuggestions');
-  const askDropdown = document.getElementById('askSuggestions');
-  const historyDropdown = document.getElementById('historySuggestions');
-  return (
-    fileDropdown.classList.contains('show') ||
-    modelDropdown.style.display === 'block' ||
-    commandDropdown.style.display === 'block' ||
-    askDropdown.style.display === 'block' ||
-    historyDropdown.style.display === 'block'
-  );
+  return Boolean(document.querySelector('.dropdown-panel.show'));
 }
 
 // Persisted prompt history + Ctrl+R fuzzy search - one store
@@ -683,7 +690,7 @@ function refreshCommandsAndAgents() {
   fetch(`/api/sessions/${sessionId}/agents`, { headers: authHeaders() })
     .then((r) => r.json()).then((agents) => {
       availableAgents = Array.isArray(agents) ? agents : [];
-      agentsBtn.style.display = availableAgents.length > 0 ? 'inline-block' : 'none';
+      agentsBtn.hidden = availableAgents.length === 0;
       // A previously-armed agent may no longer exist post-reload - drop it
       // silently rather than keep prefixing sends with a subagent_type the
       // roster no longer lists.
@@ -749,10 +756,11 @@ diffBtn.addEventListener('click', () => sessionId && diffView.open(sessionId, se
 // already-fetched availableAgents (connect() above) - no round trip on
 // click, this is read-only and doesn't change mid-session.
 agentsBtn.addEventListener('click', () => {
-  const opening = agentsList.style.display === 'none';
+  const opening = agentsList.hidden;
   if (opening && agentsList.children.length === 0) renderAgentsList();
-  agentsList.style.display = opening ? 'block' : 'none';
+  agentsList.hidden = !opening;
   agentsBtn.classList.toggle('open', opening);
+  agentsBtn.setAttribute('aria-expanded', opening ? 'true' : 'false');
 });
 
 // Toggles the same settings.turnChartEnabled value the settings-modal
@@ -770,20 +778,21 @@ function renderAgentsList() {
   agentsList.innerHTML = '';
   for (const agent of availableAgents) {
     const li = document.createElement('li');
+    const btn = document.createElement('button');
+    btn.type = 'button';
     const name = document.createElement('span');
     name.className = 'cmd-name' + (agent.name === selectedAgentName ? ' selected' : '');
     name.textContent = agent.name;
     const desc = document.createElement('span');
     desc.className = 'cmd-desc';
     desc.textContent = agent.model ? `${agent.description} (${agent.model})` : agent.description;
-    li.append(name, desc);
-    // Click toggles this agent as the sticky default (see selectedAgentName)
-    // - clicking the already-selected one clears it back to no forced agent.
-    li.addEventListener('click', () => {
+    btn.append(name, desc);
+    btn.addEventListener('click', () => {
       selectedAgentName = selectedAgentName === agent.name ? null : agent.name;
       renderAgentsList();
       applyAgentArmedIndicator();
     });
+    li.append(btn);
     agentsList.append(li);
   }
 }
@@ -877,21 +886,24 @@ const settings = initSettings({
   onTurnChartEnabledChange: (enabled) => {
     turnChart.setEnabled(enabled);
     turnChartToggleBtn.classList.toggle('on', enabled);
+    turnChartToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
   },
   onTaskPanelEnabledChange: (enabled) => {
     taskPanel.setEnabled(enabled);
     taskPanelToggleBtn.classList.toggle('on', enabled);
+    taskPanelToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
   },
   onDetailPaneEnabledChange: (enabled) => {
     detailPane.setEnabled(enabled);
     detailPaneToggleBtn.classList.toggle('on', enabled);
+    detailPaneToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
   },
   // Debug option - flipping it off hides the badge immediately even if a
   // turn is genuinely still pending; flipping it on re-shows it on the next
   // summary (applySession above already re-evaluates display each time).
   onPendingTurnsBadgeEnabledChange: (enabled) => {
-    if (!enabled) pendingTurnsBadge.style.display = 'none';
-    else if (!forceIdleArmed) pendingTurnsBadge.style.display = lastPendingTurnsCount > 0 ? 'inline-block' : 'none';
+    if (!enabled) pendingTurnsBadge.hidden = true;
+    else if (!forceIdleArmed) pendingTurnsBadge.hidden = lastPendingTurnsCount === 0;
   },
   // Toggles the CSS class both stream-view.js render targets read
   // (index.html) - retroactive, so flipping this instantly stamps/unstamps
@@ -930,7 +942,7 @@ const gitGuardErrorEl = document.getElementById('gitGuardError');
 // as refreshPermissionRulesList: reflects whatever another tab/session for
 // this cwd last saved, not a stale value cached from page load.
 async function refreshGitGuardMode() {
-  gitGuardErrorEl.style.display = 'none';
+  gitGuardErrorEl.hidden = true;
   if (!sessionId) return;
   try {
     const res = await fetch(`/api/sessions/${sessionId}/git-guard`, { headers: authHeaders() });
@@ -952,10 +964,10 @@ gitGuardModeEl.addEventListener('change', async () => {
       body: JSON.stringify({ mode }),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'save failed');
-    gitGuardErrorEl.style.display = 'none';
+    gitGuardErrorEl.hidden = true;
   } catch (err) {
     gitGuardErrorEl.textContent = `Couldn't save git commit guard setting: ${err.message || err}`;
-    gitGuardErrorEl.style.display = '';
+    gitGuardErrorEl.hidden = false;
   }
 });
 
@@ -970,7 +982,7 @@ const handshakeSaveBtnEl = document.getElementById('handshakeSaveBtn');
 const handshakeErrorEl = document.getElementById('handshakeError');
 
 async function refreshHandshakeStatus() {
-  handshakeErrorEl.style.display = 'none';
+  handshakeErrorEl.hidden = true;
   handshakeInputEl.value = '';
   if (!sessionId) return;
   try {
@@ -995,10 +1007,10 @@ handshakeSaveBtnEl.addEventListener('click', async () => {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'save failed');
     const { trusted } = await res.json();
     handshakeStatusEl.textContent = trusted ? '✓ trusted' : '⚠ not trusted - value did not match';
-    handshakeErrorEl.style.display = 'none';
+    handshakeErrorEl.hidden = true;
   } catch (err) {
     handshakeErrorEl.textContent = `Couldn't save handshake value: ${err.message || err}`;
-    handshakeErrorEl.style.display = '';
+    handshakeErrorEl.hidden = false;
   }
 });
 
@@ -1056,7 +1068,7 @@ sessionLabelEl.addEventListener('click', () => {
   const next = prompt('Rename this session:', currentSessionName || '');
   if (next === null) return; // cancelled
   tabChrome.rename(next);
-  sessionLabelErrorEl.style.display = 'none';
+  sessionLabelErrorEl.hidden = true;
   fetch(`/api/sessions/${sessionId}/title`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...authHeaders() },
@@ -1065,10 +1077,10 @@ sessionLabelEl.addEventListener('click', () => {
     if (res.ok) return;
     const body = await res.json().catch(() => ({}));
     sessionLabelErrorEl.textContent = `Rename didn't save: ${body.error || res.statusText}`;
-    sessionLabelErrorEl.style.display = 'inline';
+    sessionLabelErrorEl.hidden = false;
   }).catch(() => {
     sessionLabelErrorEl.textContent = "Rename didn't save (offline?) - it'll only last this tab.";
-    sessionLabelErrorEl.style.display = 'inline';
+    sessionLabelErrorEl.hidden = false;
   });
 });
 
@@ -1088,7 +1100,7 @@ sessionLabelEl.addEventListener('click', () => {
 // the badge just stays hidden until then rather than showing a misleading
 // blank chip.
 function applyModelBadge(session) {
-  if (!currentModel) { modelBadge.style.display = 'none'; return; }
+  if (!currentModel) { modelBadge.hidden = true; return; }
   const parts = [currentModel];
   if (currentProvider === 'grok') {
     // Always shown, not just when explicitly set - mirrors thinking's own
@@ -1127,7 +1139,7 @@ function applyModelBadge(session) {
     parts.push(`${session.effort} effort`);
   }
   modelBadge.textContent = parts.join(' · ');
-  modelBadge.style.display = 'inline-block';
+  modelBadge.hidden = false;
 }
 
 function formatThinkingTokens(tokens) {
@@ -1155,14 +1167,9 @@ function returnToLauncher() {
   setState('idle'); // stops the spinner interval too (stopSpinner), so hiding activityBar below doesn't leave a dead interval running behind it
   tabChrome.setNeedsAttention(false);
   statsPanel.reset();
-  launcherEl.style.display = 'block';
-  streamWrapEl.style.display = 'none';
-  composeEl.style.display = 'none';
-  activityBar.style.display = 'none'; // sits directly above compose (index.html) - hides in lockstep with it rather than floating alone on the launcher screen
-  modeBtn.style.display = 'none';
-  autoContinueLabel.style.display = 'none';
-  rateLimitBanner.style.display = 'none';
-  agentsBar.style.display = 'none';
+  document.body.dataset.screen = 'launcher';
+  autoContinueLabel.hidden = true;
+  rateLimitBanner.hidden = true;
   // Hides the panel even if the setting is persisted on (B9) - it otherwise
   // kept floating above the hidden compose box on the launcher screen.
   // Internal `enabled` flag is restored to match the setting in connect()
@@ -1171,30 +1178,24 @@ function returnToLauncher() {
   taskPanel.setEnabled(false); // same B9-style force-hide as turnChart above - see its own comment
   detailPane.setEnabled(false); // same B9-style force-hide - nothing to show once there's no live session
   queuePanel.reset();
-  agentsList.style.display = 'none';
+  agentsList.hidden = true;
   agentsList.innerHTML = '';
   agentsBtn.classList.remove('open');
+  agentsBtn.setAttribute('aria-expanded', 'false');
   selectedAgentName = null;
   applyAgentArmedIndicator();
-  diffBtn.style.display = 'none';
-  compactBtn.style.display = 'none';
   compactBtn.classList.remove('compact-urgent');
-  reportStuckBtn.style.display = 'none';
-  copyLastBtn.style.display = 'none';
-  exportBtn.style.display = 'none';
   currentCwd = null;
   currentProviderSessionId = null;
   currentSessionName = null;
-  sessionLabelErrorEl.style.display = 'none';
-  modelBadge.style.display = 'none';
-  stopBtn.style.display = 'none';
+  sessionLabelErrorEl.hidden = true;
+  modelBadge.hidden = true;
+  stopBtn.hidden = true;
   disarmStop();
-  pendingTurnsBadge.style.display = 'none';
+  pendingTurnsBadge.hidden = true;
   disarmForceIdle();
-  closeSessionBtn.style.display = 'none';
-  resetSessionBtn.style.display = 'none';
-  settingsBtn.style.display = 'none';
-  document.getElementById('settingsModal').style.display = 'none';
+  const settingsModal = document.getElementById('settingsModal');
+  if (settingsModal.open) settingsModal.close();
   loadResumable();
 }
 
@@ -1207,8 +1208,8 @@ const MODE_COLORS = {
   acceptEdits: 'var(--ok)',
   plan: 'var(--accent)',
   bypassPermissions: 'var(--error)',
-  dontAsk: '#b585f0',
-  auto: '#e0b34d',
+  dontAsk: 'var(--tool-search)',
+  auto: 'var(--warn)',
 };
 
 function applyModeColor(mode) {
@@ -1360,7 +1361,7 @@ async function selectEffort() {
   // back is a client-only no-op rather than a 400 from the effort route's
   // CLAUDE_EFFORTS/GROK_EFFORTS validation.
   if (!effortBtn.value) return;
-  if (effortErrorEl) effortErrorEl.style.display = 'none';
+  if (effortErrorEl) effortErrorEl.hidden = true;
   try {
     const res = await fetch(`/api/sessions/${sessionId}/effort`, {
       method: 'POST',
@@ -1371,13 +1372,13 @@ async function selectEffort() {
       const err = await res.json().catch(() => ({}));
       if (effortErrorEl) {
         effortErrorEl.textContent = `could not set effort: ${err.error || res.statusText}`;
-        effortErrorEl.style.display = 'block';
+        effortErrorEl.hidden = false;
       }
     }
   } catch (err) {
     if (effortErrorEl) {
       effortErrorEl.textContent = `could not set effort: ${err.message || err}`;
-      effortErrorEl.style.display = 'block';
+      effortErrorEl.hidden = false;
     }
   }
 }
@@ -1389,7 +1390,7 @@ async function selectThinking() {
   // (.mcp-error) - this used to be an alert(), the one holdout in the
   // settings modal still blocking the UI thread for an error a misclick can
   // trigger repeatedly (the budget/display selects fire on every change).
-  thinkingErrorEl.style.display = 'none';
+  thinkingErrorEl.hidden = true;
   try {
     const res = await fetch(`/api/sessions/${sessionId}/thinking`, {
       method: 'POST',
@@ -1408,23 +1409,22 @@ async function selectThinking() {
 
 function showThinkingError(message) {
   thinkingErrorEl.textContent = message;
-  thinkingErrorEl.style.display = '';
+  thinkingErrorEl.hidden = false;
 }
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Tab' && event.shiftKey && sessionId) {
     event.preventDefault();
     cycleMode();
   }
-  // Grok CLI's Esc-stops-the-turn. Deliberately deferred to
-  // any @/model/command picker's own Escape-closes-dropdown handling
-  // (isSuggestionPickerOpen, same guard compose.js's history recall uses) -
-  // those listeners live on the textarea itself and don't stopPropagation,
-  // so without this check Escape-to-close-a-dropdown would also cancel the
-  // running turn underneath it. No-op while idle: nothing to cancel, and
-  // stopBtn isn't even visible then.
-  if (event.key === 'Escape' && stopBtn.style.display !== 'none' && !isSuggestionPickerOpen()) {
-    event.preventDefault();
-    interruptTurn();
+  // Esc-stops-the-turn. Pickers stopPropagation on their own Escape, and
+  // an open dialog is dismissed natively instead of interrupting the turn.
+  if (event.key === 'Escape') {
+    if (event.target.closest('dialog') || document.querySelector('dialog[open]')) return;
+    if (isSuggestionPickerOpen()) return;
+    if (!stopBtn.hidden) {
+      event.preventDefault();
+      interruptTurn();
+    }
   }
 });
 
@@ -1764,11 +1764,11 @@ async function sendApprovalDecision(decision, updatedInput, alwaysAllow, message
     body: JSON.stringify({ requestId: pendingApprovalRequestId, decision, updatedInput, alwaysAllow, message }),
   });
   approvalQueue.shift();
-  approvalBanner.style.display = 'none';
-  questionForm.style.display = 'none';
+  approvalBanner.hidden = true;
+  questionForm.hidden = true;
   questionForm.innerHTML = '';
   alwaysAllowScope.value = '';
-  planReviewControls.style.display = 'none';
+  planReviewControls.hidden = true;
   pendingApprovalRequestId = null;
   pendingApprovalToolName = null;
   if (approvalQueue.length) renderApprovalBanner(approvalQueue[0]);
@@ -1798,7 +1798,7 @@ async function loadEarlierHistory() {
       onSelectToolCall: selectLiveToolCall,
       onOpenAgentTab: openAgentTab,
     });
-    loadHistoryBar.style.display = 'none';
+    loadHistoryBar.hidden = true;
   } catch (err) {
     loadHistoryBtn.disabled = false;
     loadHistoryBtn.textContent = 'Load earlier history (failed, click to retry)';
@@ -1875,7 +1875,8 @@ async function loadResumable() {
   resumeListEl.innerHTML = '';
   for (const s of sessions) {
     const li = document.createElement('li');
-    const info = document.createElement('div');
+    const info = document.createElement('button');
+    info.type = 'button';
     info.className = 'resume-info';
     const title = document.createElement('div');
     // A durable title (session-titles.js, joined server-side into s.title)
@@ -1901,7 +1902,8 @@ async function loadResumable() {
     }
     info.addEventListener('click', () => startSession({ cwd: s.cwd, resume: s.sessionId, provider }));
     const renameBtn = document.createElement('button');
-    renameBtn.className = 'renameResumeBtn';
+    renameBtn.type = 'button';
+    renameBtn.className = 'btn renameResumeBtn';
     renameBtn.textContent = '✎';
     renameBtn.title = 'Rename this session';
     renameBtn.addEventListener('click', async (event) => {
@@ -1920,7 +1922,8 @@ async function loadResumable() {
       }
     });
     const viewBtn = document.createElement('button');
-    viewBtn.className = 'viewHistoryBtn';
+    viewBtn.type = 'button';
+    viewBtn.className = 'btn viewHistoryBtn';
     viewBtn.textContent = 'View';
     viewBtn.title = 'Read-only transcript, no live session started';
     viewBtn.addEventListener('click', (event) => {
@@ -2029,8 +2032,8 @@ function fillStartEffort() {
   // Claude's dedicated effort dial - a real, separate SDK option (not the
   // thinking-token budget above) - only shown for Claude; Grok's own effort
   // concept already lives in the shared slot above.
-  startEffortSelect.style.display = generic && !genericEfforts.length ? 'none' : '';
-  startClaudeEffortSelect.style.display = claude ? '' : 'none';
+  startEffortSelect.hidden = generic && !genericEfforts.length;
+  startClaudeEffortSelect.hidden = !claude;
   if (claude) {
     startClaudeEffortSelect.innerHTML = '';
     for (const opt of CLAUDE_EFFORT_OPTIONS) {
@@ -2077,7 +2080,7 @@ async function applyAvailableProviders() {
       startProviderSelect.append(option);
     }
     startProviderSelect.value = selected;
-    startProviderSelect.style.display = providers.length <= 1 ? 'none' : '';
+    startProviderSelect.hidden = providers.length <= 1;
     fillStartModels();
     fillStartEffort();
     loadResumable();
@@ -2096,9 +2099,21 @@ async function applyAvailableProviders() {
 applyAvailableProviders();
 fillStartEffort();
 
-startBtn.addEventListener('click', () => {
+let cwdMissingTimer = 0;
+document.getElementById('launcherForm').addEventListener('submit', (event) => {
+  event.preventDefault();
   const cwd = cwdInput.value.trim();
-  if (!cwd) return;
+  if (!cwd) {
+    // Retriggerable: drop the class, force a reflow, put it back so a second
+    // Start click blinks again even if the previous animation is mid-flight.
+    cwdInput.classList.remove('cwd-missing');
+    void cwdInput.offsetWidth;
+    cwdInput.classList.add('cwd-missing');
+    cwdInput.focus();
+    clearTimeout(cwdMissingTimer);
+    cwdMissingTimer = setTimeout(() => cwdInput.classList.remove('cwd-missing'), 700);
+    return;
+  }
   // Empty value ("Default") means don't send a model at all - same as
   // never having picked one, not a literal 'default' string the SDK would
   // have to resolve.
@@ -2193,8 +2208,8 @@ function connect(id, token, { reconnect = false } = {}) {
   approvalQueue.length = 0;
   pendingApprovalRequestId = null;
   pendingApprovalToolName = null;
-  approvalBanner.style.display = 'none';
-  questionForm.style.display = 'none';
+  approvalBanner.hidden = true;
+  questionForm.hidden = true;
   questionForm.innerHTML = '';
   updateApprovalQueueCount();
 
@@ -2202,7 +2217,7 @@ function connect(id, token, { reconnect = false } = {}) {
     lastSeq = 0;
     streamEl.innerHTML = '';
     resetStreamView(streamEl);
-    loadHistoryBar.style.display = 'none';
+    loadHistoryBar.hidden = true;
     loadHistoryBtn.disabled = false;
     loadHistoryBtn.textContent = 'Load earlier history';
     availableCommands = [];
@@ -2212,14 +2227,13 @@ function connect(id, token, { reconnect = false } = {}) {
     // has any agents - it also hosts turnChartToggleBtn (the "same line as
     // Agents" cost-graph button), which has nothing to do with the roster.
     // Only agentsBtn's own visibility still depends on availableAgents.
-    agentsBar.style.display = 'flex';
-    agentsBtn.style.display = 'none';
+    agentsBtn.hidden = true;
     // Same idea as agentsBtn above: nothing to show yet, revealed by the
     // first cockpit:tasks push that actually has a task in it (see
     // ws.onmessage's cockpit:tasks branch) - a session that never calls a
     // Task* tool just never gets this button.
-    taskPanelToggleBtn.style.display = 'none';
-    agentsList.style.display = 'none';
+    taskPanelToggleBtn.hidden = true;
+    agentsList.hidden = true;
     agentsList.innerHTML = '';
     agentsBtn.classList.remove('open');
     cachedModels = null;
@@ -2243,27 +2257,14 @@ function connect(id, token, { reconnect = false } = {}) {
     sessionListPane.refreshCount(); // this tab just added a row to the server-wide count
   }
 
-  launcherEl.style.display = 'none';
-  streamWrapEl.style.display = 'flex';
+  document.body.dataset.screen = 'session';
   // detailPane.setEnabled() above (in the branch that sets up a fresh
   // session) ran its own offset measurement while streamWrap was still
-  // display:none, so it measured a zero-width pane - re-measure now that
-  // the pane is actually laid out, or #approvalBanner/#compose stay full
+  // hidden, so it measured a zero-width pane - re-measure now that
+  // the pane is actually laid out, or #approvalBanner stays full
   // viewport width under the docked pane for the whole session (see
   // detail-pane.js's syncOffset comment).
   detailPane.syncOffset();
-  composeEl.style.display = 'flex';
-  activityBar.style.display = 'flex';
-  modeBtn.style.display = 'inline-block';
-  autoContinueLabel.style.display = 'flex';
-  diffBtn.style.display = 'inline-block';
-  compactBtn.style.display = 'inline-block';
-  reportStuckBtn.style.display = 'inline-block';
-  copyLastBtn.style.display = 'inline-block';
-  exportBtn.style.display = 'inline-block';
-  closeSessionBtn.style.display = 'inline-block';
-  resetSessionBtn.style.display = 'inline-block';
-  settingsBtn.style.display = 'inline-block';
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const op = getOperatorToken();
@@ -2366,7 +2367,7 @@ function connect(id, token, { reconnect = false } = {}) {
       // (payload.servers), but mcpPanel has no setServers() of its own -
       // just re-running the same GET refresh() does on open is simpler
       // than adding a second render path for one push message.
-      if (document.getElementById('settingsModal').style.display !== 'none') mcpPanel.refresh();
+      if (document.getElementById('settingsModal').open) mcpPanel.refresh();
     } else if (payload.type === 'cockpit:delegate-error') {
       // Cross-session delegation - server.js sends this
       // straight back on the origin's own socket when delegateTask throws
@@ -2390,7 +2391,7 @@ function connect(id, token, { reconnect = false } = {}) {
       // roster. Doesn't force-hide again once a task list empties back out
       // (e.g. every task got deleted) - a session that's used the feature
       // once keeps the entry point, same as agentsBtn never re-hides either.
-      if (payload.tasks.length > 0) taskPanelToggleBtn.style.display = 'inline-block';
+      if (payload.tasks.length > 0) taskPanelToggleBtn.hidden = false;
     } else if (payload.type === 'cockpit:error') {
       renderMessage(streamEl, { type: 'result', subtype: 'error', error: payload.error });
     }
@@ -2410,10 +2411,10 @@ function updateApprovalQueueCount() {
   if (!el) return;
   if (approvalQueue.length > 1) {
     el.textContent = `1 of ${approvalQueue.length}`;
-    el.style.display = '';
+    el.hidden = false;
   } else {
     el.textContent = '';
-    el.style.display = 'none';
+    el.hidden = true;
   }
 }
 
@@ -2435,25 +2436,27 @@ function renderApprovalBanner(request) {
   detailPane.syncOffset();
 
   if (request.toolName === 'AskUserQuestion' && Array.isArray(request.input?.questions)) {
-    approvalPlain.style.display = 'none';
+    approvalPlain.hidden = true;
     renderQuestionForm(request);
-    questionForm.style.display = 'flex';
-    approvalBanner.style.display = 'flex';
+    questionForm.hidden = false;
+    approvalBanner.hidden = false;
     tabChrome.setNeedsAttention(true);
     updateApprovalQueueCount();
     return;
   }
-  questionForm.style.display = 'none';
+  questionForm.hidden = true;
   questionForm.innerHTML = '';
-  approvalPlain.style.display = 'flex';
+  approvalPlain.hidden = false;
   alwaysAllowScope.value = ''; // never carry a stale scope into a different tool's request
   alwaysAllowToolName.textContent = request.toolName;
+  alwaysAllowToolName.title = request.toolName;
   pendingApprovalToolName = request.toolName;
 
   const isPlan = request.toolName === 'ExitPlanMode';
   approvalHeading.textContent = isPlan
     ? 'Plan ready - approve to exit plan mode?'
     : (request.title || request.displayName || `${request.toolName}?`);
+  approvalHeading.title = approvalHeading.textContent;
 
   approvalDetail.textContent = isPlan && request.input?.plan
     ? request.input.plan
@@ -2464,12 +2467,12 @@ function renderApprovalBanner(request) {
   // ExitPlanMode. planFeedbackText/planNoteText always reset on a new
   // request, same as alwaysAllowScope above, so neither field leaks between
   // this plan and whatever comes after it.
-  planReviewControls.style.display = isPlan ? 'flex' : 'none';
+  planReviewControls.hidden = !isPlan;
   planFeedbackText.value = '';
   planNoteText.value = '';
   rejectBtn.textContent = isPlan ? 'Request changes' : 'No';
 
-  approvalBanner.style.display = 'flex';
+  approvalBanner.hidden = false;
   tabChrome.setNeedsAttention(true); // needs a decision regardless of focus - cleared on window focus (tab-chrome.js)
   updateApprovalQueueCount();
 }
@@ -2499,8 +2502,10 @@ function renderQuestionForm(request) {
     optionsEl.className = 'q-options';
     const selected = new Set();
     for (const opt of q.options || []) {
-      const pill = document.createElement('div');
+      const pill = document.createElement('button');
+      pill.type = 'button';
       pill.className = 'q-option';
+      pill.setAttribute('aria-pressed', 'false');
       const label = document.createElement('span');
       label.textContent = opt.label;
       pill.append(label);
@@ -2513,11 +2518,17 @@ function renderQuestionForm(request) {
       pill.addEventListener('click', () => {
         if (q.multiSelect) {
           pill.classList.toggle('selected');
-          if (pill.classList.contains('selected')) selected.add(opt.label);
+          const on = pill.classList.contains('selected');
+          pill.setAttribute('aria-pressed', on ? 'true' : 'false');
+          if (on) selected.add(opt.label);
           else selected.delete(opt.label);
         } else {
-          optionsEl.querySelectorAll('.q-option.selected').forEach((el) => el.classList.remove('selected'));
+          optionsEl.querySelectorAll('.q-option.selected').forEach((el) => {
+            el.classList.remove('selected');
+            el.setAttribute('aria-pressed', 'false');
+          });
           pill.classList.add('selected');
+          pill.setAttribute('aria-pressed', 'true');
           selected.clear();
           selected.add(opt.label);
         }
@@ -2540,23 +2551,23 @@ function renderQuestionForm(request) {
   actions.className = 'q-actions';
 
   const submitBtn = document.createElement('button');
+  submitBtn.type = 'submit';
   submitBtn.className = 'q-submit';
   submitBtn.textContent = 'Submit answers';
   submitBtn.title = 'Send these answers and continue';
-  submitBtn.addEventListener('click', () => {
+  questionForm.onsubmit = (event) => {
+    event.preventDefault();
     const answers = {};
     for (const [questionText, { selected, otherEl }] of state) {
       const typed = otherEl.value.trim();
       if (typed) answers[questionText] = typed;
       else if (selected.size > 0) answers[questionText] = [...selected].join(', ');
-      // Neither: this question is left out of `answers` entirely rather
-      // than sent as an empty string - an omitted key reads as "skipped
-      // this one", not "answered with nothing".
     }
     sendApprovalDecision('allow', { questions, answers });
-  });
+  };
 
   const skipBtn = document.createElement('button');
+  skipBtn.type = 'button';
   skipBtn.className = 'q-skip';
   skipBtn.textContent = 'Skip';
   skipBtn.title = 'Denies the tool call outright, same as "No" on a plain approval';
@@ -2614,7 +2625,7 @@ function applySession(session) {
   lastPendingTurnsCount = session.pendingTurnsCount || 0;
   if (!forceIdleArmed) {
     pendingTurnsBadge.textContent = String(lastPendingTurnsCount);
-    pendingTurnsBadge.style.display = settings.isPendingTurnsBadgeEnabled() && lastPendingTurnsCount > 0 ? 'inline-block' : 'none';
+    pendingTurnsBadge.hidden = !(settings.isPendingTurnsBadgeEnabled() && lastPendingTurnsCount > 0);
   }
   currentMode = session.mode;
   currentModel = session.model;
@@ -2631,23 +2642,23 @@ function applySession(session) {
     projectApprovalOption.hidden = caps.projectPersistentApprovals !== true;
     if (projectApprovalOption.hidden && alwaysAllowScope.value === 'project') alwaysAllowScope.value = '';
   }
-  autoContinueLabel.style.display = caps.autoContinue === true ? 'flex' : 'none';
+  autoContinueLabel.hidden = caps.autoContinue !== true;
   const thinkingGroup = document.getElementById('thinkingControlsGroup');
-  if (thinkingGroup) thinkingGroup.style.display = caps.thinkingBudget === true ? '' : 'none';
+  if (thinkingGroup) thinkingGroup.hidden = caps.thinkingBudget !== true;
   const effortGroup = document.getElementById('effortControlsGroup');
-  if (effortGroup) effortGroup.style.display = caps.effort ? '' : 'none';
+  if (effortGroup) effortGroup.hidden = !caps.effort;
   if (effortBtn) {
     fillSettingsEffortSelect(currentProvider);
     effortBtn.value = session.effort || '';
   }
   for (const tab of document.querySelectorAll('.settings-tab[data-settings-tab="mcp"], .settings-tab[data-settings-tab="plugins"]')) {
-    tab.style.display = caps.mcpToggle === true ? '' : 'none';
+    tab.hidden = caps.mcpToggle !== true;
   }
   const grokPanel = currentProvider === 'grok';
   const mcpNote = document.getElementById('mcpProviderNote');
   const pluginNote = document.getElementById('pluginProviderNote');
-  if (mcpNote) mcpNote.style.display = grokPanel ? 'block' : 'none';
-  if (pluginNote) pluginNote.style.display = grokPanel ? 'block' : 'none';
+  if (mcpNote) mcpNote.hidden = !grokPanel;
+  if (pluginNote) pluginNote.hidden = !grokPanel;
   turnIndexUnreliable = session.turnIndexUnreliable;
   modeBtn.value = session.mode; applyModeColor(session.mode);
   // != null, not a truthiness check - maxThinkingTokens: 0 is the real
@@ -2659,7 +2670,7 @@ function applySession(session) {
   // Server is the source of truth (registry.js flips this false once
   // loadEarlierHistory has nothing left) - reflects it on every summary,
   // safe to repeat since it's idempotent either way.
-  loadHistoryBar.style.display = session.hasEarlierHistory ? 'flex' : 'none';
+  loadHistoryBar.hidden = !session.hasEarlierHistory;
   // Auto-continue checkbox + banner: server is the source of truth here too
   // (session-registry.js's setAutoContinue/handleMessage), same idempotent-
   // repeat-on-every-summary pattern as the history bar above - a checkbox
@@ -2672,9 +2683,9 @@ function applySession(session) {
     rateLimitBanner.textContent = session.autoContinue
       ? `⏳ Usage limit hit - resumes at ${when}`
       : `⚠ Usage limit hit - resets at ${when}`;
-    rateLimitBanner.style.display = 'inline';
+    rateLimitBanner.hidden = false;
   } else {
-    rateLimitBanner.style.display = 'none';
+    rateLimitBanner.hidden = true;
   }
   // The ws itself can stay open after the underlying query() has died
   // (session.js's for-await throws or exits) - relying only on ws 'close'
@@ -2736,7 +2747,7 @@ function setState(state) {
   // Stop (lives in #activityBar next to the state spinner - index.html)
   // only shows while there's actually a turn to cancel - reconnecting/idle/
   // error/closed all have nothing in flight on this connection to interrupt.
-  stopBtn.style.display = state === 'running' ? 'inline-block' : 'none';
+  stopBtn.hidden = state !== 'running';
   if (state !== 'running') disarmStop(); // never carry an armed "click again" into the next turn
   // A turn that finished while this tab was unfocused is the terminal
   // bell's replacement - caught here as the running-to-idle

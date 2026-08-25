@@ -25,18 +25,20 @@ export function initHistoryPane({ modal, body, closeButton, titleEl, exportButto
   modal.addEventListener('click', (event) => {
     if (event.target === modal) close();
   });
+  modal.addEventListener('close', () => {
+    body.innerHTML = '';
+    detailPane.reset(body);
+  });
 
   function close() {
-    modal.style.display = 'none';
-    body.innerHTML = '';
-    detailPane.reset(body); // don't leave this session's payload/result sitting next to whatever opens next
+    if (modal.open) modal.close();
   }
 
   async function open({ sessionId, cwd, label, provider, assistantLabel }) {
     titleEl.textContent = label || sessionId;
     body.innerHTML = '<span class="tool-pending">Loading...</span>';
     detailPane.reset(body); // clear whatever the previously-viewed session (or a failed fetch) left showing before this one's data arrives
-    modal.style.display = 'flex';
+    if (!modal.open) modal.showModal();
     const qs = new URLSearchParams({ cwd: cwd || '', provider: provider || 'claude' });
     appendOperatorQuery(qs);
     if (exportButton) exportButton.href = `/api/history/${sessionId}/markdown?${qs}`;

@@ -10,12 +10,62 @@
 // too, not just this one's own lifecycle events; the expanded list body is
 // still a read-only, one-time snapshot fetched only when the panel opens -
 // not worth a websocket fan-in just to keep an open list live too.
-export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl, handshakeRow, handshakeValue, handshakeCopyBtn, handshakeRegenBtn }) {
+// Cross-tab "switch to this session" - BroadcastChannel is same-origin-only
+// and every tab (launcher or live session) has this pane wired up, so it
+// doubles as both the sender (row click, any tab) and receiver (the one tab
+// whose own sessionId matches). No server round-trip needed: this never
+// leaves the browser.
+//
+// Confirmed live: calling window.focus() here does nothing - Chrome and
+// Firefox both gate a background tab actually coming to the front on that
+// tab having its own recent user activation, which a BroadcastChannel
+// message never carries (the activation belongs to whichever tab the click
+// happened in). Tried it, watched it silently no-op, removed it rather than
+// leave dead "best-effort" code sitting here implying it sometimes works.
+// The only honest signal available is onFocusRequested, which app.js wires
+// to tab-chrome.js's existing needs-attention treatment (❗ title prefix +
+// red favicon dot, already used for "a turn finished while unfocused") so
+// the right tab is at least visibly flagged for the human to click.
+import { initResizablePanel } from '/resizable-panel.js';
+
+const FOCUS_CHANNEL_NAME = 'cockpit:session-focus';
+
+export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl, handshakeRow, handshakeValue, handshakeCopyBtn, handshakeRegenBtn, getSelfId, onFocusRequested, resizeHandle, initialWidth, onWidthChange }) {
   let open = false;
+
+  let focusChannel = null;
+  try {
+    focusChannel = new BroadcastChannel(FOCUS_CHANNEL_NAME);
+  } catch {
+    // BroadcastChannel unsupported (old Safari) - row clicks below just
+    // won't flag the other tab; everything else in this pane still works.
+  }
+  if (focusChannel) {
+    focusChannel.addEventListener('message', (event) => {
+      const targetId = event.data && event.data.id;
+      if (targetId && getSelfId && targetId === getSelfId()) onFocusRequested?.();
+    });
+  }
 
   function label(count) {
     return `${count} session${count === 1 ? '' : 's'}`;
   }
+
+  // Drag-to-resize (resizable-panel.js, shared with detail-pane.js - same
+  // .detail-pane-resize-handle CSS). This panel is a `position: fixed`
+  // overlay, not an in-flow flex sibling, so unlike detail-pane.js there's no
+  // --detail-pane-offset var to keep in sync, just the inline width itself.
+  // Bug report this exists for: model/effort/handshake text was getting
+  // ellipsis-truncated at the fixed 380px .detail-pane default with no way
+  // to see the full row before picking a session to switch to.
+  initResizablePanel({
+    panel,
+    handle: resizeHandle,
+    minWidthPx: 280,
+    initialWidth,
+    onWidthChange,
+    isNarrowLayout: () => window.matchMedia('(max-width: 900px)').matches,
+  });
 
   // The per-process delegation handshake secret -
   // shown copyable here so a human can paste it into a sibling session's
@@ -90,6 +140,18 @@ export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl,
     for (const s of sessions) {
       const row = document.createElement('div');
       row.className = 'session-list-row';
+      const isSelf = getSelfId && s.id === getSelfId();
+      if (isSelf) {
+        row.classList.add('self');
+        row.title = 'This is the current tab.';
+      } else if (focusChannel) {
+        row.classList.add('clickable');
+        row.title = 'Flag the tab with this session (❗ in its title) so you can find it - browsers won\'t let this page switch tabs for you.';
+        row.addEventListener('click', () => {
+          focusChannel.postMessage({ id: s.id });
+          closePane();
+        });
+      }
       const name = document.createElement('span');
       name.className = 'session-list-name';
       name.textContent = s.name || `(unnamed - ${s.cwd || s.id.slice(0, 8)})`;
