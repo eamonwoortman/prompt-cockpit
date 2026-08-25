@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [0.1.5]
+- Widened slash-command dropdown; sorted alphabetically, substring match
+- Fixed account-limits tests hanging on Windows (injectable execFile)
+- Gate every `/api` and `ws` route behind a process operator token
+- `/ask` delegation trust anchor and picker; settings modal split into tabs
+
+**Note:** commit history on `main` was rewritten (all commit messages
+reformatted to scoped-commit style) for this release. If you already have
+a clone, sync it with:
+```
+git fetch origin
+git checkout main
+git reset --hard origin/main
+```
+Any local branches based on the old commits will need rebasing onto the
+new history, or just re-cloning.
+
 ## [0.1.4]
 - Codex added as a third session provider, alongside Claude and Grok
 - Provider architecture refactored; Codex wired into launcher and UI
