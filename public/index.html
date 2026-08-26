@@ -87,6 +87,8 @@
         <button type="button" class="detail-tab" data-tab="payload" role="tab" aria-selected="false" title="Show raw request payload">Payload</button>
         <button type="button" class="detail-tab" data-tab="result" role="tab" aria-selected="false" title="Show tool result">Result</button>
         <button type="button" class="detail-tab" data-tab="timing" role="tab" aria-selected="false" title="Show timing breakdown">Timing</button>
+        <button type="button" id="detailTabTasks" class="detail-tab" data-tab="tasks" role="tab" aria-selected="false" title="Show the task list" hidden>Tasks</button>
+        <button type="button" id="detailTabAgent" class="detail-tab" data-tab="agent" role="tab" aria-selected="false" title="Show the subagent's transcript" hidden>Agent</button>
       </div>
       <div id="detailPaneBody" class="detail-pane-body"></div>
     </div>
@@ -139,14 +141,10 @@
     <div id="agentsBarRow">
       <button type="button" id="turnChartToggleBtn" class="btn" title="Toggle per-turn cost graph" aria-pressed="false">📊 Cost graph</button>
       <button type="button" id="detailPaneToggleBtn" class="btn" title="Toggle the tool-call detail pane" aria-pressed="true">🔍 Detail pane</button>
-      <button type="button" id="taskPanelToggleBtn" class="btn" title="Toggle task list" aria-pressed="false" hidden>📋 Tasks</button>
+      <button type="button" id="taskPanelToggleBtn" class="btn" title="Show the task list in the detail pane" aria-pressed="false" hidden>📋 Tasks</button>
       <button type="button" id="agentsBtn" class="btn" title="Choose a subagent to run this turn" aria-expanded="false" hidden>Agents</button>
     </div>
     <ul id="agentsList" hidden></ul>
-  </div>
-  <div id="taskPanel" class="session-chrome" hidden>
-    <div class="controls"><span>Tasks:</span></div>
-    <ul id="taskList"></ul>
   </div>
   <div id="queuePanel" class="session-chrome" hidden>
     <div class="controls"><span>Queued (behind the running turn):</span></div>

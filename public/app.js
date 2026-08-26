@@ -16,12 +16,13 @@ import { initStatsPanel } from '/stats-panel.js';
 import { initHistoryPane } from '/history-pane.js';
 import { initMcpPanel } from '/mcp-panel.js';
 import { initPluginPanel } from '/plugin-panel.js';
+import { initSessionControlsPanel } from '/session-controls-panel.js';
+import { initApprovalPanel } from '/approval-panel.js';
 import { initGlobalStatsPanel } from '/global-stats-panel.js';
 import { initSettings, loadSettings, patchSettings } from '/settings.js';
 import { initTurnChart } from '/turn-chart.js';
 import { initDetailPane } from '/detail-pane.js';
 import { initSessionListPane } from '/session-list-pane.js';
-import { initTaskPanel } from '/task-panel.js';
 import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
@@ -129,6 +130,7 @@ const detailPane = initDetailPane({
   resizeHandle: document.getElementById('detailPaneResizeHandle'),
   initialWidth: persistedTurnChartPrefs.detailPaneWidth,
   onWidthChange: (width) => patchSettings({ detailPaneWidth: width }),
+  tasksToggleBtn: taskPanelToggleBtn,
 });
 document.getElementById('detailPaneCollapseBtn').addEventListener('click', () => settings.setDetailPaneEnabled(false));
 
@@ -193,11 +195,10 @@ function selectDelegatedTrace(container, queueId, label, text) {
   if (!settings.isDetailPaneEnabled()) settings.setDetailPaneEnabled(true);
 }
 
-// Agent (Task) tool row click (stream-view.js) - opens a dedicated
-// read-only tab tailing the subagent's own transcript (agent-view.js, via
-// src/agent-transcript.js) instead of the in-page detail pane, which only
-// ever has this call's initial prompt/final result, never the subagent's
-// own tool calls as they happen.
+// Agent (Task) tool row click (stream-view.js) - tails the subagent's own
+// transcript (src/agent-transcript.js) inline in the detail pane's Agent tab
+// (detail-pane.js), which only ever otherwise has this call's initial
+// prompt/final result, never the subagent's own tool calls as they happen.
 function openAgentTab(block) {
   // Subagent transcripts only exist on disk under ~/.claude/projects/**/subagents
   // (agent-transcript.js) - a Claude-only artifact, so waiting never helps
@@ -212,11 +213,8 @@ function openAgentTab(block) {
     return;
   }
   const label = typeof block.input?.description === 'string' ? block.input.description : '';
-  const url = new URL(`${window.location.origin}/agent-view.html`);
-  url.searchParams.set('claudeSessionId', currentProviderSessionId);
-  url.searchParams.set('toolUseId', block.id);
-  if (label) url.searchParams.set('label', label);
-  window.open(url, '_blank');
+  if (!settings.isDetailPaneEnabled()) settings.setDetailPaneEnabled(true);
+  detailPane.showAgent(currentProviderSessionId, block.id, label);
 }
 
 const turnChart = initTurnChart({
@@ -262,10 +260,6 @@ if (turnChartExcludeCacheMissCheckbox) {
   );
 }
 
-const taskPanel = initTaskPanel({
-  panel: document.getElementById('taskPanel'),
-  listEl: document.getElementById('taskList'),
-});
 const queuePanel = initQueuePanel({
   panel: document.getElementById('queuePanel'),
   listEl: document.getElementById('queueList'),
@@ -294,12 +288,6 @@ let ws = null;
 let sessionId = null;
 let sessionToken = null;
 let currentMode = 'default';
-let pendingApprovalRequestId = null;
-let pendingApprovalToolName = null; // gates planReviewControls/rejectBtn's label - only ExitPlanMode gets the plan-review treatment
-// FIFO of unresolved cockpit:approval-request payloads. The banner shows
-// queue[0]; a second gated tool no longer overwrites the first (server
-// row.pendingApprovals is the matching list).
-const approvalQueue = [];
 let availableCommands = [];
 let availableAgents = []; // Query.supportedAgents(), fetched once on connect - see the `if (!reconnect)` block below
 // Sticky "default agent" set by clicking a roster entry (renderAgentsList) -
@@ -362,6 +350,32 @@ let intentionalClose = false;
 let previousState = null; // drives the "turn finished while unfocused" needs-attention signal
 
 const tabChrome = initTabChrome();
+
+const approvalPanel = initApprovalPanel({
+  approvalBanner: document.getElementById('approvalBanner'),
+  approvalPlain: document.getElementById('approvalPlain'),
+  approvalHeading: document.getElementById('approvalHeading'),
+  approvalDetail: document.getElementById('approvalDetail'),
+  approveBtn: document.getElementById('approveBtn'),
+  rejectBtn: document.getElementById('rejectBtn'),
+  alwaysAllowScope: document.getElementById('alwaysAllowScope'),
+  alwaysAllowToolName: document.getElementById('alwaysAllowToolName'),
+  planReviewControls: document.getElementById('planReviewControls'),
+  planFeedbackText: document.getElementById('planFeedbackText'),
+  planNoteText: document.getElementById('planNoteText'),
+  questionForm: document.getElementById('questionForm'),
+  approvalQueueCountEl: document.getElementById('approvalQueueCount'),
+  detailPane,
+  tabChrome,
+  postDecision: (payload) => fetch(`/api/sessions/${sessionId}/approval-decision`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  }),
+  sendFollowUpInput: (text) => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', text }));
+  },
+});
 
 const ACTIVE_SESSION_KEY = 'cockpit:activeSession';
 
@@ -680,15 +694,28 @@ async function reloadPluginsApi() {
   return result;
 }
 
+// Guards refreshCommandsAndAgents against a stale in-flight fetch from a
+// session that was torn down (resetSession) or replaced (rewind fork)
+// landing after a newer session's own fetch and clobbering its fresh
+// commands/agents list - same generation-counter pattern as loadResumable's
+// resumableGen above.
+let commandsAndAgentsGen = 0;
+
 // Fetches the current command/agent lists fresh and swaps them in. Used both
 // on a brand-new connect() and after any plugin reload (see reloadPluginsApi
 // above) - the only two things that can actually change what's in them.
 function refreshCommandsAndAgents() {
   if (!sessionId) return;
-  fetch(`/api/sessions/${sessionId}/commands`, { headers: authHeaders() })
-    .then((r) => r.json()).then((cmds) => { availableCommands = cmds; }).catch(() => {});
-  fetch(`/api/sessions/${sessionId}/agents`, { headers: authHeaders() })
+  const gen = ++commandsAndAgentsGen;
+  const forSessionId = sessionId;
+  fetch(`/api/sessions/${forSessionId}/commands`, { headers: authHeaders() })
+    .then((r) => r.json()).then((cmds) => {
+      if (gen !== commandsAndAgentsGen) return;
+      availableCommands = cmds;
+    }).catch(() => {});
+  fetch(`/api/sessions/${forSessionId}/agents`, { headers: authHeaders() })
     .then((r) => r.json()).then((agents) => {
+      if (gen !== commandsAndAgentsGen) return;
       availableAgents = Array.isArray(agents) ? agents : [];
       agentsBtn.hidden = availableAgents.length === 0;
       // A previously-armed agent may no longer exist post-reload - drop it
@@ -768,8 +795,15 @@ agentsBtn.addEventListener('click', () => {
 // into one persisted flag, not two independent states.
 turnChartToggleBtn.addEventListener('click', () => settings.setTurnChartEnabled(!settings.isTurnChartEnabled()));
 
-// Same shape as turnChartToggleBtn above, for the task list panel.
-taskPanelToggleBtn.addEventListener('click', () => settings.setTaskPanelEnabled(!settings.isTaskPanelEnabled()));
+// Task list now lives as a tab inside the detail pane (detail-pane.js) -
+// this button is just a quick-jump entry point next to the cost graph
+// toggle: make sure the pane itself is open, then switch to the Tasks tab.
+// detail-pane.js keeps this button's on/off state in sync with whether the
+// Tasks tab is actually the one showing.
+taskPanelToggleBtn.addEventListener('click', () => {
+  if (!settings.isDetailPaneEnabled()) settings.setDetailPaneEnabled(true);
+  detailPane.showTasks();
+});
 
 // Same shape again, for the tool-call detail pane.
 detailPaneToggleBtn.addEventListener('click', () => settings.setDetailPaneEnabled(!settings.isDetailPaneEnabled()));
@@ -888,11 +922,6 @@ const settings = initSettings({
     turnChartToggleBtn.classList.toggle('on', enabled);
     turnChartToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
   },
-  onTaskPanelEnabledChange: (enabled) => {
-    taskPanel.setEnabled(enabled);
-    taskPanelToggleBtn.classList.toggle('on', enabled);
-    taskPanelToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-  },
   onDetailPaneEnabledChange: (enabled) => {
     detailPane.setEnabled(enabled);
     detailPaneToggleBtn.classList.toggle('on', enabled);
@@ -934,128 +963,71 @@ const settings = initSettings({
   },
 });
 
-const gitGuardModeEl = document.getElementById('gitGuardModeBtn');
-const gitGuardErrorEl = document.getElementById('gitGuardError');
-
-// Project-scoped (src/git-commit-guard.js via settings.local.json), not a
-// localStorage preference - same "read fresh on every modal open" reasoning
-// as refreshPermissionRulesList: reflects whatever another tab/session for
-// this cwd last saved, not a stale value cached from page load.
-async function refreshGitGuardMode() {
-  gitGuardErrorEl.hidden = true;
-  if (!sessionId) return;
-  try {
-    const res = await fetch(`/api/sessions/${sessionId}/git-guard`, { headers: authHeaders() });
-    if (!res.ok) return;
-    const { mode } = await res.json();
-    gitGuardModeEl.value = mode;
-  } catch {
-    // offline/blocked - select just keeps showing its last-known value
-  }
-}
-
-gitGuardModeEl.addEventListener('change', async () => {
-  if (!sessionId) return;
-  const mode = gitGuardModeEl.value;
-  try {
+// Git-commit-guard select, delegation-handshake trust status/paste-in, and
+// always-allow permission-rules list - all settings-modal sections scoped to
+// THIS session/cwd (src/git-commit-guard.js, src/permission-rules.js via
+// settings.local.json) or this tab's own session token (handshake, distinct
+// from the read-only server-wide copy in session-list-pane.js - see that
+// file's own comment for why the paste action has to live here instead).
+// Rendering/wiring lives in session-controls-panel.js; this just supplies
+// the sessionId-bound fetchers, same injection shape as mcpPanel above.
+const sessionControlsPanel = initSessionControlsPanel({
+  gitGuardModeEl: document.getElementById('gitGuardModeBtn'),
+  gitGuardErrorEl: document.getElementById('gitGuardError'),
+  getGitGuardMode: async () => {
+    if (!sessionId) return null;
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/git-guard`, { headers: authHeaders() });
+      return res.ok ? res.json() : null;
+    } catch {
+      return null; // offline/blocked - select just keeps showing its last-known value
+    }
+  },
+  setGitGuardMode: async (mode) => {
     const res = await fetch(`/api/sessions/${sessionId}/git-guard`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ mode }),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'save failed');
-    gitGuardErrorEl.hidden = true;
-  } catch (err) {
-    gitGuardErrorEl.textContent = `Couldn't save git commit guard setting: ${err.message || err}`;
-    gitGuardErrorEl.hidden = false;
-  }
-});
-
-// THIS session's own delegation handshake trust
-// status, plus a paste-in field to re-sync it. Distinct from the read-only
-// server-wide copy in session-list-pane.js - see this file's own comment
-// there for why the paste action has to live here, scoped to this tab's own
-// session token, rather than in the cross-tab "All sessions" list.
-const handshakeStatusEl = document.getElementById('handshakeStatus');
-const handshakeInputEl = document.getElementById('handshakeInput');
-const handshakeSaveBtnEl = document.getElementById('handshakeSaveBtn');
-const handshakeErrorEl = document.getElementById('handshakeError');
-
-async function refreshHandshakeStatus() {
-  handshakeErrorEl.hidden = true;
-  handshakeInputEl.value = '';
-  if (!sessionId) return;
-  try {
-    const res = await fetch(`/api/sessions/${sessionId}`, { headers: authHeaders() });
-    if (!res.ok) return;
-    const { handshakeTrusted } = await res.json();
-    handshakeStatusEl.textContent = handshakeTrusted ? '✓ trusted' : '⚠ not trusted - paste the value below';
-  } catch {
-    // offline/blocked - status just keeps showing its last-known value
-  }
-}
-
-handshakeSaveBtnEl.addEventListener('click', async () => {
-  if (!sessionId) return;
-  const value = handshakeInputEl.value;
-  try {
+  },
+  handshakeStatusEl: document.getElementById('handshakeStatus'),
+  handshakeInputEl: document.getElementById('handshakeInput'),
+  handshakeSaveBtnEl: document.getElementById('handshakeSaveBtn'),
+  handshakeErrorEl: document.getElementById('handshakeError'),
+  getHandshakeStatus: async () => {
+    if (!sessionId) return null;
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}`, { headers: authHeaders() });
+      return res.ok ? res.json() : null;
+    } catch {
+      return null; // offline/blocked - status just keeps showing its last-known value
+    }
+  },
+  saveHandshakeValue: async (value) => {
     const res = await fetch(`/api/sessions/${sessionId}/handshake`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ value }),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'save failed');
-    const { trusted } = await res.json();
-    handshakeStatusEl.textContent = trusted ? '✓ trusted' : '⚠ not trusted - value did not match';
-    handshakeErrorEl.hidden = true;
-  } catch (err) {
-    handshakeErrorEl.textContent = `Couldn't save handshake value: ${err.message || err}`;
-    handshakeErrorEl.hidden = false;
-  }
-});
-
-const permissionRulesListEl = document.getElementById('permissionRulesList');
-
-// Read-only status GET, same "safe to re-run every open" reasoning as
-// mcpPanel.refresh() above - reflects whatever the approval banner's
-// "always in this project" scope has written since the modal was last open.
-async function refreshPermissionRulesList() {
-  permissionRulesListEl.innerHTML = '';
-  if (!sessionId) return;
-  try {
+    return res.json();
+  },
+  permissionRulesListEl: document.getElementById('permissionRulesList'),
+  getPermissionRules: async () => {
+    if (!sessionId) return null;
     const res = await fetch(`/api/sessions/${sessionId}/permissions`, { headers: authHeaders() });
-    if (!res.ok) return;
-    const { allow } = await res.json();
-    for (const rule of allow || []) {
-      const li = document.createElement('li');
-      li.className = 'custom-folder-row'; // reuses the @-folder list's row/remove-button styling, same shape
-
-      const label = document.createElement('span');
-      label.className = 'cmd-name';
-      label.textContent = rule;
-      li.append(label);
-
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'custom-folder-remove';
-      removeBtn.textContent = '−';
-      removeBtn.title = `Revoke always-allow for ${rule}`;
-      removeBtn.addEventListener('click', async () => {
-        await fetch(`/api/sessions/${sessionId}/permissions`, {
-          method: 'DELETE',
-          headers: { 'content-type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ rule }),
-        });
-        refreshPermissionRulesList();
-      });
-      li.append(removeBtn);
-
-      permissionRulesListEl.append(li);
-    }
-  } catch {
-    // offline/blocked - list just stays empty until the next open, not fatal
-  }
-}
+    return res.ok ? res.json() : null;
+  },
+  revokePermissionRule: async (rule) => {
+    await fetch(`/api/sessions/${sessionId}/permissions`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ rule }),
+    });
+  },
+});
+const { refreshGitGuardMode, refreshHandshakeStatus, refreshPermissionRulesList } = sessionControlsPanel;
 
 const sessionLabelErrorEl = document.getElementById('sessionLabelError');
 
@@ -1175,7 +1147,6 @@ function returnToLauncher() {
   // Internal `enabled` flag is restored to match the setting in connect()
   // below, once there's a session for it to chart again.
   turnChart.setEnabled(false);
-  taskPanel.setEnabled(false); // same B9-style force-hide as turnChart above - see its own comment
   detailPane.setEnabled(false); // same B9-style force-hide - nothing to show once there's no live session
   queuePanel.reset();
   agentsList.hidden = true;
@@ -1720,60 +1691,6 @@ async function setMode(next) {
   }
 }
 
-approveBtn.addEventListener('click', () => {
-  // Captured before sendApprovalDecision resolves - pendingApprovalToolName
-  // is cleared once the request is gone, and reading it after the await
-  // would race a fast-arriving next approval request for a different tool.
-  const note = pendingApprovalToolName === 'ExitPlanMode' ? planNoteText.value.trim() : '';
-  sendApprovalDecision('allow', undefined, alwaysAllowScope.value || undefined).then(() => {
-    // Plan review's "append more before approving" - queued as
-    // a real follow-up turn right after approving (same ws 'input' path
-    // compose.js uses, so it lands in the visible queue if a turn's already
-    // running), since an `allow` PermissionResult has no message field of
-    // its own for the model to see - there's nowhere else for this to ride.
-    if (note && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'input', text: note }));
-    }
-  });
-});
-rejectBtn.addEventListener('click', () => {
-  // Plan review's "request changes" - reuses the existing deny
-  // path with a real reason instead of the hardcoded default: ExitPlanMode's
-  // PermissionResult already carries `message` back to the model as
-  // feedback, previously always "Not approved by user." regardless of why.
-  const feedback = pendingApprovalToolName === 'ExitPlanMode' ? planFeedbackText.value.trim() : '';
-  sendApprovalDecision('deny', undefined, false, feedback || undefined);
-});
-
-// One-off per action - the terminal's own "proceed? y/n", not a mode
-// change. Every gated tool call routes here now (session.js's
-// canUseTool), not just ExitPlanMode. `updatedInput` is what
-// AskUserQuestion's answer actually rides back on (see
-// renderQuestionForm) - every other caller omits it, same as before.
-// `alwaysAllow` only ever comes from approveBtn's own click
-// above - session.js strips it back off before handing the decision to the
-// SDK, it's cockpit-only bookkeeping (remembers the tool name for the rest
-// of this session, nothing persisted to disk). `message` is the plan
-// review "request changes" reason above; server.js falls back to its own
-// default when this is undefined, same as it always has for a plain deny.
-async function sendApprovalDecision(decision, updatedInput, alwaysAllow, message) {
-  if (!pendingApprovalRequestId) return;
-  await fetch(`/api/sessions/${sessionId}/approval-decision`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ requestId: pendingApprovalRequestId, decision, updatedInput, alwaysAllow, message }),
-  });
-  approvalQueue.shift();
-  approvalBanner.hidden = true;
-  questionForm.hidden = true;
-  questionForm.innerHTML = '';
-  alwaysAllowScope.value = '';
-  planReviewControls.hidden = true;
-  pendingApprovalRequestId = null;
-  pendingApprovalToolName = null;
-  if (approvalQueue.length) renderApprovalBanner(approvalQueue[0]);
-}
-
 loadHistoryBtn.addEventListener('click', loadEarlierHistory);
 
 // Resuming shows a recent tail (~1M estimated tokens - session.js/
@@ -2205,13 +2122,7 @@ function connect(id, token, { reconnect = false } = {}) {
   // Drop any in-banner request; attachClient replays the full pending
   // list. Must run on reconnect too or a second overlapping prompt
   // resolved while the socket was down would still occupy queue[0].
-  approvalQueue.length = 0;
-  pendingApprovalRequestId = null;
-  pendingApprovalToolName = null;
-  approvalBanner.hidden = true;
-  questionForm.hidden = true;
-  questionForm.innerHTML = '';
-  updateApprovalQueueCount();
+  approvalPanel.reset();
 
   if (!reconnect) {
     lastSeq = 0;
@@ -2247,8 +2158,6 @@ function connect(id, token, { reconnect = false } = {}) {
     // there's no session to chart.
     turnChart.setEnabled(settings.isTurnChartEnabled());
     turnChart.reset();
-    taskPanel.setEnabled(settings.isTaskPanelEnabled());
-    taskPanel.reset();
     detailPane.setEnabled(settings.isDetailPaneEnabled());
     detailPane.reset(streamEl);
     queuePanel.reset(); // corrected by the first cockpit:queue push if a turn's already queued behind another, same as statsPanel above
@@ -2341,7 +2250,7 @@ function connect(id, token, { reconnect = false } = {}) {
     } else if (payload.type === 'cockpit:hello' || payload.type === 'cockpit:state') {
       applySession(payload.session);
     } else if (payload.type === 'cockpit:approval-request') {
-      showApprovalRequest(payload.request);
+      approvalPanel.enqueue(payload.request);
     } else if (payload.type === 'cockpit:usage') {
       statsPanel.update(payload.usage, payload.context, payload.rateLimits);
       // context.autoCompact comes from src/context-usage.js server-side:
@@ -2384,197 +2293,21 @@ function connect(id, token, { reconnect = false } = {}) {
     } else if (payload.type === 'cockpit:tasks') {
       // Always the full current list (session-registry.js never sends a
       // delta), sent once on every attach/reconnect and again on every real
-      // change - task-panel.js just replaces and re-renders, no merging.
-      taskPanel.setTasks(payload.tasks);
-      // Only worth a button once there's something to show - same "hidden
-      // until proven relevant" treatment agentsBtn gets for an empty
-      // roster. Doesn't force-hide again once a task list empties back out
-      // (e.g. every task got deleted) - a session that's used the feature
-      // once keeps the entry point, same as agentsBtn never re-hides either.
-      if (payload.tasks.length > 0) taskPanelToggleBtn.hidden = false;
+      // change - detail-pane.js's Tasks tab just replaces and re-renders, no
+      // merging. It also owns the "reveal the Tasks entry points once
+      // there's something to show, never re-hide" logic, and auto-switches
+      // into the tab on that first reveal (see its own setTasks() comment) -
+      // same as selectToolCall/showText/showAgent above, force the pane on
+      // so that auto-switch is actually visible instead of switching tabs
+      // behind a collapsed panel.
+      if (payload.tasks && payload.tasks.length > 0 && !settings.isDetailPaneEnabled()) {
+        settings.setDetailPaneEnabled(true);
+      }
+      detailPane.setTasks(payload.tasks);
     } else if (payload.type === 'cockpit:error') {
       renderMessage(streamEl, { type: 'result', subtype: 'error', error: payload.error });
     }
   };
-}
-
-function enqueueApprovalRequest(request) {
-  if (!request || !request.requestId) return;
-  if (approvalQueue.some((r) => r.requestId === request.requestId)) return;
-  approvalQueue.push(request);
-  if (approvalQueue.length === 1) renderApprovalBanner(request);
-  else updateApprovalQueueCount();
-}
-
-function updateApprovalQueueCount() {
-  const el = document.getElementById('approvalQueueCount');
-  if (!el) return;
-  if (approvalQueue.length > 1) {
-    el.textContent = `1 of ${approvalQueue.length}`;
-    el.hidden = false;
-  } else {
-    el.textContent = '';
-    el.hidden = true;
-  }
-}
-
-function showApprovalRequest(request) {
-  enqueueApprovalRequest(request);
-}
-
-function renderApprovalBanner(request) {
-  pendingApprovalRequestId = request.requestId;
-
-  // Belt-and-suspenders re-measure right before the banner actually needs
-  // the offset to be right, instead of only trusting whatever earlier
-  // lifecycle event (session connect, resize, drag) last computed it. The
-  // connect()-time call this used to rely on exclusively measures
-  // #detailPane while #streamWrap may still be display:none mid-setup
-  // (see detail-pane.js's syncOffset comment) - that's now patched at the
-  // one call site we found, but a banner is worth getting right every time
-  // it appears, not just when every upstream timing assumption holds.
-  detailPane.syncOffset();
-
-  if (request.toolName === 'AskUserQuestion' && Array.isArray(request.input?.questions)) {
-    approvalPlain.hidden = true;
-    renderQuestionForm(request);
-    questionForm.hidden = false;
-    approvalBanner.hidden = false;
-    tabChrome.setNeedsAttention(true);
-    updateApprovalQueueCount();
-    return;
-  }
-  questionForm.hidden = true;
-  questionForm.innerHTML = '';
-  approvalPlain.hidden = false;
-  alwaysAllowScope.value = ''; // never carry a stale scope into a different tool's request
-  alwaysAllowToolName.textContent = request.toolName;
-  alwaysAllowToolName.title = request.toolName;
-  pendingApprovalToolName = request.toolName;
-
-  const isPlan = request.toolName === 'ExitPlanMode';
-  approvalHeading.textContent = isPlan
-    ? 'Plan ready - approve to exit plan mode?'
-    : (request.title || request.displayName || `${request.toolName}?`);
-  approvalHeading.title = approvalHeading.textContent;
-
-  approvalDetail.textContent = isPlan && request.input?.plan
-    ? request.input.plan
-    : JSON.stringify(request.input, null, 2);
-  approvalDetail.classList.toggle('plan-detail', isPlan);
-
-  // Plan review - preview + comment/revise, only for
-  // ExitPlanMode. planFeedbackText/planNoteText always reset on a new
-  // request, same as alwaysAllowScope above, so neither field leaks between
-  // this plan and whatever comes after it.
-  planReviewControls.hidden = !isPlan;
-  planFeedbackText.value = '';
-  planNoteText.value = '';
-  rejectBtn.textContent = isPlan ? 'Request changes' : 'No';
-
-  approvalBanner.hidden = false;
-  tabChrome.setNeedsAttention(true); // needs a decision regardless of focus - cleared on window focus (tab-chrome.js)
-  updateApprovalQueueCount();
-}
-
-// Builds the AskUserQuestion form: one block per question (pill-style
-// options, single-select or multi-select per `q.multiSelect`, plus a free-
-// text "Other" fallback per the tool's own description - "Users will
-// always be able to select 'Other' to provide custom text input"), and one
-// Submit for the whole set. `answers` must be keyed by the *exact* question
-// text (confirmed against the tool's own schema/checkPermissions handler -
-// see the investigation that found this) - not an index, not the header.
-function renderQuestionForm(request) {
-  questionForm.innerHTML = '';
-  const questions = request.input.questions || [];
-  const state = new Map(); // question text -> { selected: Set<label>, otherEl }
-
-  for (const q of questions) {
-    const block = document.createElement('div');
-    block.className = 'q-block';
-
-    const text = document.createElement('div');
-    text.className = 'q-text';
-    text.textContent = q.header ? `${q.header}: ${q.question}` : q.question;
-    block.append(text);
-
-    const optionsEl = document.createElement('div');
-    optionsEl.className = 'q-options';
-    const selected = new Set();
-    for (const opt of q.options || []) {
-      const pill = document.createElement('button');
-      pill.type = 'button';
-      pill.className = 'q-option';
-      pill.setAttribute('aria-pressed', 'false');
-      const label = document.createElement('span');
-      label.textContent = opt.label;
-      pill.append(label);
-      if (opt.description) {
-        const desc = document.createElement('span');
-        desc.className = 'q-option-desc';
-        desc.textContent = opt.description;
-        pill.append(desc);
-      }
-      pill.addEventListener('click', () => {
-        if (q.multiSelect) {
-          pill.classList.toggle('selected');
-          const on = pill.classList.contains('selected');
-          pill.setAttribute('aria-pressed', on ? 'true' : 'false');
-          if (on) selected.add(opt.label);
-          else selected.delete(opt.label);
-        } else {
-          optionsEl.querySelectorAll('.q-option.selected').forEach((el) => {
-            el.classList.remove('selected');
-            el.setAttribute('aria-pressed', 'false');
-          });
-          pill.classList.add('selected');
-          pill.setAttribute('aria-pressed', 'true');
-          selected.clear();
-          selected.add(opt.label);
-        }
-      });
-      optionsEl.append(pill);
-    }
-    block.append(optionsEl);
-
-    const other = document.createElement('input');
-    other.type = 'text';
-    other.className = 'q-other';
-    other.placeholder = 'Other (type your own answer)…';
-    block.append(other);
-
-    questionForm.append(block);
-    state.set(q.question, { selected, otherEl: other });
-  }
-
-  const actions = document.createElement('div');
-  actions.className = 'q-actions';
-
-  const submitBtn = document.createElement('button');
-  submitBtn.type = 'submit';
-  submitBtn.className = 'q-submit';
-  submitBtn.textContent = 'Submit answers';
-  submitBtn.title = 'Send these answers and continue';
-  questionForm.onsubmit = (event) => {
-    event.preventDefault();
-    const answers = {};
-    for (const [questionText, { selected, otherEl }] of state) {
-      const typed = otherEl.value.trim();
-      if (typed) answers[questionText] = typed;
-      else if (selected.size > 0) answers[questionText] = [...selected].join(', ');
-    }
-    sendApprovalDecision('allow', { questions, answers });
-  };
-
-  const skipBtn = document.createElement('button');
-  skipBtn.type = 'button';
-  skipBtn.className = 'q-skip';
-  skipBtn.textContent = 'Skip';
-  skipBtn.title = 'Denies the tool call outright, same as "No" on a plain approval';
-  skipBtn.addEventListener('click', () => sendApprovalDecision('deny'));
-
-  actions.append(submitBtn, skipBtn);
-  questionForm.append(actions);
 }
 
 // Full cwd was crowding out everything else in the header on a deep path -

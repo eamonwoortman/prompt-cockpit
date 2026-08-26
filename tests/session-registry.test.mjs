@@ -998,17 +998,23 @@ function emitToolResult(startSessionImpl, toolUseId, output, { isError = false }
   });
 }
 // Mirrors the real CLI wire shape for Task* results (confirmed by pulling
-// the literal template strings out of the installed claude-agent-sdk CLI
-// binary): `content` is always a human-readable summary string ("Task #1
-// created successfully: <subject>"), never JSON - the structured payload
-// applyTaskOp actually needs rides on the sibling `toolUseResult` field of
-// the 'user' message instead. emitToolResult above (JSON.stringify'd into
-// `content`) does NOT match this and only exercises the fallback path.
+// the literal template strings and the message serializer out of the
+// installed claude-agent-sdk CLI binary): `content` is always a
+// human-readable summary string ("Task #1 created successfully: <subject>"),
+// never JSON - the structured payload applyTaskOp actually needs rides on
+// the sibling `tool_use_result` (snake_case) field of the 'user' message
+// instead. `toolUseResult` (camelCase) is only the persisted-JSONL field
+// name, never what's on the live wire - a prior version of this fixture used
+// camelCase here, which matched the transcript format but not the stream the
+// production code actually reads, so it exercised a path real sessions never
+// hit and let the field-name bug through untested. emitToolResult above
+// (JSON.stringify'd into `content`) does NOT match this and only exercises
+// the fallback path.
 function emitRealToolResult(startSessionImpl, toolUseId, summaryText, toolUseResult, { isError = false } = {}) {
   startSessionImpl.emitMessage({
     type: 'user',
     message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, is_error: isError, content: summaryText }] },
-    toolUseResult,
+    tool_use_result: toolUseResult,
   });
 }
 
@@ -1060,7 +1066,51 @@ test('TaskCreate broadcasts the new task once its tool_result confirms the id', 
   assert.deepEqual(last.tasks, [{ id: 'task-1', subject: 'Write tests', status: 'pending', owner: null, blockedBy: [] }]);
 });
 
-test('TaskCreate is picked up from the real CLI wire shape (plain-text content, structured toolUseResult)', () => {
+test('TaskCreate clears a fully-completed prior task list before adding the new task', () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  // First batch: created, then completed.
+  emitToolUse(startSessionImpl, 'tu-1', 'TaskCreate', { subject: 'Old batch task' });
+  emitToolResult(startSessionImpl, 'tu-1', { task: { id: 'task-1', subject: 'Old batch task' } });
+  emitToolUse(startSessionImpl, 'tu-2', 'TaskUpdate', { taskId: 'task-1', status: 'completed' });
+  emitToolResult(startSessionImpl, 'tu-2', { success: true, taskId: 'task-1', updatedFields: ['status'] });
+
+  let last = ws.sent.filter((m) => m.type === 'cockpit:tasks').at(-1);
+  assert.deepEqual(last.tasks.map((t) => t.id), ['task-1']);
+
+  // Second batch starts - the old, fully-completed task should be dropped,
+  // not accumulated alongside the new one.
+  emitToolUse(startSessionImpl, 'tu-3', 'TaskCreate', { subject: 'New batch task' });
+  emitToolResult(startSessionImpl, 'tu-3', { task: { id: 'task-2', subject: 'New batch task' } });
+
+  last = ws.sent.filter((m) => m.type === 'cockpit:tasks').at(-1);
+  assert.deepEqual(last.tasks, [{ id: 'task-2', subject: 'New batch task', status: 'pending', owner: null, blockedBy: [] }]);
+});
+
+test('TaskCreate leaves an in-progress prior task list alone', () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  emitToolUse(startSessionImpl, 'tu-1', 'TaskCreate', { subject: 'Still going' });
+  emitToolResult(startSessionImpl, 'tu-1', { task: { id: 'task-1', subject: 'Still going' } });
+  emitToolUse(startSessionImpl, 'tu-2', 'TaskUpdate', { taskId: 'task-1', status: 'in_progress' });
+  emitToolResult(startSessionImpl, 'tu-2', { success: true, taskId: 'task-1', updatedFields: ['status'] });
+
+  emitToolUse(startSessionImpl, 'tu-3', 'TaskCreate', { subject: 'Second task, same batch' });
+  emitToolResult(startSessionImpl, 'tu-3', { task: { id: 'task-2', subject: 'Second task, same batch' } });
+
+  const last = ws.sent.filter((m) => m.type === 'cockpit:tasks').at(-1);
+  assert.deepEqual(last.tasks.map((t) => t.id).sort(), ['task-1', 'task-2']);
+});
+
+test('TaskCreate is picked up from the real CLI wire shape (plain-text content, structured tool_use_result)', () => {
   registry._reset();
   const startSessionImpl = fakeStartSession();
   const row = registry.createSession({ cwd: '/tmp', startSessionImpl });

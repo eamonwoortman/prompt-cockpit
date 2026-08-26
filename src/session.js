@@ -150,13 +150,18 @@ function createInputQueue() {
     [Symbol.asyncIterator]() {
       return {
         next() {
+          // Checked before the pending-dispatch branch below so close()
+          // (called with turns still queued behind an in-flight one) is
+          // unconditionally terminal - otherwise a `next()` call landing
+          // between close() and actual teardown could still dispatch a
+          // queued message the caller was told would never be read again.
+          if (closed) {
+            return Promise.resolve({ value: undefined, done: true });
+          }
           if (pending.length > 0 && !inFlight) {
             const entry = pending.shift();
             inFlight = true;
             return Promise.resolve({ value: entry.message, done: false });
-          }
-          if (closed) {
-            return Promise.resolve({ value: undefined, done: true });
           }
           return new Promise((resolve) => {
             waiting = resolve;
@@ -365,6 +370,17 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   (async () => {
     try {
       for await (const message of handle) {
+        // The SDK forwards a spawned subagent's own tool_use/tool_result
+        // blocks onto this same iterator by default (parent_tool_use_id set -
+        // "enough for a heartbeat counter", per its own doc comment), even
+        // though forwardSubagentText is off. Left unfiltered, these get
+        // broadcast and rendered as if they were this session's own top-level
+        // tool calls, interleaving a spawned Agent's internal activity with
+        // real work in the transcript. A subagent's own transcript is only
+        // meant to be visible via the detail pane's Agent tab
+        // (public/detail-pane.js, reading from disk) - so bail before any
+        // bookkeeping (result/mode tracking, resultEpoch, onMessage) sees it.
+        if (message.parent_tool_use_id) continue;
         // First result-type message is the priming sentinel (num_turns:0):
         // the input-queue gate blocks every later write until this arrives.
         // A real turn interrupted before producing anything can also report
@@ -553,11 +569,21 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
     if (!moved) return false;
     resultEpoch.reorderTail([queueId]);
     onQueueChange?.(inputQueue.list());
-    await handle.interrupt();
+    // Matches close()/forceIdle()'s own handling of this same call below -
+    // an interrupt racing session teardown shouldn't surface as an unhandled
+    // rejection here just because this caller didn't wrap it.
+    await handle.interrupt().catch(() => {});
     return true;
   }
 
   function close() {
+    // Same reasoning as interrupt() below: anything still sitting in
+    // `pending` was never sent to the CLI, so draining it locally (resultEpoch,
+    // pendingTurns, onQueueChange) is the only cleanup it needs - without
+    // this, a turn queued behind an in-flight one would vanish with no
+    // result and no queue-panel update if close() is ever called from a path
+    // that doesn't immediately tear down the whole registry row.
+    drainLocalQueue();
     inputQueue.close();
     handle.interrupt?.().catch(() => {});
   }

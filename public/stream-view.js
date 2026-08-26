@@ -350,13 +350,13 @@ function appendToolCallRow(container, block, usageInfo, parent, turnPointIndex, 
   // renderMessage containers (live #stream, history modal's #historyBody) -
   // `wrap` is a genuine DOM descendant of whichever one it ended up in by
   // the time a user can click it, fragment or not.
-  // An Agent (Task) tool row opens its own read-only tab (agent-view.js)
-  // tailing the subagent's own transcript, instead of the in-page detail
-  // pane - that pane only ever has this call's initial prompt/eventual
-  // result, never the subagent's own tool calls as they happen. Falls back
-  // to the normal detail-pane click wherever onOpenAgentTab isn't wired up
-  // (e.g. this row rendering in a context with no live claudeSessionId to
-  // build the new tab's URL from).
+  // An Agent (Task) tool row opens the subagent's own transcript in the
+  // detail pane's dedicated Agent tab (detail-pane.js) instead of the
+  // normal Summary/Payload/Result/Timing tabs - those only ever have this
+  // call's initial prompt/eventual result, never the subagent's own tool
+  // calls as they happen. Falls back to the normal detail-pane click
+  // wherever onOpenAgentTab isn't wired up (e.g. this row rendering in a
+  // context with no live claudeSessionId to fetch the transcript from).
   if (block.name === 'Agent') wrap.classList.add('tool-row-agent');
   wrap.addEventListener('click', (e) => {
     e.stopPropagation(); // don't also toggle the enclosing group
@@ -531,7 +531,10 @@ function summarizeToolInput(name, input) {
   const preferredKeys = ['file_path', 'path', 'command', 'pattern', 'query', 'url', 'prompt'];
   const key = preferredKeys.find((k) => k in input) || Object.keys(input)[0];
   if (!key) return '';
-  const value = typeof input[key] === 'string' ? input[key] : JSON.stringify(input[key]);
+  // JSON.stringify(undefined) returns the value undefined, not a string
+  // (e.g. a key explicitly set to undefined) - String() coalesces it to the
+  // literal text "undefined" instead of crashing on .length below.
+  const value = typeof input[key] === 'string' ? input[key] : String(JSON.stringify(input[key]));
   const truncated = value.length > 80 ? `${value.slice(0, 80)}…` : value;
   return `${key}: ${JSON.stringify(truncated)}`;
 }
@@ -879,7 +882,10 @@ export function renderBody(body, content, hint = null, markdown = false) {
 // .msg per token.
 function appendToLastStreamBlock(container, cls, text, markdown) {
   const last = container.lastElementChild;
-  if (!last || !last.classList.contains('msg') || !last.classList.contains(cls)) return false;
+  // A delegated-reply bubble carries both 'assistant' and 'delegated-reply'
+  // (see the isDelegatedReply branches above) - excluded here so a genuine
+  // assistant block streamed right after one doesn't get merged into it.
+  if (!last || !last.classList.contains('msg') || !last.classList.contains(cls) || last.classList.contains('delegated-reply')) return false;
   const body = last.querySelector('.body');
   if (!body) return false;
   const wasAtBottom = isScrolledToBottom(container);

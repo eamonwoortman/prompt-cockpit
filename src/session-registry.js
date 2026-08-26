@@ -881,6 +881,16 @@ function setState(id, state) {
   if (!row) return;
   row.state = state;
   broadcastSummary(id);
+  // A row whose underlying handle ends on its own - the CLI process exits,
+  // or session.js/grok-session.js's for-await loop throws - previously
+  // lingered in `sessions` forever: only the manual closeSession() route
+  // (the "Close session" button) ever called sessions.delete, so a session
+  // nobody clicked "close" on accumulated for the cockpit process's entire
+  // lifetime (2026-08-26 review, finding #1). Reap it here, once every
+  // connected client has already been told via the broadcastSummary above -
+  // the handle is dead either way, so there's nothing left a manual close
+  // would additionally have done.
+  if (state === 'closed' || state === 'error') sessions.delete(id);
 }
 
 function handleMessage(id, message) {
@@ -1171,13 +1181,14 @@ function collectDelegationText(row, message) {
   }
 }
 
-// FALLBACK ONLY - the real path is message.toolUseResult (see handleMessage's
+// FALLBACK ONLY - the real path is message.tool_use_result (see handleMessage's
 // tool_result branch). This exists in case a future CLI build ever stops
-// attaching toolUseResult and reverts to putting structured data directly in
-// `content`; it was previously (wrongly) assumed to be the primary path,
-// which is why the task panel never worked despite tests passing - the CLI's
-// actual `content` for Task* results is always a human-readable summary
-// string ("Task #1 created successfully: <subject>"), never JSON, so
+// attaching tool_use_result and reverts to putting structured data directly in
+// `content`; it was previously (wrongly) read as camelCase toolUseResult - that
+// spelling is only the persisted-JSONL field name, not the live wire one, so it
+// was always undefined and the task panel never worked despite tests passing -
+// the CLI's actual `content` for Task* results is always a human-readable
+// summary string ("Task #1 created successfully: <subject>"), never JSON, so
 // JSON.parse here always threw and applyTaskOp always returned false.
 // Accepts any of the forms seen elsewhere in this codebase for tool results:
 // a plain string, an array of { type: 'text', text } blocks (see
@@ -1287,14 +1298,18 @@ function deriveTaskUpdate(row, message) {
       const op = row.pendingTaskOps.get(block.tool_use_id);
       if (!op) continue;
       row.pendingTaskOps.delete(block.tool_use_id);
-      // message.toolUseResult carries the CLI's real structured payload
+      // message.tool_use_result carries the CLI's real structured payload
       // ({task:{id,subject}}, {success,taskId,...}, {tasks:[...]}) - block.content
       // is always the human-readable summary string it renders for the model
       // (e.g. "Task #3 created successfully: <subject>"), confirmed by pulling
-      // the literal template strings out of the CLI binary. toolUseResult is
-      // read first, parseToolResultJson(block.content) kept only as a
-      // fallback in case a future CLI build stops attaching toolUseResult.
-      const data = message.toolUseResult !== undefined ? message.toolUseResult : parseToolResultJson(block.content);
+      // the literal template strings out of the CLI binary. The live SDK
+      // stream uses snake_case tool_use_result; camelCase toolUseResult is
+      // only the persisted-JSONL field name (kept as a secondary fallback in
+      // case a message ever originates from a transcript read instead of the
+      // live stream). parseToolResultJson(block.content) is the last resort,
+      // for a future CLI build that stops attaching either field.
+      const structured = message.tool_use_result !== undefined ? message.tool_use_result : message.toolUseResult;
+      const data = structured !== undefined ? structured : parseToolResultJson(block.content);
       if (applyTaskOp(row, op, block, data)) changed = true;
     }
   }
@@ -1345,6 +1360,15 @@ function applyTaskOp(row, op, resultBlock, data) {
   if (!data || typeof data !== 'object') return false;
 
   if (op.kind === 'create' && data.task && data.task.id) {
+    // A TaskCreate landing while every existing task is already completed
+    // means the previous batch is done and this is the start of a fresh
+    // one (e.g. another round of spawned agents) - drop the stale completed
+    // list instead of letting it accumulate forever across unrelated
+    // batches. A list with any pending/in_progress task is still active and
+    // is left alone even if this new task belongs to a different batch.
+    if (row.tasks.size > 0 && [...row.tasks.values()].every((t) => t.status === 'completed')) {
+      row.tasks.clear();
+    }
     row.tasks.set(data.task.id, {
       id: data.task.id,
       subject: data.task.subject || op.input.subject || '',
@@ -1700,6 +1724,10 @@ function handleError(id, err) {
   // their origin session waiting forever.
   failPendingDelegations(row, String((err && err.message) || err));
   broadcast(id, { type: 'cockpit:error', error: String((err && err.stack) || err) });
+  // Same reap as setState's 'error'/'closed' branch - this path sets
+  // row.state directly instead of going through setState, so it needs its
+  // own sessions.delete once the error has been broadcast.
+  sessions.delete(id);
 }
 
 function broadcastSummary(id) {

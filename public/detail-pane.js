@@ -1,9 +1,14 @@
 // Docked detail pane for the Trajectory-style tool-call rows (stream-view.js).
 // Shows Summary/Payload/Result/Timing for whichever tool call is selected -
 // defaults to "follow the most recent tool call live", switches to a pinned
-// historical row on click. Mirrors turn-chart.js's shape: init*(...) closing
-// over its DOM refs and returning a small method bag, no global event bus.
-import { renderBody, formatUsageInline } from '/stream-view.js';
+// historical row on click. Also hosts two independent tabs that have nothing
+// to do with tool-call selection: Tasks (the live TaskCreate/TaskUpdate list)
+// and Agent (a subagent's own transcript, tailed live) - both used to be a
+// separate docked panel / window.open'd page respectively, folded in here so
+// there's one right-hand pane instead of three competing UI surfaces. Mirrors
+// turn-chart.js's shape: init*(...) closing over its DOM refs and returning a
+// small method bag, no global event bus.
+import { renderBody, formatUsageInline, renderMessage, resetStreamView } from '/stream-view.js';
 import { getToolCallRecord, getMostRecentToolCallRecord } from '/tool-call-store.js';
 import { initResizablePanel } from '/resizable-panel.js';
 
@@ -16,12 +21,38 @@ import { initResizablePanel } from '/resizable-panel.js';
 // each other).
 const MIN_WIDTH_PX = 280;
 
-export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, body, resizeHandle, initialWidth, onWidthChange }) {
+// pending/in_progress first, completed last - otherwise a long-running
+// session's list reads bottom-heavy with finished work pushing what's
+// actually still active off the visible area. (Moved here from the old
+// standalone task-panel.js when the task list became a detail-pane tab.)
+const TASK_STATUS_ORDER = { in_progress: 0, pending: 1, completed: 2 };
+
+// How often the Agent tab polls the subagent's own transcript file while
+// it's the active tab - same interval agent-view.js used before this became
+// an inline tab instead of a separate window.open'd page.
+const AGENT_POLL_MS = 2000;
+// Stop polling once the file has stopped growing for this many consecutive
+// polls - a subagent's transcript never announces "I'm done" the way a live
+// session's own result message does, so "no new lines for a while" is the
+// best honest signal available without cross-referencing the parent
+// session's own tool_result. Clicking the status line resumes it.
+const AGENT_STALL_POLLS_BEFORE_STOP = 4;
+
+export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, body, resizeHandle, initialWidth, onWidthChange, tasksToggleBtn }) {
   let enabled = true;
   let currentContainer = null;
   let pinnedId = null; // set by an explicit row click; cleared by followLive() or reset()
   let currentRecord = null;
-  let activeTab = 'summary'; // 'summary' | 'payload' | 'result' | 'timing'
+  let activeTab = 'summary'; // 'summary' | 'payload' | 'result' | 'timing' | 'tasks' | 'agent'
+  let tasks = [];
+  const tasksTabButton = tabButtons.find((b) => b.dataset.tab === 'tasks') || null;
+  const agentTabButton = tabButtons.find((b) => b.dataset.tab === 'agent') || null;
+
+  // Agent tab state - set by showAgent(), polled independently of the
+  // tool-call live-follow machinery above (a subagent's transcript is a
+  // completely separate file this pane just tails, see agentPoll() below).
+  let agent = null; // { claudeSessionId, toolUseId, label, renderedCount, lastMtimeMs, stallCount, stopped, timer, pollId }
+  let agentPollCounter = 0; // bumped on every showAgent() call so a stale in-flight fetch from a previous agent can't paint over a newer one
   // Set by showText() (a delegated reply's "full trace" button, see
   // stream-view.js) - a plain-text view that bypasses the tool-call tabs
   // entirely. Reuses `pinnedId` for the same "something specific is pinned,
@@ -94,6 +125,10 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     currentContainer = container;
     currentRecord = record;
     highlightRow(record);
+    // An explicit click on a tool-call row is a direct request to see it -
+    // bring the pane back from Tasks/Agent if that's what it was showing,
+    // same reasoning as clearing textView above.
+    if (activeTab === 'tasks' || activeTab === 'agent') { setActiveTab('summary'); return; }
     render();
   }
 
@@ -108,6 +143,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     currentRecord = null;
     textView = { id, label, text };
     updateLiveIndicator();
+    if (activeTab === 'tasks' || activeTab === 'agent') { setActiveTab('summary'); return; }
     render();
   }
 
@@ -191,6 +227,11 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     // hide the tab row entirely while textView is showing.
     panel.classList.toggle('text-mode', Boolean(textView));
     if (textView) { renderTextView(textView); return; }
+    // Tasks/Agent are independent of the tool-call-record machinery below -
+    // they stay on whatever they last showed regardless of which tool call
+    // is currently live, same as textView above.
+    if (activeTab === 'tasks') { renderTasksTab(); return; }
+    if (activeTab === 'agent') { renderAgentTab(); return; }
     if (!currentRecord) { renderEmpty(); return; }
     const statusGlyph = currentRecord.status === 'pending' ? '…' : currentRecord.status === 'error' ? '✗' : '✓';
     headerLabel.textContent = `${currentRecord.name} ${statusGlyph}`;
@@ -320,16 +361,214 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     line('Measured in the browser (render time to result-received time), including network and render lag - not the tool\'s actual server-side execution time. Historical/replayed rows may show no duration at all if no per-call timestamp was available to measure from.', 'detail-pane-note');
   }
 
-  for (const btn of tabButtons) {
-    btn.addEventListener('click', () => {
-      activeTab = btn.dataset.tab;
-      for (const b of tabButtons) {
-        const on = b === btn;
-        b.classList.toggle('active', on);
-        b.setAttribute('aria-selected', on ? 'true' : 'false');
-      }
-      render();
+  // --- Tasks tab (folded in from the old standalone task-panel.js) ---
+
+  function renderTasksTab() {
+    headerLabel.textContent = 'Tasks';
+    body.textContent = '';
+    if (!tasks.length) { line('No tasks yet.', 'detail-pane-note'); return; }
+    const ul = document.createElement('ul');
+    ul.className = 'task-list';
+    [...tasks]
+      .sort((a, b) => (TASK_STATUS_ORDER[a.status] ?? 3) - (TASK_STATUS_ORDER[b.status] ?? 3))
+      .forEach((task) => ul.append(renderTaskRow(task)));
+    body.append(ul);
+  }
+
+  function renderTaskRow(task) {
+    const li = document.createElement('li');
+    li.className = 'task-row';
+
+    const dot = document.createElement('span');
+    dot.className = `task-status task-status-${task.status}`;
+    dot.title = task.status;
+    li.append(dot);
+
+    const subject = document.createElement('span');
+    subject.className = task.status === 'completed' ? 'task-subject task-subject-done' : 'task-subject';
+    subject.textContent = task.subject;
+    li.append(subject);
+
+    if (task.owner) {
+      const owner = document.createElement('span');
+      owner.className = 'task-owner';
+      owner.textContent = task.owner;
+      li.append(owner);
+    }
+
+    if (task.blockedBy && task.blockedBy.length) {
+      const blocked = document.createElement('span');
+      blocked.className = 'task-blocked';
+      blocked.textContent = `blocked by ${task.blockedBy.length}`;
+      li.append(blocked);
+    }
+
+    return li;
+  }
+
+  // Called on every cockpit:tasks push (app.js) - always the full current
+  // list (never a delta), so this just replaces and re-renders when the
+  // Tasks tab is the one currently showing.
+  function setTasks(next) {
+    tasks = next || [];
+    // "Hidden until proven relevant, never re-hidden" - same treatment
+    // agentsBtn's own roster button gets for an empty command list. Doesn't
+    // force-hide again once a task list empties back out (e.g. every task
+    // got deleted) - a session that's used the feature once keeps the entry
+    // point. Auto-switches into the Tasks tab only on the 0 -> >0 transition
+    // (first reveal) - later updates just re-render in place without
+    // stealing the pane away from a tool call the user is mid-inspection of.
+    if (tasks.length > 0 && tasksTabButton && tasksTabButton.hidden) {
+      tasksTabButton.hidden = false;
+      if (tasksToggleBtn) tasksToggleBtn.hidden = false;
+      setActiveTab('tasks');
+      return;
+    }
+    if (activeTab === 'tasks') render();
+  }
+
+  // Entry point for both the in-tab-row "Tasks" button and the agentsBar's
+  // own taskPanelToggleBtn (index.html) - either one just jumps here.
+  function showTasks() {
+    if (tasksTabButton) tasksTabButton.hidden = false;
+    if (tasksToggleBtn) tasksToggleBtn.hidden = false;
+    setActiveTab('tasks');
+  }
+
+  // --- Agent tab (folded in from the old agent-view.js "open in new tab"
+  // reader) - polls the subagent's own transcript file
+  // (src/agent-transcript.js, via GET /api/history/:id/agent/:toolUseId)
+  // since that file is written by a completely separate SDK-managed
+  // process/session this pane has no live connection to; a plain re-read on
+  // an interval is the only way to see it grow. ---
+
+  function renderAgentTab() {
+    headerLabel.textContent = (agent && agent.label) || 'Agent';
+    body.textContent = '';
+    if (!agent) { line('No agent selected.', 'detail-pane-note'); return; }
+    body.append(agent.container);
+  }
+
+  function showAgent(claudeSessionId, toolUseId, label) {
+    stopAgentPoll(); // clears whatever agent was previously polling, if any
+    agentPollCounter += 1;
+    const pollId = agentPollCounter;
+    const statusEl = document.createElement('div');
+    statusEl.className = 'agent-status';
+    statusEl.textContent = 'connecting…';
+    statusEl.title = 'Click to resume auto-refresh once stopped';
+    statusEl.addEventListener('click', () => {
+      if (!agent || agent.pollId !== pollId || !agent.stopped) return;
+      agent.stopped = false;
+      agent.stallCount = 0;
+      statusEl.textContent = 'refreshing…';
+      agentPoll(pollId);
     });
+    const streamEl = document.createElement('div');
+    streamEl.className = 'body agent-stream';
+    resetStreamView(streamEl);
+    const container = document.createElement('div');
+    container.append(statusEl, streamEl);
+
+    agent = {
+      claudeSessionId, toolUseId, label: label || '',
+      renderedCount: 0, lastMtimeMs: null, stallCount: 0, stopped: false,
+      timer: null, pollId, statusEl, streamEl, container,
+    };
+    if (agentTabButton) agentTabButton.hidden = false;
+    setActiveTab('agent');
+    agentPoll(pollId);
+  }
+
+  async function agentPoll(pollId) {
+    if (!agent || agent.pollId !== pollId) return; // superseded by a newer showAgent() call
+    if (!agent.claudeSessionId || !agent.toolUseId) {
+      agent.statusEl.textContent = 'missing session/tool id';
+      return;
+    }
+    let data;
+    try {
+      const res = await fetch(`/api/history/${encodeURIComponent(agent.claudeSessionId)}/agent/${encodeURIComponent(agent.toolUseId)}`);
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || res.statusText);
+      }
+      data = await res.json();
+    } catch (err) {
+      if (!agent || agent.pollId !== pollId) return; // showAgent() moved on while this fetch was in flight
+      agent.statusEl.textContent = `error: ${err.message || err}`;
+      scheduleAgentPoll(pollId);
+      return;
+    }
+    if (!agent || agent.pollId !== pollId) return;
+
+    if (data.meta) {
+      const desc = data.meta.description || data.meta.agentType || 'Agent';
+      if (!agent.label) { agent.label = desc; if (activeTab === 'agent') headerLabel.textContent = agent.label; }
+      agent.streamEl.title = `${data.meta.agentType || ''} · ${data.meta.model || ''}`.trim();
+    }
+
+    const wasAtBottom = isScrolledToBottomLocal(body);
+    const newMessages = data.messages.slice(agent.renderedCount);
+    for (const message of newMessages) {
+      renderMessage(agent.streamEl, message, {
+        onRewindClick: null, hasFileCheckpointing: false, turnIndexUnreliable: true,
+        assistantLabel: 'Agent', historical: true,
+      });
+    }
+    agent.renderedCount = data.messages.length;
+    if (newMessages.length && activeTab === 'agent' && wasAtBottom) body.scrollTop = body.scrollHeight;
+
+    const grew = data.mtimeMs != null && data.mtimeMs !== agent.lastMtimeMs;
+    agent.lastMtimeMs = data.mtimeMs;
+    agent.stallCount = grew ? 0 : agent.stallCount + 1;
+
+    if (agent.renderedCount === 0 && agent.stallCount === 0) {
+      agent.statusEl.textContent = 'waiting for the agent to start writing…';
+    } else if (agent.stallCount >= AGENT_STALL_POLLS_BEFORE_STOP) {
+      agent.statusEl.textContent = `${agent.renderedCount} message${agent.renderedCount === 1 ? '' : 's'} · no updates for a while - click to resume`;
+      agent.stopped = true;
+      return; // no scheduleAgentPoll - the status-line click handler above is the way back in
+    } else {
+      agent.statusEl.textContent = `${agent.renderedCount} message${agent.renderedCount === 1 ? '' : 's'} · live`;
+    }
+    scheduleAgentPoll(pollId);
+  }
+
+  function scheduleAgentPoll(pollId) {
+    if (!agent || agent.pollId !== pollId || agent.stopped) return;
+    if (agent.timer != null) clearTimeout(agent.timer);
+    agent.timer = setTimeout(() => agentPoll(pollId), AGENT_POLL_MS);
+  }
+
+  function stopAgentPoll() {
+    if (agent && agent.timer != null) clearTimeout(agent.timer);
+    if (agent) agent.timer = null;
+  }
+
+  // Local helper, distinct from stream-view.js's exported isScrolledToBottom
+  // - that one measures a message-list container; this measures the pane's
+  // own scroll box (#detailPaneBody), which is what actually scrolls here.
+  function isScrolledToBottomLocal(container) {
+    return container.scrollHeight - container.scrollTop - container.clientHeight < 48;
+  }
+
+  function setActiveTab(name) {
+    activeTab = name;
+    for (const b of tabButtons) {
+      const on = b.dataset.tab === name;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+    if (tasksToggleBtn) {
+      tasksToggleBtn.classList.toggle('on', name === 'tasks');
+      tasksToggleBtn.setAttribute('aria-pressed', name === 'tasks' ? 'true' : 'false');
+    }
+    render();
+  }
+
+  for (const btn of tabButtons) {
+    btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
   }
 
   if (followLiveBtn) followLiveBtn.addEventListener('click', followLive);
@@ -347,10 +586,20 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     currentRecord = null;
     textView = null;
     activeTab = 'summary';
+    tasks = [];
+    stopAgentPoll();
+    agent = null;
+    if (tasksTabButton) tasksTabButton.hidden = true;
+    if (tasksToggleBtn) tasksToggleBtn.hidden = true;
+    if (agentTabButton) agentTabButton.hidden = true;
     for (const b of tabButtons) {
       const on = b.dataset.tab === 'summary';
       b.classList.toggle('active', on);
       b.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+    if (tasksToggleBtn) {
+      tasksToggleBtn.classList.remove('on');
+      tasksToggleBtn.setAttribute('aria-pressed', 'false');
     }
     updateLiveIndicator();
     renderEmpty();
@@ -367,6 +616,9 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     followLive,
     setEnabled,
     reset,
+    setTasks,
+    showTasks,
+    showAgent,
     isEnabled: () => enabled,
     // Exposed for app.js: setEnabled()'s own syncOffset() call at session
     // start fires before #streamWrap is flipped back to display:flex (it's

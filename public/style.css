@@ -852,6 +852,7 @@
   @media (prefers-reduced-motion: reduce) {
     #stopBtn.armed::after { animation: none; }
     #copyToast { transition: none; }
+    .task-status-in_progress { animation: none; }
     #cwdInput.cwd-missing {
       animation: none;
       border-color: var(--error);
@@ -1083,22 +1084,26 @@
   }
   .trace-toggle-btn:hover { color: var(--text); border-color: var(--accent); }
 
-  #taskPanel, #queuePanel, #turnChartPanel {
+  #queuePanel, #turnChartPanel {
     border-top: 1px solid var(--border);
     padding: 6px 16px;
   }
-  #taskPanel .controls,
   #queuePanel .controls {
     font-size: 11px;
     color: var(--muted);
     margin-bottom: 4px;
   }
-  #taskList, #queueList {
+  #queueList {
     list-style: none;
     margin: 0;
     padding: 0;
     max-height: 160px;
     overflow-y: auto;
+  }
+  #detailPaneBody .task-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
   }
   .queue-row {
     display: flex;
@@ -1123,8 +1128,12 @@
     flex-shrink: 0;
     background: var(--muted);
   }
-  .task-status-in_progress { background: var(--warning); }
+  .task-status-in_progress { background: var(--warning); animation: task-status-pulse 1.2s ease-in-out infinite; }
   .task-status-completed { background: var(--success); }
+  @keyframes task-status-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
   .task-subject { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .task-subject-done { color: var(--muted); text-decoration: line-through; }
   .task-owner {
@@ -1512,22 +1521,9 @@
   .diff-hunk { color: var(--accent); }
   .diff-meta { color: var(--muted); }
 
-  #agentHeader {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  #agentHeader strong { font-size: 14px; }
-  #agentStatus { font-size: 12px; color: var(--muted); margin-left: auto; }
-  #agentStream { flex: 1; overflow-y: auto; padding: 8px 14px; }
-  .readonly-badge {
-    font-size: 11px;
-    padding: 2px 7px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--accent) 20%, var(--panel));
-    color: var(--accent);
-    border: 1px solid var(--accent);
+  #detailPaneBody .agent-status {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 6px;
+    cursor: default;
   }

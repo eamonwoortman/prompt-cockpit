@@ -63,8 +63,8 @@ export function initStatsPanel({ el }) {
       // clears - was already on the wire (rate_limits.five_hour.resets_at)
       // but never read here, so the chip showed utilization with no way to
       // tell when it's actually finishing. toLocaleTimeString to match the
-      // rate-limit-hit banner's own clock format (app.js's showApprovalRequest
-      // neighbor, the `when` local in the rate-limit-hit renderer).
+      // rate-limit-hit banner's own clock format (app.js's applySession,
+      // the `when` local in the rate-limit-hit renderer).
       const resetLabel = fiveHour.resets_at
         ? ` (resets ${new Date(fiveHour.resets_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
         : '';

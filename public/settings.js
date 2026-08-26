@@ -27,7 +27,6 @@ const DEFAULTS = {
   turnChartMetric: 'cost',
   turnChartExcludeCacheMisses: false,
   turnChartAxisPosition: 'left', // 'left' | 'right' - which side of the cost graph shows y-axis labels
-  taskPanelEnabled: false,
   showMessageTimestamps: false,
   // Default ON, unlike the other two panels above - Decision 3 (tool-call
   // presentation redesign) calls for the detail pane docked by default when
@@ -116,7 +115,6 @@ export function initSettings({
   resetSessionButton,
   onAutoCollapseChange,
   onTurnChartEnabledChange,
-  onTaskPanelEnabledChange,
   onTimestampsChange,
   onDetailPaneEnabledChange,
   onPendingTurnsBadgeEnabledChange,
@@ -147,7 +145,6 @@ export function initSettings({
   pendingTurnsBadgeCheckbox.checked = settings.pendingTurnsBadgeEnabled;
   onAutoCollapseChange(settings.autoCollapsePreviousGroup);
   onTurnChartEnabledChange(settings.turnChartEnabled);
-  onTaskPanelEnabledChange(settings.taskPanelEnabled);
   onTimestampsChange(settings.showMessageTimestamps);
   onDetailPaneEnabledChange(settings.detailPaneEnabled);
   onPendingTurnsBadgeEnabledChange(settings.pendingTurnsBadgeEnabled);
@@ -283,15 +280,6 @@ export function initSettings({
     onTurnChartEnabledChange(value);
   }
 
-  // Unlike setTurnChartEnabled/setDetailPaneEnabled above, there's no
-  // settings-modal checkbox to keep in sync here - taskPanelToggleBtn (the
-  // "same line as the cost graph" button, app.js) is the only entry point,
-  // since the panel itself only ever appears once a session has a task.
-  function setTaskPanelEnabled(value) {
-    persist({ taskPanelEnabled: value });
-    onTaskPanelEnabledChange(value);
-  }
-
   // Same shape again, for the tool-call detail pane's toggle button +
   // settings-modal checkbox pair (default true, unlike the two above).
   function setDetailPaneEnabled(value) {
@@ -304,8 +292,6 @@ export function initSettings({
     getCustomFolders: () => settings.customFolders,
     isTurnChartEnabled: () => settings.turnChartEnabled,
     setTurnChartEnabled,
-    isTaskPanelEnabled: () => settings.taskPanelEnabled,
-    setTaskPanelEnabled,
     isDetailPaneEnabled: () => settings.detailPaneEnabled,
     setDetailPaneEnabled,
     isPendingTurnsBadgeEnabled: () => settings.pendingTurnsBadgeEnabled,

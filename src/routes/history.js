@@ -62,7 +62,7 @@ export function registerHistoryRoutes(router) {
   });
 
   router.get('/api/history/:id/agent/:toolUseId', async (req, res, url, { id, toolUseId }) => {
-    // Backs public/agent-view.html's "open in new tab" reader for an Agent
+    // Backs public/detail-pane.js's Agent tab, which polls this for an Agent
     // (Task) tool row - `id` here is the *parent* session's claudeSessionId
     // (app.js's currentClaudeSessionId at click time), not this cockpit's
     // own registry id. Same auth boundary as /api/history/:id above: no
