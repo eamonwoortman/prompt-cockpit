@@ -521,6 +521,35 @@ export function getDebugInfo(id) {
   };
 }
 
+// Visibility-only introspection for GET /api/system/memory (see
+// routes/system.js) - reports what each row's unbounded-looking collections
+// actually hold right now. Nothing here enforces a cap; eventLog is the one
+// collection that already is byte-capped (event-log.js), included so its
+// current usage against that cap is visible next to everything else instead
+// of only being knowable by reading the source. Read-only: never mutates a
+// row, so it's safe to poll from the dashboard on an interval.
+export function memorySnapshot() {
+  const rows = [...sessions.values()].map((row) => ({
+    id: row.id,
+    name: row.name,
+    state: row.state,
+    eventLogBytes: row.eventLog.bytes,
+    eventLogMaxBytes: row.eventLog.maxBytes,
+    eventLogEntries: row.eventLog.entries.length,
+    tasks: row.tasks.size,
+    pendingTaskOps: row.pendingTaskOps.size,
+    pendingApprovals: row.pendingApprovals.length,
+    pendingResultTags: row.pendingResultTags.length,
+    queue: row.queue.length,
+    clients: row.clients.size,
+  }));
+  return {
+    process: process.memoryUsage(),
+    sessionCount: rows.length,
+    sessions: rows,
+  };
+}
+
 export function toSummary(row) {
   const provider = getProvider(row.provider);
   return {

@@ -213,6 +213,32 @@ test('GET /api/providers keeps provider ids and includes descriptor metadata', a
   }
 });
 
+test('GET /healthz works with no operator token (liveness must not require a credential)', async () => {
+  const res = await fetch(`${ORIGIN}/healthz`, { headers: { 'x-cockpit-operator': '' } });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.status, 'ok');
+  assert.equal(typeof body.pid, 'number');
+  assert.equal(typeof body.uptime, 'number');
+});
+
+test('GET /api/system/memory requires the operator token and reports live session rows', async () => {
+  registry._reset();
+  const noOp = await fetch(`${ORIGIN}/api/system/memory`, { headers: { 'x-cockpit-operator': '' } });
+  assert.equal(noOp.status, 401);
+
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  const res = await fetch(`${ORIGIN}/api/system/memory`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.sessionCount, 1);
+  assert.equal(typeof body.process.rss, 'number');
+  const reported = body.sessions.find((s) => s.id === row.id);
+  assert.ok(reported, 'the live row must appear in the snapshot');
+  assert.equal(reported.tasks, 0);
+  assert.equal(reported.eventLogEntries, 0);
+});
+
 test('a request with a foreign Host is rejected, even with the right Origin', async () => {
   // `fetch` treats Host as a forbidden header and silently overrides it
   // from the URL - can't use it to test this. A raw http.request can

@@ -6,11 +6,30 @@ import { listDirectory } from '../session-launcher.js';
 import { respondJson } from '../http-utils.js';
 import { availableProviders } from '../provider-availability.js';
 import { providerDetails } from '../provider-registry.js';
-import { getHandshakeSecret, regenerateHandshakeSecret } from '../session-registry.js';
+import { getHandshakeSecret, regenerateHandshakeSecret, memorySnapshot } from '../session-registry.js';
 import { computeGlobalStats } from '../global-stats.js';
 import { fetchAccountLimits } from '../account-limits.js';
 
 export function registerSystemRoutes(router) {
+  // Liveness only - deliberately outside /api/* so server.js's operator-token
+  // check (handleRequest, gated on url.pathname.startsWith('/api/')) never
+  // applies here: a health check has to work before anyone's obtained a
+  // token. Origin/Host spoof checking still applies to every request
+  // (isSpoofedRequest runs first, unconditionally), so this stays
+  // localhost-only same as everything else - it's just not session- or
+  // process-credential-gated.
+  router.get('/healthz', async (req, res) => {
+    return respondJson(res, 200, { status: 'ok', pid: process.pid, uptime: process.uptime() });
+  });
+
+  // Live view of what each session row's collections are actually holding -
+  // see memorySnapshot's own comment for what is/isn't capped today. Gated
+  // by the operator token same as every other /api/* route; no per-session
+  // token since this spans every row in the process, not one session.
+  router.get('/api/system/memory', async (req, res) => {
+    return respondJson(res, 200, memorySnapshot());
+  });
+
   // The per-process delegation handshake secret -
   // see session-registry.js's own module-level comment for the full
   // rationale. No session token (there's no one session it belongs to);
