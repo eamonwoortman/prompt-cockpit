@@ -1,0 +1,189 @@
+  #approvalBanner {
+    display: flex;
+    flex-direction: column;
+    margin-right: var(--detail-pane-offset);
+    padding: 10px 16px;
+    background: var(--warn-bg);
+    border-top: 1px solid var(--warn-border);
+    font-size: 13px;
+    max-height: 40vh;
+    min-height: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+  }
+  #approvalPlain {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+    overflow: hidden;
+    flex: 1;
+  }
+  #approvalMessageRow {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    min-height: 0;
+    overflow: auto;
+    flex: 1 1 auto;
+  }
+  #approvalHeading {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+    min-width: 0;
+  }
+  #approvalQueueCount {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  #approvalPlain pre {
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    font-size: 12px;
+    min-width: 0;
+  }
+  #approvalPlain pre.plan-detail { max-height: 240px; }
+  #approvalDecisionRow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  #approveBtn, #questionForm .q-submit {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    background: var(--ok);
+    color: #10281c;
+    font-family: inherit;
+  }
+  #rejectBtn, #questionForm .q-skip {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    background: var(--error);
+    color: #2b0d0d;
+    font-family: inherit;
+  }
+  #alwaysAllowLabel {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--muted);
+    min-width: 0;
+    max-width: 100%;
+  }
+  #alwaysAllowToolName {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 16em;
+    font-family: ui-monospace, monospace;
+  }
+  #planReviewControls {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  #planFeedbackText, #planNoteText {
+    width: 100%;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+  }
+  #planFeedbackText { min-height: 50px; resize: vertical; }
+
+  #questionForm { display: flex; flex-direction: column; gap: 10px; max-height: 50vh; overflow-y: auto; }
+  #questionForm .q-block { display: flex; flex-direction: column; gap: 6px; }
+  #questionForm .q-text { font-weight: 600; }
+  #questionForm .q-options { display: flex; flex-wrap: wrap; gap: 6px; }
+  #questionForm .q-option {
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    text-align: left;
+  }
+  #questionForm .q-option:hover { border-color: var(--accent); }
+  #questionForm .q-option.selected { background: var(--accent); border-color: var(--accent); color: white; }
+  #questionForm .q-option-desc { display: block; font-size: 11px; color: var(--muted); margin-top: 1px; }
+  #questionForm .q-option.selected .q-option-desc { color: rgba(255,255,255,0.8); }
+  #questionForm .q-other {
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+    min-width: 160px;
+  }
+  #questionForm .q-actions { display: flex; gap: 10px; }
+
+  #loadHistoryBar {
+    display: flex;
+    justify-content: center;
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  #agentsBar {
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--border);
+    padding: 6px 16px;
+    gap: 6px;
+  }
+  #agentsBarRow { display: flex; align-items: center; gap: 6px; }
+  #agentsBtn { margin-left: auto; }
+  #agentsList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  #agentsList button {
+    width: 100%;
+    padding: 5px 8px;
+    border-radius: 4px;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    cursor: pointer;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+  }
+  #agentsList button:hover { background: var(--accent); }
+  #agentsList button:hover .cmd-desc { color: white; }
+  #agentsList .cmd-name { font-family: ui-monospace, monospace; white-space: nowrap; }
+  #agentsList .cmd-desc { color: var(--muted); font-size: 12px; }
+  #agentsList .cmd-name.selected::after { content: ' \2713'; }
+

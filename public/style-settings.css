@@ -1,0 +1,185 @@
+
+  .settings-body { display: flex; flex-direction: column; gap: 16px; }
+  .settings-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  .settings-tab {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .settings-tab:hover { color: var(--text); }
+  .settings-tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
+  .settings-tab-panel { display: flex; flex-direction: column; gap: 16px; }
+  .settings-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .hint {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 1;
+    cursor: help;
+    flex: 0 0 auto;
+  }
+  .hint:hover { border-color: var(--accent); color: var(--text); }
+  #thinkingControlsGroup { display: flex; flex-direction: column; gap: 10px; }
+  #thinkingControlsGroup select {
+    padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .settings-danger {
+    justify-content: space-between;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .settings-danger p { margin: 2px 0 0; color: var(--muted); font-size: 12px; max-width: 380px; }
+
+  .settings-section { display: flex; flex-direction: column; gap: 6px; }
+  .settings-section-header { display: flex; align-items: center; justify-content: space-between; }
+  .settings-section-header strong { font-size: 13px; }
+  .settings-section-header .btn { font-size: 12px; padding: 3px 8px; background: none; }
+  .settings-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 160px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .settings-tab-panel[data-settings-tab-panel="mcp"],
+  .settings-tab-panel[data-settings-tab-panel="plugins"],
+  .settings-tab-panel[data-settings-tab-panel="mcp"] .settings-section,
+  .settings-tab-panel[data-settings-tab-panel="plugins"] .settings-section {
+    flex: 1;
+    min-height: 0;
+  }
+  #mcpServerList, #pluginList { flex: 1; min-height: 0; max-height: none; }
+  .settings-toolbar { display: flex; gap: 6px; align-items: center; }
+
+  .stats-heatmap { overflow-x: auto; padding-bottom: 4px; }
+  .stats-heatmap-header { display: flex; }
+  .stats-heatmap-corner { width: 24px; flex: 0 0 auto; }
+  .stats-heatmap-months { position: relative; height: 12px; font-size: 10px; color: var(--muted); }
+  .stats-heatmap-months span { position: absolute; top: 0; white-space: nowrap; }
+  .stats-heatmap-body { display: flex; }
+  .stats-heatmap-weekdays {
+    width: 24px;
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 10px;
+    color: var(--muted);
+    position: sticky;
+    left: 0;
+    background: var(--panel);
+  }
+  .stats-heatmap-weekdays span { height: 10px; line-height: 10px; }
+  .stats-heatmap-grid { display: flex; gap: 3px; }
+  .stats-heatmap-col { display: flex; flex-direction: column; gap: 3px; }
+  .stats-heatmap-cell {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .stats-heatmap-cell.level-1 { background: color-mix(in srgb, var(--accent) 25%, var(--panel)); border-color: transparent; }
+  .stats-heatmap-cell.level-2 { background: color-mix(in srgb, var(--accent) 50%, var(--panel)); border-color: transparent; }
+  .stats-heatmap-cell.level-3 { background: color-mix(in srgb, var(--accent) 75%, var(--panel)); border-color: transparent; }
+  .stats-heatmap-cell.level-4 { background: var(--accent); border-color: transparent; }
+  .stats-heatmap-legend { display: flex; align-items: center; gap: 4px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  .stats-overview { display: flex; flex-direction: column; gap: 4px; margin-top: 16px; }
+  .stats-section { margin-top: 20px; }
+  .stats-note { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+  span.stats-note { display: inline; margin: 0; }
+  .stats-model-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+  .stats-model-table th, .stats-model-table td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .stats-model-table th:first-child, .stats-model-table td:first-child { text-align: left; font-family: ui-monospace, monospace; }
+  .stats-model-table th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .stats-account-limits {
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 6px 0 0;
+    line-height: 1.5;
+  }
+  .settings-list .cmd-desc { color: var(--muted); font-size: 12px; }
+  .mcp-server-row {
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .mcp-server-top { display: flex; align-items: center; gap: 8px; }
+  .mcp-server-top .cmd-name { font-family: ui-monospace, monospace; }
+  .mcp-server-top .mcp-status { flex: 1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .mcp-status-connected { color: var(--success); }
+  .mcp-status-failed { color: var(--error); }
+
+  .custom-folder-row { padding: 5px 8px; border-radius: 4px; background: var(--bg); display: flex; align-items: center; gap: 8px; }
+  .custom-folder-row .cmd-name { flex: none; }
+  .custom-folder-row .cmd-desc { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .custom-folder-remove {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    width: 22px;
+    height: 22px;
+    line-height: 1;
+    cursor: pointer;
+    flex: none;
+  }
+  .custom-folder-remove:hover { color: var(--error); border-color: var(--error); }
+  #customFoldersList:empty::after {
+    content: 'No extra folders added.';
+    color: var(--muted);
+    font-size: 12px;
+    padding: 4px 8px;
+  }
+  .mcp-status-needs-auth { color: var(--warning); }
+  .mcp-status-pending { color: var(--muted); }
+  .mcp-status-disabled { color: var(--muted); }
+  .mcp-reconnect-btn, .mcp-auth-link {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 2px 7px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .mcp-reconnect-btn:hover { color: var(--text); border-color: var(--accent); }
+  .mcp-reconnect-btn:disabled { opacity: 0.6; cursor: default; }
+  .mcp-auth-link {
+    border-color: var(--warning);
+    color: var(--warning);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .mcp-auth-link:hover { background: var(--warning); color: var(--bg); }
+  .mcp-error { color: var(--error); font-size: 11px; }
+  .mcp-note { color: var(--muted); font-size: 11px; }
+  .settings-warning { color: var(--warning); font-size: 12px; }
+

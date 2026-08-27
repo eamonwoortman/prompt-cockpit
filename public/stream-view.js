@@ -37,6 +37,7 @@
 import { resetToolCallStore, createToolCallRecord, completeToolCallRecord, mergeToolCallStore, recordOrphanResult, popOrphanResult } from '/tool-call-store.js';
 import { renderMarkdown } from '/markdown.js';
 import { joinStreamText, createFenceTracker } from '/stream-join.js';
+import { createDelegateView } from '/delegate-view.js';
 
 // One tracker per streamed-block body element, so joinStreamText resumes
 // its fence scan instead of rescanning the whole reply on every chunk. A
@@ -49,15 +50,14 @@ const fenceTrackerByBody = new WeakMap();
 const seenInitByContainer = new WeakMap();
 const groupsByContainer = new WeakMap(); // container -> group[]
 const openGroupByContainer = new WeakMap(); // container -> the currently-accumulating group, if any
-// Delegated-reply bubbles awaiting a possible cockpit:delegate-full-trace
-// marker (session-registry.js's relayDelegationResult) - container ->
-// Map<queueId, roleRowEl>. The marker, when it comes, always arrives AFTER
-// the bubble it belongs to (relayDelegationResult pushes the turn - which
-// echoes synchronously, see session.js's pushInput - before it broadcasts
-// the marker), live or replayed alike, so there's no "marker beats bubble"
-// race to handle here, only "marker never comes" (the common case: no extra
-// content beyond the clean answer, see relayDelegationResult).
-const delegatedBubblesByContainer = new WeakMap();
+// Cross-session delegation ('/ask') message rendering lives in
+// delegate-view.js now - see that module's own comment for why it takes
+// appendBlock/closeGroup as constructor params instead of importing this
+// module back (would be a cycle). Both are function DECLARATIONS further
+// down this file - fully hoisted before any top-level statement (this one
+// included) runs, so referencing them here is safe regardless of textual
+// order.
+const delegateView = createDelegateView({ appendBlock, closeGroup });
 
 // Settings-panel toggle (default on - see settings.js). When true, the
 // moment a new top-level tool-call group opens, the immediately preceding
@@ -90,7 +90,7 @@ export function resetStreamView(container) {
   groupsByContainer.set(container, []);
   openGroupByContainer.delete(container);
   seenInitByContainer.delete(container);
-  delegatedBubblesByContainer.set(container, new Map());
+  delegateView.reset(container);
   resetToolCallStore(container);
 }
 
@@ -192,20 +192,9 @@ export function renderMessage(container, message, { onRewindClick, hasFileCheckp
     case 'rate_limit_event':
       return; // noise - not actionable per-turn
     case 'cockpit:delegate-sent':
-      // Cross-session delegation - cockpit-only marker,
-      // never a real SDK message, appended straight to the origin's own
-      // eventLog by session-registry.js's delegateTask so it survives
-      // reconnect. Minimal/textual per the confirmed v1 scope - no special
-      // styling beyond the existing 'system' block class.
-      closeGroup(container);
-      return appendBlock(container, 'system', 'Delegated', `-> Asked ${message.targetName}: ${message.text}`, [], container, null, null, timestampMs);
+      return delegateView.renderDelegateSent(container, message, timestampMs);
     case 'cockpit:delegate-full-trace':
-      // Cross-session delegation follow-up - cockpit-only
-      // marker, never a real SDK message, appended straight to the origin's
-      // own eventLog by session-registry.js's relayDelegationResult so it
-      // survives reconnect. Purely additive UI: attaches a button to an
-      // already-rendered bubble, renders nothing of its own.
-      return attachDelegatedTrace(container, message.queueId, message.label, message.text, onShowDelegatedTrace);
+      return delegateView.renderDelegateFullTrace(container, message, onShowDelegatedTrace);
     default:
       return; // large open-ended SDKMessage union; unhandled types stay silent
   }
@@ -539,74 +528,6 @@ function summarizeToolInput(name, input) {
   return `${key}: ${JSON.stringify(truncated)}`;
 }
 
-// Cross-session delegation: session-registry.js wraps both directions
-// of the exchange in a self-identifying prose header before pushing them as
-// a plain user turn - "[Prompt Cockpit] Relayed task from "..."" going out
-// (delegateTask), "[Prompt Cockpit] Relayed reply from "..."" coming back
-// (relayDelegationResult), both followed by an explanatory paragraph, a
-// `\n---\n` separator, then the actual payload. Without unwrapping here, the
-// bubble would show "You" for a turn neither side's human actually typed.
-// (Earlier version of this wrapper used an XML-ish `<delegated_task from=
-// "...">` tag - dropped 2026-08-20 because receiving models were pattern-
-// matching it as a spoofed tool-scaffolding tag and refusing it outright;
-// see session-registry.js's buildDelegatedHeader comment.)
-// No unescaping needed here (unlike the old tag shape) - the server no
-// longer HTML-escapes the payload, and this renders via textContent
-// downstream regardless, never as markup.
-const DELEGATED_HEADER_RE = /^\[Prompt Cockpit\] Relayed (task|reply) from "([^"]*)"\n\n[\s\S]*?\n---\n([\s\S]*)$/;
-
-// `kind` distinguishes the two delegation directions so the caller can style
-// them differently: a 'task' is real input to THIS session (the operator
-// relayed another human's typed message in) - it stays a "user" bubble, blue
-// box and all. A 'reply' is the opposite - another session's own answer,
-// forwarded back - so it renders like an assistant response (see renderUser),
-// not like something typed here.
-// Remembers a just-rendered delegated-reply bubble so a later
-// cockpit:delegate-full-trace marker (see attachDelegatedTrace below) can
-// find it again. `queueId` is null for anything that isn't this session's
-// own live pushInput echo (a historical/replayed array-content block, say) -
-// harmless no-op, since relayDelegationResult only ever mints a matching
-// marker for a queueId it minted itself.
-function registerDelegatedReplyBubble(container, queueId, wrap) {
-  if (queueId == null) return;
-  if (!delegatedBubblesByContainer.has(container)) delegatedBubblesByContainer.set(container, new Map());
-  delegatedBubblesByContainer.get(container).set(queueId, wrap);
-}
-
-// cockpit:delegate-full-trace marker handler (renderMessage's switch) - adds
-// a small corner button to the matching delegated-reply bubble that opens
-// the full (narration-included) text in the detail pane, via
-// onShowDelegatedTrace (app.js -> detail-pane.js's showText). No bubble
-// found is a silent no-op, not an error: the marker always arrives after its
-// bubble (session-registry.js's relayDelegationResult comment), so a miss
-// here would mean the bubble's own container got reset/replaced in between -
-// the marker is just stale at that point, nothing to attach to.
-function attachDelegatedTrace(container, queueId, label, text, onShowDelegatedTrace) {
-  const bubbles = delegatedBubblesByContainer.get(container);
-  const wrap = bubbles?.get(queueId);
-  if (!wrap) return;
-  const roleRow = wrap.querySelector(':scope > .role');
-  if (roleRow) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'trace-toggle-btn';
-    btn.textContent = '⤢ Expand answer';
-    btn.title = 'Show the full reply (narration included) - by default only the final answer is relayed into this session';
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onShowDelegatedTrace?.(container, queueId, label, text);
-    });
-    roleRow.append(btn);
-  }
-  bubbles.delete(queueId); // one marker per bubble - nothing left to match if another somehow arrived for the same id
-}
-
-function delegatedLabelAndText(text) {
-  const match = DELEGATED_HEADER_RE.exec(text);
-  if (match) return { kind: match[1], label: match[2], text: match[3] };
-  return null;
-}
-
 function renderUser(container, message, onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs = null, toolOpts = {}) {
   const content = message.message && message.message.content;
   if (message.isSynthetic) return; // priming sentinel, not a real turn
@@ -628,11 +549,11 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
     const actions = onRewindClick && message.turnIndex
       ? [{ label, title: 'Fork a new session starting from this message', onClick: () => onRewindClick(message.turnIndex) }]
       : [];
-    const delegated = delegatedLabelAndText(content);
+    const delegated = delegateView.delegatedLabelAndText(content);
     const isDelegatedReply = Boolean(delegated && delegated.kind === 'reply');
     const cls = isDelegatedReply ? 'assistant delegated-reply' : 'user';
     const wrap = appendBlock(container, cls, delegated ? delegated.label : 'You', delegated ? delegated.text : content, actions, container, null, null, timestampMs, isDelegatedReply);
-    if (isDelegatedReply) registerDelegatedReplyBubble(container, message.queueId, wrap);
+    if (isDelegatedReply) delegateView.registerDelegatedReplyBubble(container, message.queueId, wrap);
     return;
   }
   if (Array.isArray(content)) {
@@ -665,11 +586,11 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
         toolOpts.onToolResultArrived?.(container, block.tool_use_id);
       } else if (block.type === 'text') {
         closeGroup(container);
-        const delegated = delegatedLabelAndText(block.text);
+        const delegated = delegateView.delegatedLabelAndText(block.text);
         const isDelegatedReply = Boolean(delegated && delegated.kind === 'reply');
         const cls = isDelegatedReply ? 'assistant delegated-reply' : 'user';
         const wrap = appendBlock(container, cls, delegated ? delegated.label : 'You', delegated ? delegated.text : block.text, [], container, null, null, timestampMs, isDelegatedReply);
-        if (isDelegatedReply) registerDelegatedReplyBubble(container, message.queueId, wrap);
+        if (isDelegatedReply) delegateView.registerDelegatedReplyBubble(container, message.queueId, wrap);
       }
     }
   }

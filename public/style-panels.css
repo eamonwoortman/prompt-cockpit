@@ -1,0 +1,142 @@
+  #queuePanel, #turnChartPanel {
+    border-top: 1px solid var(--border);
+    padding: 6px 16px;
+  }
+  #queuePanel .controls {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  #queueList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  #detailPaneBody .task-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .queue-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    font-size: 12px;
+  }
+  .queue-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-row .btn { padding: 2px 6px; font-size: 11px; color: var(--text); }
+  .task-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+    font-size: 12px;
+  }
+  .task-status {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--muted);
+  }
+  .task-status-in_progress { background: var(--warning); animation: task-status-pulse 1.2s ease-in-out infinite; }
+  .task-status-completed { background: var(--success); }
+  @keyframes task-status-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  /* Must come after the rule above - equal specificity, so within a
+     matching media query source order decides the tie; placed earlier in
+     the file (inside the shared reduced-motion block near the top) this
+     override silently lost to the later unconditional rule. */
+  @media (prefers-reduced-motion: reduce) {
+    .task-status-in_progress { animation: none; }
+  }
+  .task-subject { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-subject-done { color: var(--muted); text-decoration: line-through; }
+  .task-owner {
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 4px;
+  }
+  .task-blocked { font-size: 10px; color: var(--error); }
+  .task-empty { font-size: 11px; color: var(--muted); }
+
+  #turnChartPanel .controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  #turnChartMetric {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 11px;
+  }
+  .turn-chart-body {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .turn-chart-axis {
+    position: relative;
+    width: 2.6rem;
+    flex: none;
+    color: var(--muted);
+    font-size: 9px;
+    line-height: 1;
+    pointer-events: none;
+  }
+  .turn-chart-axis span {
+    position: absolute;
+    right: 0;
+    white-space: nowrap;
+  }
+  /* Two fixed axis elements flank .turn-chart-plot in DOM/flex order -
+     turn-chart.js shows/hides each per the left/right/both setting. The
+     right one hugs the plot's left edge instead of its own right edge. */
+  .turn-chart-axis-right span { right: auto; left: 0; }
+  .turn-chart-axis [data-align="top"] { top: 0; }
+  .turn-chart-axis [data-align="mid"] { top: 50%; transform: translateY(-50%); }
+  .turn-chart-axis [data-align="bottom"] { bottom: 0; }
+  .turn-chart-plot { flex: 1; min-width: 0; }
+  #turnChart { display: block; width: 100%; cursor: pointer; user-select: none; }
+  #turnChartSlider {
+    position: relative;
+    height: 8px;
+    margin-top: 4px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+  }
+  #turnChartSliderThumb {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(255,255,255,0.28);
+    border: 1px solid var(--text);
+    border-radius: 4px;
+    cursor: grab;
+  }
+  #turnChartSliderThumb:active { cursor: grabbing; }
+  #turnChartExcludeCacheMissLabel { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .turn-chart-select-highlight {
+    position: fixed;
+    background: rgba(240, 185, 11, 0.22);
+    border: 1px solid rgba(240, 185, 11, 0.65);
+    border-radius: 6px;
+    pointer-events: none;
+    z-index: var(--z-highlight);
+  }
+

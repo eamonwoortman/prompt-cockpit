@@ -1,0 +1,120 @@
+  #compose {
+    display: flex;
+    position: relative;
+    border-top: 1px solid var(--border);
+    padding: 10px 16px;
+    gap: 8px;
+    align-items: stretch;
+    margin: 0;
+  }
+  #compose textarea {
+    flex: 1;
+    resize: none;
+    line-height: 1.4;
+    min-height: 60px;
+    max-height: 50vh;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  #composeResizeHandle {
+    position: absolute;
+    left: 16px;
+    right: 16px;
+    top: -6px;
+    height: 10px;
+    cursor: ns-resize;
+  }
+  #composeResizeHandle::after {
+    content: '';
+    display: block;
+    width: 32px;
+    height: 3px;
+    margin: 3.5px auto 0;
+    border-radius: 2px;
+    background: var(--muted);
+  }
+  #composeResizeHandle:hover::after { background: var(--accent); }
+  #compose textarea.drag-over { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  #sendBtn {
+    padding: 10px 16px;
+    font-size: 14px;
+    height: 42px;
+    border-radius: 8px;
+  }
+  #stopBtn {
+    position: relative;
+    overflow: hidden;
+    padding: 5px 10px;
+    background: var(--error);
+    border: 1px solid var(--error);
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    width: 116px;
+    white-space: nowrap;
+  }
+  #stopBtn:hover { opacity: 0.85; }
+  #pendingTurnsBadge {
+    padding: 3px 8px;
+    background: transparent;
+    border: 1px solid var(--warn);
+    color: var(--warn);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  #pendingTurnsBadge:hover { background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  #pendingTurnsBadge.armed {
+    background: var(--error);
+    border-color: var(--error);
+    color: white;
+    font-weight: 600;
+  }
+  #stopBtn.armed {
+    background: var(--warn);
+    border-color: var(--warn);
+    color: #2b1d02;
+    font-weight: 600;
+  }
+  #stopBtn.armed::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: #2b1d02;
+    transform-origin: left;
+    animation: stopCountdown 2000ms linear forwards;
+  }
+  @keyframes stopCountdown {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
+  }
+  #composeSendGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+  }
+  #modeBtn {
+    font-family: inherit;
+    padding: 5px 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #modeBtn:hover { border-color: var(--accent); }
+

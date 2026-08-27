@@ -5,7 +5,19 @@
 <title>Prompt Cockpit</title>
 <link id="favicon" rel="icon" href="" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="stylesheet" href="/style.css" />
+<!-- Split from one style.css (backlog: file-size gravity well) into ordered,
+     topic-scoped files - order matters: a later file's rule can win an
+     equal-specificity tie against an earlier file's, same as within one
+     file, so this load order must match the original file's own top-to-
+     bottom order. -->
+<link rel="stylesheet" href="/style-base.css" />
+<link rel="stylesheet" href="/style-settings.css" />
+<link rel="stylesheet" href="/style-launcher.css" />
+<link rel="stylesheet" href="/style-approval.css" />
+<link rel="stylesheet" href="/style-transcript.css" />
+<link rel="stylesheet" href="/style-panels.css" />
+<link rel="stylesheet" href="/style-compose.css" />
+<link rel="stylesheet" href="/style-overlays.css" />
 </head>
 <body data-screen="launcher">
   <header class="app-header">

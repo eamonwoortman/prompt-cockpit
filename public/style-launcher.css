@@ -1,0 +1,100 @@
+  #launcher {
+    width: 100%;
+    max-width: 640px;
+    margin: 40px auto;
+    padding: 0 16px;
+  }
+  #launcher h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 24px 0 8px; }
+  #launcher .cwd-row { display: flex; align-items: center; gap: 8px; }
+  #launcher input[type=text] {
+    flex: 1;
+    padding: 8px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  /* Two red flashes when Start is clicked with no folder picked. */
+  @keyframes cwd-missing-blink {
+    0%, 40% {
+      border-color: var(--error);
+      box-shadow: 0 0 0 1px var(--error);
+    }
+    41%, 100% {
+      border-color: var(--border);
+      box-shadow: none;
+    }
+  }
+  #cwdInput.cwd-missing {
+    animation: cwd-missing-blink 280ms ease-in-out 2;
+  }
+  #browseBtn, #startBtn { width: 96px; text-align: center; padding: 8px 14px; font-size: 14px; }
+  #startBtn { margin-top: 8px; }
+  #launcher .start-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 6px; }
+  #startProviderSelect {
+    width: 100%;
+    margin: 0 0 16px;
+    padding: 10px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 15px;
+  }
+  #startNameInput,
+  #startModelSelect,
+  #startEffortSelect,
+  #startClaudeEffortSelect {
+    flex: none;
+    margin-top: 8px;
+    padding: 6px 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  #startNameInput { flex: 1; min-width: 0; }
+  #startModelSelect { width: 8.5rem; }
+  #startEffortSelect, #startClaudeEffortSelect { width: 7.5rem; }
+  #recentFoldersSelect {
+    flex: 0 0 auto;
+    width: 40px;
+    padding: 8px 4px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 13px;
+    text-align: center;
+    text-align-last: center;
+  }
+  #recentFoldersSelect option { text-align: left; }
+  #recentFoldersSelect:not([data-has-options]) { display: none; }
+  #resumeList { list-style: none; padding: 0; margin: 0; }
+  #resumeList li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  #resumeList li:hover { border-color: var(--accent); }
+  #resumeList .resume-info {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+  }
+  #resumeList .cwd { color: var(--muted); font-size: 12px; }
+  #resumeList .resume-time { color: var(--muted); font-size: 11px; }
+
