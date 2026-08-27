@@ -8,7 +8,7 @@
 // there's one right-hand pane instead of three competing UI surfaces. Mirrors
 // turn-chart.js's shape: init*(...) closing over its DOM refs and returning a
 // small method bag, no global event bus.
-import { renderBody, formatUsageInline, renderMessage, resetStreamView } from '/stream-view.js';
+import { renderBody, formatUsageInline, renderMessage, resetStreamView, langFromPath } from '/stream-view.js';
 import { getToolCallRecord, getMostRecentToolCallRecord } from '/tool-call-store.js';
 import { initResizablePanel } from '/resizable-panel.js';
 
@@ -26,6 +26,12 @@ const MIN_WIDTH_PX = 280;
 // actually still active off the visible area. (Moved here from the old
 // standalone task-panel.js when the task list became a detail-pane tab.)
 const TASK_STATUS_ORDER = { in_progress: 0, pending: 1, completed: 2 };
+// A shape change (hollow circle -> solid -> check) reads clearly even
+// without the blink; the blink (style-panels.css's task-status-in_progress)
+// is on top of this, not instead of it - the previous version relied on the
+// blink alone (same colored dot for every status, just pulsing when
+// running), which turned out not to be noticeable enough in practice.
+const TASK_STATUS_GLYPH = { pending: '○', in_progress: '●', completed: '✓' };
 
 // How often the Agent tab polls the subagent's own transcript file while
 // it's the active tab - same interval agent-view.js used before this became
@@ -289,7 +295,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     line('Result:', 'detail-pane-section-label');
     const resultWrap = document.createElement('div');
     resultWrap.className = 'body';
-    renderBody(resultWrap, record.resultText);
+    renderBody(resultWrap, resultBody(record));
     body.append(resultWrap);
   }
 
@@ -330,8 +336,21 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     if (record.resultText == null) { line('(pending - waiting for the tool result)', 'detail-pane-note'); return; }
     const wrap = document.createElement('div');
     wrap.className = 'body';
-    renderBody(wrap, record.resultText);
+    renderBody(wrap, resultBody(record));
     body.append(wrap);
+  }
+
+  // Read/Edit/Write/NotebookRead results are the file's own content (or a
+  // confirmation echoing its path) - same Prism.js highlighting the payload
+  // side already gets via formatToolInput's {code, lang} shape (stream-view.js),
+  // keyed off the tool's own file_path input rather than sniffing the result
+  // text itself. Anything without a recognizable file_path/extension (Bash
+  // stdout, Grep matches, WebFetch bodies, ...) stays plain text - passed
+  // straight through as a string, same as before this existed.
+  function resultBody(record) {
+    const lang = langFromPath(record.input && record.input.file_path);
+    if (!lang) return record.resultText;
+    return { code: record.resultText, lang };
   }
 
   function formatClockMs(ms) {
@@ -382,6 +401,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
 
     const dot = document.createElement('span');
     dot.className = `task-status task-status-${task.status}`;
+    dot.textContent = TASK_STATUS_GLYPH[task.status] || TASK_STATUS_GLYPH.pending;
     dot.title = task.status;
     li.append(dot);
 

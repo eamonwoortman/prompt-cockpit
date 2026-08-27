@@ -28,6 +28,7 @@ import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
 import { PERMISSION_MODES } from '/permissions.js';
 import { createProviderCatalog } from '/provider-catalog.js';
+import { createAgentLivenessTracker } from '/agent-liveness.js';
 
 // Starts with the two providers understood by older servers. The launcher
 // replaces this with /api/providers metadata once that request completes.
@@ -2152,6 +2153,7 @@ function connect(id, token, { reconnect = false } = {}) {
     canForkConversation = true;
     turnIndexUnreliable = false; // same
     previousState = null;
+    agentLiveness.reset(); // new session - any toolUseIds a previous session's tracker was still polling are meaningless here
     statsPanel.reset(); // corrected by the first cockpit:usage push (sent on every attach, see session-registry.js)
     // Restores the panel's visibility to match the persisted setting (B9) -
     // returnToLauncher() force-hides it regardless of the setting while
@@ -2228,8 +2230,22 @@ function connect(id, token, { reconnect = false } = {}) {
         assistantLabel: sessionProviderLabel(), rewindLabel: rewindButtonLabel(), receivedAtMs: Date.now(),
         onSelectToolCall: selectLiveToolCall,
         onOpenAgentTab: openAgentTab,
-        onToolCallStarted: (container, record) => detailPane.onToolCallStarted(container, record),
-        onToolResultArrived: (container, id) => detailPane.onToolResultArrived(container, id),
+        onToolCallStarted: (container, record) => {
+          detailPane.onToolCallStarted(container, record);
+          if (record.name === 'Agent') {
+            runningAgentToolIds.add(record.id);
+            // Independent of the line above: that Set drives the "running +
+            // agent" glyph swap and gets cleared the moment the Agent tool's
+            // own (unreliable) result arrives. This tracker keeps polling
+            // past that point, since the real subagent work usually
+            // outlives it - see agent-liveness.js.
+            agentLiveness.track(currentProviderSessionId, record.id);
+          }
+        },
+        onToolResultArrived: (container, id) => {
+          detailPane.onToolResultArrived(container, id);
+          runningAgentToolIds.delete(id);
+        },
         onShowDelegatedTrace: selectDelegatedTrace,
       });
       // One bar per priced assistant turn (turn-chart.js) - same
@@ -2247,6 +2263,7 @@ function connect(id, token, { reconnect = false } = {}) {
       resetStreamView(streamEl);
       turnChart.reset(); // same full-resend replay, so the chart would otherwise double up its bars
       detailPane.reset(streamEl); // same reasoning - a pinned/live record from before the gap now points at DOM that's gone
+      agentLiveness.reset(); // same reasoning - the resend will re-fire onToolCallStarted for any Agent call still open, re-tracking it fresh
     } else if (payload.type === 'cockpit:hello' || payload.type === 'cockpit:state') {
       applySession(payload.session);
     } else if (payload.type === 'cockpit:approval-request') {
@@ -2446,12 +2463,55 @@ function applySession(session) {
 // background tab.
 const SPIN_INTERVAL_MS = 120;
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
+// Distinct glyph set for "a subagent (Task/Agent tool) is in flight" - same
+// interval and mechanism as the plain running spinner, just a shape that
+// doesn't read as the classic ASCII spinner, so busy-with-a-subagent is
+// visibly different from an ordinary turn at a glance.
+const AGENT_SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
 const IDLE_ICON = '•'; // •
 let spinTimer = null;
 let spinFrame = 0;
+// Tool-call ids for currently in-flight Agent (subagent/Task) tool calls -
+// populated/drained by the onToolCallStarted/onToolResultArrived hooks above.
+// Non-empty while the main turn is running and its own Agent tool call
+// hasn't returned yet - drives the alt-glyph spinner during that window,
+// but says nothing about the subagent itself, which usually keeps working
+// well past that (see agentLiveness below).
+const runningAgentToolIds = new Set();
+let currentState = 'idle'; // mirrors the last value passed to setState() - renderStateIcon()/the agentLiveness callback below both need it, and the latter fires on its own timer, independent of setState
+let agentLiveCount = 0; // count from agentLiveness's onChange - >0 means some subagent is still believed alive, regardless of what the main turn is doing
+
+// Ambient "a subagent is still running" tracker (agent-liveness.js) - unlike
+// runningAgentToolIds above, keeps counting a subagent as alive past the
+// point its wrapping Agent tool call's own result arrives, since that
+// result isn't a reliable "the subagent is done" signal. Only changes
+// anything visible while the main turn is idle - see renderStateIcon().
+const agentLiveness = createAgentLivenessTracker({
+  onChange: (count) => {
+    agentLiveCount = count;
+    renderStateIcon();
+  },
+});
+
+// Recomputes what the state icon should show from the two independent
+// signals that can each change it: setState(state) (the main turn) and
+// agentLiveness's onChange (a subagent's own liveness poll). Split out from
+// setState so the latter can call this without pretending the main turn
+// changed state.
+function renderStateIcon() {
+  // "Idle, but a subagent is still cooking" - distinct from the plain idle
+  // dot (still spins, still uses the agent glyph set) and from the
+  // running-state spinner (agent-idle CSS class colors it separately, so it
+  // can't be mistaken for an ordinary running turn at a glance).
+  const agentIdle = currentState === 'idle' && agentLiveCount > 0;
+  stateLabelEl.classList.toggle('agent-idle', agentIdle);
+  stateLabelEl.title = agentIdle ? `${currentState} (subagent still running)` : currentState;
+  if (currentState === 'running' || currentState === 'reconnecting' || agentIdle) startSpinner();
+  else stopSpinner();
+}
 
 function startSpinner() {
-  if (spinTimer) return; // already running - setState can be called repeatedly for the same state
+  if (spinTimer) return; // already running - renderStateIcon can be called repeatedly for the same state
   // Deliberately ignores prefers-reduced-motion: this one small icon is the
   // cockpit's only "something is happening" signal, and its owner has
   // decided the spinner beats a steady color even with reduced-motion on
@@ -2460,7 +2520,12 @@ function startSpinner() {
   // preferences don't matter generally).
   spinTimer = setInterval(() => {
     spinFrame = (spinFrame + 1) % SPINNER_FRAMES.length;
-    stateIconEl.textContent = SPINNER_FRAMES[spinFrame];
+    // Re-derived every tick (not fixed at start time) so a mode change
+    // mid-spin - e.g. the main turn going idle while its subagent is still
+    // alive - picks up the right glyph set without needing to stop/restart
+    // the interval.
+    const frames = (runningAgentToolIds.size > 0 || (currentState === 'idle' && agentLiveCount > 0)) ? AGENT_SPINNER_FRAMES : SPINNER_FRAMES;
+    stateIconEl.textContent = frames[spinFrame];
   }, SPIN_INTERVAL_MS);
 }
 
@@ -2470,13 +2535,13 @@ function stopSpinner() {
     spinTimer = null;
   }
   stateIconEl.textContent = IDLE_ICON;
+  runningAgentToolIds.clear(); // no turn in flight - any tracked subagent id is stale
 }
 
 function setState(state) {
-  stateLabelEl.title = state; // hover tooltip - the word's gone from the label itself, just the icon's color now (index.html)
+  currentState = state;
   stateLabelEl.className = `state ${state}`;
-  if (state === 'running' || state === 'reconnecting') startSpinner();
-  else stopSpinner();
+  renderStateIcon(); // sets the hover tooltip too, plus starts/stops the spinner
   // Stop (lives in #activityBar next to the state spinner - index.html)
   // only shows while there's actually a turn to cancel - reconnecting/idle/
   // error/closed all have nothing in flight on this connection to interrupt.

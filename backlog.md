@@ -66,8 +66,11 @@ Ordered by user-facing value if fixed (2026-08-25) - active pain points and near
 
 - [2026-08-24] [L] Codex rewind only if the app-server grows a fork. Do not fake Claude rewind. Codex also has no MCP/plugins/thinking/auto-continue/project always-allow - the descriptor is honest (`unsupported()` stubs).
 
+- [2026-08-27] [L] Comment-tone/length pass across the codebase - trim comments that read as AI-generated or lean on irrelevant references, and treat any comment over 4 lines as suspicious by default. Scale check done: 430 comment blocks over 4 lines across 74 files (src/ + public/*.js), worst offenders app.js (64 blocks, up to 24 lines), session-registry.js (59 blocks, up to 36 lines), session.js (36 blocks), stream-view.js (32 blocks). Real risk flagged before starting: many of these long comments document hard-won gotchas (SDK quirks, race conditions, CSS-specificity bugs) that cost a real debugging session to find - a blind length-based trim could delete load-bearing "why," not just fluff. Proposed approach not yet started: calibrate on one small file first (detail-pane.js suggested), confirm the trim bar against a real before/after diff, then apply file by file, asking when a comment's necessity is genuinely ambiguous rather than guessing.
+
 ## Grok backend (still out of scope)
 
 - File-content rewind (Grok does not offer it; do not fake Claude rewind)
 - Cross-provider resume
 - Live MCP reconnect on a running Grok ACP session (toggle persists; start a new session to pick it up)
+- [2026-08-26] app.js is still 2699 lines, above the thermo-nuclear-code-quality-review skill's 2000-line bar (down from 2811 after extracting settings-security-panel.js). Next candidates: the ~150-line block of loose getElementById DOM-lookup consts near the top; the recent-folders block (loadRecentFolders/rememberRecentFolder/renderRecentFolders); the agents-list rendering block (renderAgentsList/applyAgentArmedIndicator); and other per-feature settings-wiring blocks that could move into their owning modules' own init(), same pattern as settings-security-panel.js. Frontend has no jsdom test coverage (see tests/README.md), so any further split needs a manual browser click-through of the affected UI, not just a diff audit, before merging.

@@ -555,7 +555,7 @@ const LANG_BY_EXT = {
   html: 'markup', htm: 'markup', xml: 'markup', svg: 'markup', vue: 'markup',
 };
 
-function langFromPath(filePath) {
+export function langFromPath(filePath) {
   if (typeof filePath !== 'string') return null;
   const m = /\.([a-zA-Z0-9]+)$/.exec(filePath);
   return m ? (LANG_BY_EXT[m[1].toLowerCase()] || null) : null;

@@ -171,6 +171,12 @@
   #activityBar .state.reconnecting { color: var(--warn); }
   #activityBar .state.running { color: var(--accent); }
   #activityBar .state.error { color: var(--error); }
+  /* Main turn is idle, but a subagent (Agent tool call) is still believed
+     running (app.js's agentLiveness tracker) - amber like reconnecting
+     rather than the running-state blue, so it never reads as an ordinary
+     turn in flight; the AGENT_SPINNER_FRAMES glyph shape (vs. reconnecting's
+     plain |/-\) is what tells the two apart at a glance. */
+  #activityBar .state.agent-idle { color: var(--warn); }
   #rateLimitBanner { color: var(--warn); }
   #autoContinueLabel { display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--muted); }
   #autoContinueLabel input { cursor: pointer; }

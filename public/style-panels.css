@@ -36,24 +36,25 @@
     font-size: 12px;
   }
   .task-status {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
+    width: 12px;
     flex-shrink: 0;
-    background: var(--muted);
+    text-align: center;
+    font-size: 12px;
+    line-height: 1;
+    color: var(--muted);
   }
-  .task-status-in_progress { background: var(--warning); animation: task-status-pulse 1.2s ease-in-out infinite; }
-  .task-status-completed { background: var(--success); }
-  @keyframes task-status-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.35; }
-  }
-  /* Must come after the rule above - equal specificity, so within a
-     matching media query source order decides the tie; placed earlier in
-     the file (inside the shared reduced-motion block near the top) this
-     override silently lost to the later unconditional rule. */
-  @media (prefers-reduced-motion: reduce) {
-    .task-status-in_progress { animation: none; }
+  /* Hard on/off (steps, not ease) rather than the previous opacity fade -
+     the fade (1 -> 0.35) turned out too subtle to read as "blinking" at this
+     size; a full on/off cut is unambiguous even glanced at sideways.
+     Deliberately ignores prefers-reduced-motion, same override and same
+     reasoning as app.js's state-icon spinner (startSpinner's comment): this
+     is a "something is happening" signal, and its owner has decided the
+     blink beats a steady color even with reduced-motion on system-wide. */
+  .task-status-in_progress { color: var(--warning); animation: task-status-blink 1s steps(1, end) infinite; }
+  .task-status-completed { color: var(--success); }
+  @keyframes task-status-blink {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
   }
   .task-subject { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .task-subject-done { color: var(--muted); text-decoration: line-through; }
