@@ -443,14 +443,22 @@ function formatToolInput(name, input) {
 
   if (name === 'Edit') {
     const header = input.file_path ? [{ text: input.file_path, cls: 'diff-meta' }] : [];
-    return { lines: [...header, ...diffLines(input.old_string, input.new_string)] };
+    const diff = diffLines(input.old_string, input.new_string);
+    const summary = [{ text: diffSummaryText(countDiff(diff)), cls: 'diff-summary' }];
+    return { lines: [...header, ...summary, ...diff] };
   }
 
   if (name === 'MultiEdit' && Array.isArray(input.edits)) {
-    const lines = input.file_path ? [{ text: input.file_path, cls: 'diff-meta' }] : [];
-    input.edits.forEach((edit, i) => {
+    const header = input.file_path ? [{ text: input.file_path, cls: 'diff-meta' }] : [];
+    const editDiffs = input.edits.map((edit) => diffLines(edit.old_string, edit.new_string));
+    const totals = editDiffs.reduce((acc, diff) => {
+      const c = countDiff(diff);
+      return { added: acc.added + c.added, removed: acc.removed + c.removed };
+    }, { added: 0, removed: 0 });
+    const lines = [...header, { text: diffSummaryText(totals), cls: 'diff-summary' }];
+    editDiffs.forEach((diff, i) => {
       lines.push({ text: `@@ edit ${i + 1}/${input.edits.length} @@`, cls: 'diff-hunk' });
-      lines.push(...diffLines(edit.old_string, edit.new_string));
+      lines.push(...diff);
     });
     return { lines };
   }
@@ -475,7 +483,11 @@ function formatToolInput(name, input) {
 const MAX_DIFF_CELLS = 200_000; // guard the O(n*m) LCS below against pathological input sizes
 
 // Minimal line-level diff (LCS backtrack) between two strings, rendered
-// terminal-`/diff`-style: '-' removed, '+' added, ' ' unchanged context.
+// terminal-`/diff`-style: cls 'diff-del'/'diff-add'/'diff-ctx' picks the row's
+// background tint (renderBody), `lineNo` is the single-gutter-column line
+// number CLI diffs show - old-file position for a removed line, new-file
+// position for an added or context line (they agree up to the first edit,
+// so this reads naturally as "the line's position in whichever file has it").
 function diffLines(oldText, newText) {
   const a = (oldText ?? '').split('\n');
   const b = (newText ?? '').split('\n');
@@ -484,9 +496,9 @@ function diffLines(oldText, newText) {
     // Too big to diff cheaply - fall back to a plain before/after dump.
     return [
       { text: '--- before', cls: 'diff-meta' },
-      ...a.map((l) => ({ text: `-${l}`, cls: 'diff-del' })),
+      ...a.map((l, idx) => ({ text: l, cls: 'diff-del', lineNo: idx + 1 })),
       { text: '+++ after', cls: 'diff-meta' },
-      ...b.map((l) => ({ text: `+${l}`, cls: 'diff-add' })),
+      ...b.map((l, idx) => ({ text: l, cls: 'diff-add', lineNo: idx + 1 })),
     ];
   }
 
@@ -501,13 +513,26 @@ function diffLines(oldText, newText) {
   const lines = [];
   let i = 0, j = 0;
   while (i < n && j < m) {
-    if (a[i] === b[j]) { lines.push({ text: ` ${a[i]}`, cls: 'diff-ctx' }); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { lines.push({ text: `-${a[i]}`, cls: 'diff-del' }); i++; }
-    else { lines.push({ text: `+${b[j]}`, cls: 'diff-add' }); j++; }
+    if (a[i] === b[j]) { lines.push({ text: a[i], cls: 'diff-ctx', lineNo: j + 1 }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { lines.push({ text: a[i], cls: 'diff-del', lineNo: i + 1 }); i++; }
+    else { lines.push({ text: b[j], cls: 'diff-add', lineNo: j + 1 }); j++; }
   }
-  while (i < n) { lines.push({ text: `-${a[i]}`, cls: 'diff-del' }); i++; }
-  while (j < m) { lines.push({ text: `+${b[j]}`, cls: 'diff-add' }); j++; }
+  while (i < n) { lines.push({ text: a[i], cls: 'diff-del', lineNo: i + 1 }); i++; }
+  while (j < m) { lines.push({ text: b[j], cls: 'diff-add', lineNo: j + 1 }); j++; }
   return lines;
+}
+
+function countDiff(diffLineList) {
+  let added = 0, removed = 0;
+  for (const l of diffLineList) {
+    if (l.cls === 'diff-add') added++;
+    else if (l.cls === 'diff-del') removed++;
+  }
+  return { added, removed };
+}
+
+function diffSummaryText({ added, removed }) {
+  return `Added ${added} line${added === 1 ? '' : 's'}, removed ${removed} line${removed === 1 ? '' : 's'}`;
 }
 
 // The row's "brief args" cell, e.g. file_path: "package.json" - just the key:
@@ -517,6 +542,17 @@ function diffLines(oldText, newText) {
 // collapsed block label with no separate name element next to it).
 function summarizeToolInput(name, input) {
   if (!input || typeof input !== 'object') return '';
+  if (name === 'Edit' && typeof input.file_path === 'string') {
+    const { added, removed } = countDiff(diffLines(input.old_string, input.new_string));
+    return `${input.file_path} (+${added} -${removed})`;
+  }
+  if (name === 'MultiEdit' && typeof input.file_path === 'string' && Array.isArray(input.edits)) {
+    const totals = input.edits.reduce((acc, edit) => {
+      const c = countDiff(diffLines(edit.old_string, edit.new_string));
+      return { added: acc.added + c.added, removed: acc.removed + c.removed };
+    }, { added: 0, removed: 0 });
+    return `${input.file_path} (+${totals.added} -${totals.removed})`;
+  }
   const preferredKeys = ['file_path', 'path', 'command', 'pattern', 'query', 'url', 'prompt'];
   const key = preferredKeys.find((k) => k in input) || Object.keys(input)[0];
   if (!key) return '';
@@ -748,16 +784,17 @@ function setGroupExpanded(group, expanded) {
 // interaction that used this is gone), kept because renderBody is exported
 // and reused as a generic content renderer (detail-pane.js's Payload/Result
 // tabs) where a future caller passing a hint should still work correctly.
+// Above this many changed/context rows, a diff payload renders collapsed
+// behind a "show full diff" toggle instead of dumping the whole thing inline -
+// a single large rewrite (or a MultiEdit touching many spots) otherwise pushes
+// the rest of the transcript off screen every time its row is expanded.
+const DIFF_COLLAPSE_THRESHOLD = 40;
+
 export function renderBody(body, content, hint = null, markdown = false) {
   if (content && typeof content === 'object' && Array.isArray(content.lines)) {
     body.className = 'body';
     body.textContent = '';
-    for (const line of content.lines) {
-      const div = document.createElement('div');
-      div.textContent = line.text;
-      if (line.cls) div.className = line.cls;
-      body.append(div);
-    }
+    renderDiffLines(body, content.lines);
     return;
   }
   // Markdown path - assistant reply text (renderAssistant) and delegated
@@ -786,6 +823,68 @@ export function renderBody(body, content, hint = null, markdown = false) {
   }
   body.className = 'body';
   body.textContent = content ?? '';
+}
+
+// Diff lines from diffLines/formatToolInput -> one row per line. Rows with a
+// `lineNo` (actual diff content) get a gutter + marker + text layout so CSS
+// can tint the whole row (terminal-`/diff`-style block highlight instead of
+// just colored glyphs); rows without one (file path header, `@@ edit N @@`,
+// the "Added X, removed Y" summary) render as plain full-width divs like
+// before. Past DIFF_COLLAPSE_THRESHOLD content rows, the diff itself renders
+// behind a click-to-expand toggle so a large rewrite doesn't dominate the pane.
+function renderDiffLines(body, lines) {
+  const diffLineCount = lines.filter((l) => l.lineNo != null).length;
+  if (diffLineCount <= DIFF_COLLAPSE_THRESHOLD) {
+    for (const line of lines) body.append(renderDiffRow(line));
+    return;
+  }
+
+  const collapsedLabel = `▸ Show full diff (${diffLineCount} lines)`;
+  const toggle = document.createElement('div');
+  toggle.className = 'diff-collapse-toggle';
+  toggle.textContent = collapsedLabel;
+  toggle.setAttribute('role', 'button');
+  toggle.tabIndex = 0;
+
+  const diffWrap = document.createElement('div');
+  diffWrap.hidden = true;
+  for (const line of lines) diffWrap.append(renderDiffRow(line));
+
+  let expanded = false;
+  const toggleExpanded = () => {
+    expanded = !expanded;
+    diffWrap.hidden = !expanded;
+    toggle.textContent = expanded ? '▾ Hide full diff' : collapsedLabel;
+  };
+  toggle.addEventListener('click', toggleExpanded);
+  toggle.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    toggleExpanded();
+  });
+
+  body.append(toggle, diffWrap);
+}
+
+function renderDiffRow(line) {
+  const div = document.createElement('div');
+  if (line.lineNo == null) {
+    div.textContent = line.text;
+    if (line.cls) div.className = line.cls;
+    return div;
+  }
+  div.className = `diff-row ${line.cls}`;
+  const gutter = document.createElement('span');
+  gutter.className = 'diff-gutter';
+  gutter.textContent = String(line.lineNo);
+  const marker = document.createElement('span');
+  marker.className = 'diff-marker';
+  marker.textContent = line.cls === 'diff-add' ? '+' : line.cls === 'diff-del' ? '-' : ' ';
+  const text = document.createElement('span');
+  text.className = 'diff-text';
+  text.textContent = line.text;
+  div.append(gutter, marker, text);
+  return div;
 }
 
 // `parent` is the DOM node the block is actually inserted into - defaults

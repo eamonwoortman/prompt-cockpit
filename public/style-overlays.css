@@ -179,6 +179,41 @@
   .diff-del { color: var(--error); }
   .diff-hunk { color: var(--accent); }
   .diff-meta { color: var(--muted); }
+  .diff-summary { color: var(--muted); font-style: italic; margin: 2px 0 4px; }
+
+  /* Terminal-style block-highlighted diff rows (Edit/MultiEdit tool payload) -
+     gutter + marker + text so the whole row can be background-tinted, not
+     just the text colored. Scoped under .diff-row so it doesn't touch the
+     plain-text .diff-add/.diff-del divs the #diffBody git-diff modal uses. */
+  .diff-row { display: flex; }
+  .diff-row .diff-gutter {
+    flex: 0 0 auto;
+    min-width: 2.5em;
+    text-align: right;
+    padding-right: 8px;
+    color: var(--muted);
+    opacity: 0.7;
+    user-select: none;
+  }
+  .diff-row .diff-marker {
+    flex: 0 0 auto;
+    width: 1em;
+    text-align: center;
+    user-select: none;
+  }
+  .diff-row .diff-text { flex: 1 1 auto; white-space: pre-wrap; word-break: break-word; }
+  .diff-row.diff-add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
+  .diff-row.diff-add .diff-gutter, .diff-row.diff-add .diff-marker { color: var(--ok); opacity: 1; }
+  .diff-row.diff-del { background: color-mix(in srgb, var(--error) 16%, transparent); }
+  .diff-row.diff-del .diff-gutter, .diff-row.diff-del .diff-marker { color: var(--error); opacity: 1; }
+
+  .diff-collapse-toggle {
+    cursor: pointer;
+    color: var(--accent);
+    padding: 4px 0;
+    user-select: none;
+  }
+  .diff-collapse-toggle:hover { text-decoration: underline; }
 
   #detailPaneBody .agent-status {
     font-size: 12px;
