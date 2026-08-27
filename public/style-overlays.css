@@ -185,7 +185,7 @@
      gutter + marker + text so the whole row can be background-tinted, not
      just the text colored. Scoped under .diff-row so it doesn't touch the
      plain-text .diff-add/.diff-del divs the #diffBody git-diff modal uses. */
-  .diff-row { display: flex; }
+  .diff-row { display: flex; font-family: ui-monospace, monospace; font-size: 13px; }
   .diff-row .diff-gutter {
     flex: 0 0 auto;
     min-width: 2.5em;
@@ -214,6 +214,28 @@
     user-select: none;
   }
   .diff-collapse-toggle:hover { text-decoration: underline; }
+
+  .code-block {
+    font-family: ui-monospace, monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* Prism.js (public/vendor/prism/) token colors - a small custom palette
+     from the app's own CSS variables rather than a stock Prism theme, kept
+     off --ok/--error since those already mean "added"/"removed" as the
+     diff-row background tint (see .diff-row.diff-add/.diff-del above) and a
+     same-hue token on top would lose contrast against its own row. */
+  .token.comment, .token.prolog, .token.doctype, .token.cdata { color: var(--muted); font-style: italic; }
+  .token.keyword, .token.atrule, .token.attr-value { color: var(--accent); }
+  .token.string, .token.char, .token.selector, .token.attr-name, .token.builtin { color: var(--warn); }
+  .token.function, .token.class-name { color: var(--tool-read); }
+  .token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol { color: var(--tool-search); }
+  .token.regex, .token.important, .token.variable { color: var(--warn); }
+  .token.operator, .token.entity, .token.url, .token.punctuation { color: var(--text); }
+  .token.important, .token.bold { font-weight: 600; }
+  .token.italic { font-style: italic; }
 
   #detailPaneBody .agent-status {
     font-size: 12px;

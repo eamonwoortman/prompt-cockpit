@@ -436,19 +436,23 @@ function classifyTool(name) {
 // Terminal-style expanded rendering per tool, instead of a raw JSON.stringify
 // dump of `input` - that was the single biggest verbosity gap against the
 // CLI, which shows Edit/MultiEdit as a diff and Bash as a plain command
-// rather than an escaped JSON blob. Returns either a plain string or
-// { lines: [{ text, cls }] } for diff-colored output (see appendBlock).
+// rather than an escaped JSON blob. Returns a plain string, { lines, lang }
+// for diff-colored + syntax-highlighted output (Edit/MultiEdit), or
+// { header, code, lang } for a single syntax-highlighted block (Write/Bash) -
+// see renderBody.
 function formatToolInput(name, input) {
   if (!input || typeof input !== 'object') return JSON.stringify(input);
 
   if (name === 'Edit') {
+    const lang = langFromPath(input.file_path);
     const header = input.file_path ? [{ text: input.file_path, cls: 'diff-meta' }] : [];
     const diff = diffLines(input.old_string, input.new_string);
     const summary = [{ text: diffSummaryText(countDiff(diff)), cls: 'diff-summary' }];
-    return { lines: [...header, ...summary, ...diff] };
+    return { lines: [...header, ...summary, ...diff], lang };
   }
 
   if (name === 'MultiEdit' && Array.isArray(input.edits)) {
+    const lang = langFromPath(input.file_path);
     const header = input.file_path ? [{ text: input.file_path, cls: 'diff-meta' }] : [];
     const editDiffs = input.edits.map((edit) => diffLines(edit.old_string, edit.new_string));
     const totals = editDiffs.reduce((acc, diff) => {
@@ -460,17 +464,15 @@ function formatToolInput(name, input) {
       lines.push({ text: `@@ edit ${i + 1}/${input.edits.length} @@`, cls: 'diff-hunk' });
       lines.push(...diff);
     });
-    return { lines };
+    return { lines, lang };
   }
 
   if (name === 'Write') {
-    const header = input.file_path ? `${input.file_path}\n` : '';
-    return header + (input.content ?? '');
+    return { header: input.file_path || null, code: input.content ?? '', lang: langFromPath(input.file_path) };
   }
 
   if (name === 'Bash') {
-    const desc = input.description ? `# ${input.description}\n` : '';
-    return desc + (input.command ?? '');
+    return { header: input.description || null, code: input.command ?? '', lang: 'bash' };
   }
 
   // Everything else: key: value per line rather than a braces-and-quotes
@@ -533,6 +535,44 @@ function countDiff(diffLineList) {
 
 function diffSummaryText({ added, removed }) {
   return `Added ${added} line${added === 1 ? '' : 's'}, removed ${removed} line${removed === 1 ? '' : 's'}`;
+}
+
+// File extension -> Prism.js language id (public/vendor/prism/, loaded as
+// classic globals by index.html). Unmapped/unknown extensions fall back to
+// plain text rather than guessing - see highlightSource.
+const LANG_BY_EXT = {
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
+  ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
+  json: 'json', jsonc: 'json',
+  sh: 'bash', bash: 'bash', zsh: 'bash',
+  py: 'python', pyw: 'python',
+  c: 'c', h: 'c',
+  cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp', hxx: 'cpp',
+  go: 'go', rs: 'rust', java: 'java', sql: 'sql', cs: 'csharp',
+  yml: 'yaml', yaml: 'yaml',
+  md: 'markdown', markdown: 'markdown',
+  css: 'css',
+  html: 'markup', htm: 'markup', xml: 'markup', svg: 'markup', vue: 'markup',
+};
+
+function langFromPath(filePath) {
+  if (typeof filePath !== 'string') return null;
+  const m = /\.([a-zA-Z0-9]+)$/.exec(filePath);
+  return m ? (LANG_BY_EXT[m[1].toLowerCase()] || null) : null;
+}
+
+// Prism.highlight() escapes the source itself before tokenizing, so the
+// returned HTML is safe to drop straight into innerHTML - null (not thrown)
+// when Prism, or that specific language's grammar, isn't loaded, so callers
+// can fall back to plain textContent instead of rendering nothing.
+function highlightSource(code, lang) {
+  const Prism = globalThis.Prism;
+  if (!lang || !Prism || !Prism.languages[lang]) return null;
+  try {
+    return Prism.highlight(code, Prism.languages[lang], lang);
+  } catch {
+    return null;
+  }
 }
 
 // The row's "brief args" cell, e.g. file_path: "package.json" - just the key:
@@ -794,7 +834,13 @@ export function renderBody(body, content, hint = null, markdown = false) {
   if (content && typeof content === 'object' && Array.isArray(content.lines)) {
     body.className = 'body';
     body.textContent = '';
-    renderDiffLines(body, content.lines);
+    renderDiffLines(body, content.lines, content.lang);
+    return;
+  }
+  if (content && typeof content === 'object' && typeof content.code === 'string') {
+    body.className = 'body';
+    body.textContent = '';
+    renderCodeBlock(body, content.header, content.code, content.lang);
     return;
   }
   // Markdown path - assistant reply text (renderAssistant) and delegated
@@ -832,10 +878,16 @@ export function renderBody(body, content, hint = null, markdown = false) {
 // the "Added X, removed Y" summary) render as plain full-width divs like
 // before. Past DIFF_COLLAPSE_THRESHOLD content rows, the diff itself renders
 // behind a click-to-expand toggle so a large rewrite doesn't dominate the pane.
-function renderDiffLines(body, lines) {
+// `lang`, when Prism has a grammar loaded for it (public/vendor/prism/), gets
+// each row's text syntax-highlighted independently - old_string/new_string
+// are already fragments, not whole files, so tokenizing line-by-line (rather
+// than the fragment as a whole) can occasionally mis-highlight right at a
+// construct that spans the fragment's edge (e.g. a block comment); accepted
+// tradeoff, same one line-based diff highlighters generally make.
+function renderDiffLines(body, lines, lang) {
   const diffLineCount = lines.filter((l) => l.lineNo != null).length;
   if (diffLineCount <= DIFF_COLLAPSE_THRESHOLD) {
-    for (const line of lines) body.append(renderDiffRow(line));
+    for (const line of lines) body.append(renderDiffRow(line, lang));
     return;
   }
 
@@ -848,7 +900,7 @@ function renderDiffLines(body, lines) {
 
   const diffWrap = document.createElement('div');
   diffWrap.hidden = true;
-  for (const line of lines) diffWrap.append(renderDiffRow(line));
+  for (const line of lines) diffWrap.append(renderDiffRow(line, lang));
 
   let expanded = false;
   const toggleExpanded = () => {
@@ -866,7 +918,7 @@ function renderDiffLines(body, lines) {
   body.append(toggle, diffWrap);
 }
 
-function renderDiffRow(line) {
+function renderDiffRow(line, lang) {
   const div = document.createElement('div');
   if (line.lineNo == null) {
     div.textContent = line.text;
@@ -882,9 +934,34 @@ function renderDiffRow(line) {
   marker.textContent = line.cls === 'diff-add' ? '+' : line.cls === 'diff-del' ? '-' : ' ';
   const text = document.createElement('span');
   text.className = 'diff-text';
-  text.textContent = line.text;
+  const highlighted = highlightSource(line.text, lang);
+  // Safe: highlightSource only ever returns Prism.highlight()'s output,
+  // which HTML-escapes the source before tokenizing (see its own comment).
+  if (highlighted != null) text.innerHTML = highlighted;
+  else text.textContent = line.text;
   div.append(gutter, marker, text);
   return div;
+}
+
+// Write's full file content / Bash's command text - highlighted as one
+// block rather than per-line, since (unlike Edit's fragments) this is
+// always the whole string, so full-context tokenization is exact, no
+// line-boundary caveat. `header`, when given, is the file_path/description
+// shown as a dim line above the code.
+function renderCodeBlock(body, header, code, lang) {
+  if (header) {
+    const h = document.createElement('div');
+    h.className = 'diff-meta';
+    h.textContent = header;
+    body.append(h);
+  }
+  const pre = document.createElement('div');
+  pre.className = 'code-block';
+  const highlighted = highlightSource(code, lang);
+  // Safe: see the same note on renderDiffRow's innerHTML above.
+  if (highlighted != null) pre.innerHTML = highlighted;
+  else pre.textContent = code;
+  body.append(pre);
 }
 
 // `parent` is the DOM node the block is actually inserted into - defaults

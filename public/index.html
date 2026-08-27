@@ -422,6 +422,31 @@
     </div>
   </dialog>
 
+  <!-- Prism.js (MIT, vendor/prism/LICENSE), self-hosted - classic non-module
+       scripts so Prism.languages.* is a plain global by the time app.js
+       (type=module, deferred by default) runs. Load order matters: each
+       language after core/markup/css/clike extends an earlier one. -->
+  <script src="/vendor/prism/prism-core.js"></script>
+  <script src="/vendor/prism/prism-markup.js"></script>
+  <script src="/vendor/prism/prism-css.js"></script>
+  <script src="/vendor/prism/prism-clike.js"></script>
+  <script src="/vendor/prism/prism-javascript.js"></script>
+  <script src="/vendor/prism/prism-typescript.js"></script>
+  <script src="/vendor/prism/prism-jsx.js"></script>
+  <script src="/vendor/prism/prism-tsx.js"></script>
+  <script src="/vendor/prism/prism-json.js"></script>
+  <script src="/vendor/prism/prism-bash.js"></script>
+  <script src="/vendor/prism/prism-python.js"></script>
+  <script src="/vendor/prism/prism-c.js"></script>
+  <script src="/vendor/prism/prism-cpp.js"></script>
+  <script src="/vendor/prism/prism-go.js"></script>
+  <script src="/vendor/prism/prism-rust.js"></script>
+  <script src="/vendor/prism/prism-java.js"></script>
+  <script src="/vendor/prism/prism-sql.js"></script>
+  <script src="/vendor/prism/prism-csharp.js"></script>
+  <script src="/vendor/prism/prism-yaml.js"></script>
+  <script src="/vendor/prism/prism-markdown.js"></script>
+
   <script type="module" src="/app.js"></script>
 </body>
 </html>

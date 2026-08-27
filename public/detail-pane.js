@@ -293,14 +293,15 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     body.append(resultWrap);
   }
 
-  // record.payload is either a plain string or formatToolInput's
-  // { lines: [{ text, cls }] } diff shape (see stream-view.js) - flatten to
-  // plain text for the fits-inline size check, same content renderBody would
-  // paint either way.
+  // record.payload is a plain string, formatToolInput's { lines, lang } diff
+  // shape, or its { header, code, lang } single-block shape (see
+  // stream-view.js) - flatten to plain text for the fits-inline size check,
+  // same content renderBody would paint either way.
   function payloadToPlainText(payload) {
     if (payload == null) return '';
     if (typeof payload === 'string') return payload;
     if (Array.isArray(payload.lines)) return payload.lines.map((l) => l.text).join('\n');
+    if (typeof payload.code === 'string') return payload.header ? `${payload.header}\n${payload.code}` : payload.code;
     return '';
   }
 
