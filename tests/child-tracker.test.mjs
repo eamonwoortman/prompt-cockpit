@@ -392,3 +392,46 @@ test('killTracked kills what this process owns and never a carried-forward orpha
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('killTracked logs and skips an owned entry whose kill fails', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    const started = Date.parse('2026-09-01T10:00:00Z');
+    const logged = [];
+    const alive = new Set([500]);
+    // killImpl throws for signal SIGKILL but still reports alive on signal 0 (existence probe)
+    const killImpl = (pid, signal) => {
+      if (pid === 500 && signal !== 0) throw new Error('kill failed');
+      if (signal === 0) {
+        if (!alive.has(pid)) {
+          const err = new Error('ESRCH');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        return true;
+      }
+      throw new Error('unexpected kill');
+    };
+    const tracker = createChildTracker({
+      runtimePath,
+      ...fakeDeps({ startTimes: new Map([[500, started]]), alive }),
+      killImpl,
+      logImpl: (m) => logged.push(m),
+    });
+
+    await tracker.retain({ pid: 500, provider: 'grok', command: 'grok' });
+    await tracker.settled();
+
+    const killed = await tracker.killTracked();
+
+    // The kill failed, so it doesn't appear in the return value.
+    assert.deepEqual(killed.map((e) => e.pid), []);
+    // But the entry stays in runtime.json for a later reaper to retry.
+    assert.deepEqual((await readJson(runtimePath, [])).map((e) => e.pid), [500]);
+    // And a log line identifies the failure.
+    assert.match(logged.join('\n'), /kill failed.*pid 500.*grok.*grok/i);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -329,7 +329,11 @@ export function createChildTracker({
     const killed = [];
     for (const entry of ownedEntries()) {
       if (!processExists(entry.pid, probeDeps)) continue;
-      if (killProcessTree(entry.pid, { ...probeDeps, signal })) killed.push(entry);
+      if (killProcessTree(entry.pid, { ...probeDeps, signal })) {
+        killed.push(entry);
+      } else {
+        logImpl(`child-tracker: kill failed for owned process pid ${entry.pid} (${entry.provider}, ${entry.command}) - it is still running and must be killed by hand.`);
+      }
     }
     for (const entry of killed) owned.delete(entry.pid);
     await persist();
