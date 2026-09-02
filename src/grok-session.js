@@ -5,6 +5,7 @@ import { spawnGrokAgent, killGrokProcess } from './grok-acp.js';
 import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction } from './grok-messages.js';
 import { createGrokExtensions } from './grok-extensions.js';
 import { createResultEpochTracker } from './result-epoch.js';
+import { getChildTracker } from './child-tracker.js';
 
 const CLIENT_INFO = { name: 'claude-prompt-cockpit', version: '0.1.0' };
 
@@ -88,6 +89,8 @@ export function startGrokSession({
   let pendingTurns = 0;
   let closed = false;
   let connection = null;
+  const tracker = getChildTracker();
+  let trackedPid = null;
   const pendingApprovals = new Map();
   let approvalSeq = 0;
   let promptTail = Promise.resolve();
@@ -116,6 +119,13 @@ export function startGrokSession({
   (async () => {
     try {
       connection = connectImpl({ cwd, model, effort: currentEffort });
+      // grok-acp.js's killGrokProcess only runs on an explicit close, so a
+      // Ctrl-C or crash used to leave the paid agent running. Recording the pid
+      // here is what lets shutdown() and the next start's orphan reaper find it.
+      trackedPid = connection.proc?.pid ?? null;
+      // Not awaited, and retain() itself never blocks on the start-time probe -
+      // see child-tracker.js. Session start must not wait on PowerShell.
+      if (trackedPid != null) tracker.retain({ pid: trackedPid, provider: 'grok', command: connection.command }).catch(() => {});
       const { client, proc } = connection;
 
       function fail(err) {
@@ -351,6 +361,10 @@ export function startGrokSession({
     } catch {
       // already dead
     }
+    if (trackedPid != null) {
+      tracker.release({ pid: trackedPid }).catch(() => {});
+      trackedPid = null;
+    }
     onStateChange('closed');
   }
 
@@ -466,6 +480,8 @@ export function startGrokSession({
     pushInput,
     close,
     interrupt,
+    // See codex-session.js's own trackedPid comment.
+    get trackedPid() { return trackedPid; },
     forceIdle,
     listQueue,
     removeQueued: () => false,

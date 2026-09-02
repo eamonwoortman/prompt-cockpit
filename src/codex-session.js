@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { getCodexAppServerManager } from './codex-app-server.js';
 import { codexNotificationToMessages } from './codex-messages.js';
 import { createResultEpochTracker } from './result-epoch.js';
+import { getChildTracker } from './child-tracker.js';
 
 function unsupported(name) {
   return async () => { throw new Error(`${name} is not supported on Codex sessions yet`); };
@@ -49,6 +50,12 @@ export function startCodexSession({
   onQueueChange,
   manager = getCodexAppServerManager(),
 }) {
+  // The shared app-server is ref-counted by child-tracker, exactly like
+  // manager.retainThread/releaseThread ref-counts a thread - one Codex row
+  // closing must not drop the PID entry every other Codex row still needs.
+  const tracker = getChildTracker();
+  const trackedPid = manager.pid?.() ?? null;
+  if (trackedPid != null) tracker.retain({ pid: trackedPid, provider: 'codex', command: 'codex app-server' }).catch(() => {});
   let threadId = resume || null;
   let currentMode = permissionMode || 'default';
   let currentModel = model || null;
@@ -304,6 +311,7 @@ export function startCodexSession({
         interrupted.then(() => manager.request('thread/unsubscribe', { threadId }).catch(() => {}));
       }
     }
+    if (trackedPid != null) tracker.release({ pid: trackedPid }).catch(() => {});
     onStateChange('closed');
   }
 
@@ -355,6 +363,10 @@ export function startCodexSession({
     pushInput,
     close,
     interrupt,
+    // Read by the auto-pilot supervisor to attach a pilotId to this
+    // session's underlying process; absent on Claude handles, whose
+    // transport the SDK owns.
+    trackedPid,
     forceIdle: () => {
       drainQueued();
       resultEpoch.forceIdle();

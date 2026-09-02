@@ -435,3 +435,21 @@ test('killTracked logs and skips an owned entry whose kill fails', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+import { getChildTracker, _resetChildTracker } from '../src/child-tracker.js';
+
+test('getChildTracker returns one process-wide tracker until reset', async () => {
+  const dir = await makeTmpDir();
+  try {
+    _resetChildTracker();
+    const a = getChildTracker({ runtimePath: path.join(dir, 'runtime.json'), ...fakeDeps() });
+    const b = getChildTracker();
+    assert.equal(a, b, 'options on a later call must not build a second tracker');
+    _resetChildTracker();
+    const c = getChildTracker({ runtimePath: path.join(dir, 'runtime.json'), ...fakeDeps() });
+    assert.notEqual(a, c);
+  } finally {
+    _resetChildTracker();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -343,6 +343,10 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
   return {
     ready: () => readyPromise,
     isClosed: () => closed,
+    // The shared app-server's own pid. child-tracker.js keys runtime.json by
+    // process, and this one process backs every Codex session - see that
+    // module's comment on why a per-session row would be wrong.
+    pid: () => connection.proc?.pid ?? null,
     async request(method, params = {}, options) {
       if (closed) throw new Error('codex app-server is closed');
       await readyPromise;

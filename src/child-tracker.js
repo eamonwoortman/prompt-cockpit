@@ -358,3 +358,18 @@ export function createChildTracker({
     persistNow: persist,
   };
 }
+
+// One tracker per cockpit process, created on first use. Same shape as
+// codex-app-server.js's getCodexAppServerManager/_resetCodexAppServerManager
+// pair: a module-level singleton with a test reset, rather than threading a
+// tracker instance through every session-creation call site.
+let defaultTracker = null;
+
+export function getChildTracker(options) {
+  if (!defaultTracker) defaultTracker = createChildTracker(options);
+  return defaultTracker;
+}
+
+export function _resetChildTracker() {
+  defaultTracker = null;
+}
