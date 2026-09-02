@@ -181,3 +181,27 @@ test('retain ignores a pid that is not a positive integer', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('overlapping persists leave runtime.json agreeing with the tracker, not with whichever write renamed last', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    const deps = fakeDeps({ startTimes: new Map([[11, 1_000], [12, 2_000]]), alive: new Set([11, 12]) });
+    const tracker = createChildTracker({ runtimePath, ...deps });
+
+    // Both retains, both start-time probes and the release all persist, and
+    // they overlap - the file must end up matching the maps.
+    await Promise.all([
+      tracker.retain({ pid: 11, provider: 'grok', command: 'grok' }),
+      tracker.retain({ pid: 12, provider: 'codex', command: 'codex app-server' }),
+    ]);
+    await tracker.settled();
+    await tracker.release({ pid: 11 });
+    await tracker.settled();
+
+    assert.deepEqual(tracker.list().map((e) => e.pid), [12]);
+    assert.deepEqual(await readJson(runtimePath, []), tracker.list());
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -120,6 +120,11 @@ export function createChildTracker({
   // Persisted alongside `owned` so another restart still sees them, but never
   // in list() - shutdown must not kill a process it could not verify.
   let carried = [];
+  // Write queue to serialize persists. Both retain() and its async probe call
+  // persist() for the same entry, so concurrent renames would race; the one
+  // that wins determines what ends up in the file. Serialize them so the
+  // final file reflects the final state, not an intermediate snapshot.
+  let writeChain = Promise.resolve();
 
   function ownedEntries() {
     return [...owned.values()].map(({ entry }) => entry);
@@ -133,13 +138,26 @@ export function createChildTracker({
   // process is the only writer of its own runtime.json, and the in-memory
   // maps above - not the file - are the source of truth.
   async function persist() {
-    try {
-      await writeJsonAtomic(runtimePath, runtimeEntries());
-    } catch (err) {
-      // Losing runtime.json costs us orphan reaping on the NEXT start, which
-      // is not worth failing a session launch over.
-      logImpl(`child-tracker: could not write ${runtimePath}: ${String(err?.message || err)}`);
-    }
+    // Chain this write after all earlier persists, so even if retain() and
+    // its probe both call us, the file ends up with the latest state.
+    // runtimeEntries() is evaluated when the write actually starts, not when
+    // persist() is called, so we serialize the state snapshots too.
+    const prev = writeChain;
+    const run = prev.catch(() => {}).then(async () => {
+      try {
+        await writeJsonAtomic(runtimePath, runtimeEntries());
+      } catch (err) {
+        // Losing runtime.json costs us orphan reaping on the NEXT start, which
+        // is not worth failing a session launch over.
+        logImpl(`child-tracker: could not write ${runtimePath}: ${String(err?.message || err)}`);
+      }
+    });
+    writeChain = run;
+    // `run.finally(...)` returns a new derived promise that rejects whenever
+    // `run` rejects, but nothing awaits that derived promise - prevent an
+    // unhandled rejection from killing the process.
+    run.finally(() => {}).catch(() => {});
+    return run;
   }
 
   async function retain({ pid, provider, command, pilotId = null }) {
