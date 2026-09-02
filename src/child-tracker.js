@@ -102,6 +102,60 @@ export function processExists(pid, { killImpl = (p, s) => process.kill(p, s) } =
   }
 }
 
+// `ps -o lstart` prints whole seconds and Windows' Get-Process rounds
+// differently again, so an exact comparison against the value recorded at
+// spawn never matches. A few seconds of slack is enough to confirm identity
+// without being wide enough to accept a pid recycled minutes later.
+export const START_TIME_TOLERANCE_MS = 3000;
+
+// A Windows .cmd/.bat wrapper survives killing the pid we spawned - the real
+// agent keeps running - so taskkill /T walks the tree. Deliberately NOT a
+// refactor of grok-acp.js's killGrokProcess: that one takes a live
+// ChildProcess handle and calls proc.kill() on POSIX (the in-session
+// teardown path, covered by tests/grok-acp.test.mjs:197). This one only ever
+// has a bare pid read back out of runtime.json.
+export function killProcessTree(pid, {
+  platform = process.platform,
+  spawnSyncImpl = spawnSync,
+  killImpl = (p, s) => process.kill(p, s),
+  signal = 'SIGKILL',
+} = {}) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  if (platform === 'win32') {
+    const args = ['/pid', String(n), '/t'];
+    if (signal === 'SIGKILL') args.push('/f');
+    const res = spawnSyncImpl('taskkill', args, { windowsHide: true, shell: false, stdio: 'ignore' });
+    return Boolean(res) && res.status === 0;
+  }
+  try {
+    killImpl(n, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Is the pid in `entry` still the process cockpit spawned?
+//   'gone'         - nothing is running under that pid; nothing to do.
+//   'match'        - same process, safe to kill.
+//   'mismatch'     - pid was recycled; the recorded process is provably gone,
+//                    so drop the entry WITHOUT killing the new occupant.
+//   'unverifiable' - alive, but identity can't be confirmed. Refuse to kill.
+// Async only because the start-time probe is. `processExists` stays sync -
+// it is a `process.kill(pid, 0)` existence probe, no subprocess - so the
+// cheap rejection still short-circuits before anything is spawned.
+export async function verifyEntry(entry, deps = {}) {
+  if (!entry) return 'gone';
+  const n = Number(entry.pid);
+  if (!Number.isInteger(n) || n <= 0) return 'gone';
+  if (!processExists(n, deps)) return 'gone';
+  if (entry.osStartedAt == null) return 'unverifiable';
+  const started = await probeProcessStartTime(n, deps);
+  if (started == null) return 'unverifiable';
+  return Math.abs(started - entry.osStartedAt) <= START_TIME_TOLERANCE_MS ? 'match' : 'mismatch';
+}
+
 export function createChildTracker({
   runtimePath = defaultRuntimePath(),
   platform = process.platform,
@@ -225,6 +279,63 @@ export function createChildTracker({
     await persist();
   }
 
+  // Called once at startup, before any session exists. Anything still in
+  // runtime.json was spawned by a cockpit process that died without running
+  // shutdown() - a hard kill, a crash, or a power loss.
+  async function reapOrphans() {
+    const previous = await readJson(runtimePath, []);
+    const entries = Array.isArray(previous) ? previous : [];
+    const reaped = [];
+    const skipped = [];
+    const vanished = [];
+    for (const entry of entries) {
+      const verdict = await verifyEntry(entry, probeDeps);
+      if (verdict === 'gone' || verdict === 'mismatch') {
+        vanished.push(entry);
+        continue;
+      }
+      if (verdict === 'unverifiable') {
+        logImpl(`child-tracker: refusing to reap pid ${entry.pid} (${entry.provider}, ${entry.command}) - could not confirm it is still the process cockpit spawned. Kill it by hand if it is an orphan.${entry.pilotIds?.length ? ` Auto-pilots blocked until then: ${entry.pilotIds.join(', ')}.` : ''}`);
+        skipped.push(entry);
+        continue;
+      }
+      if (killProcessTree(entry.pid, probeDeps)) {
+        reaped.push(entry);
+      } else {
+        logImpl(`child-tracker: kill failed for orphan pid ${entry.pid} (${entry.provider})`);
+        skipped.push(entry);
+      }
+    }
+    // Whatever we would not or could not kill stays recorded, so another
+    // restart sees it again and its pilots stay blocked in the meantime.
+    carried = skipped;
+    await persist();
+    return { reaped, skipped, vanished };
+  }
+
+  // Auto-pilots that must not fire because an orphan of theirs is still
+  // running. Without this the two safety behaviors combine badly: after a
+  // crash the in-memory concurrency lock is empty and the pilot is overdue,
+  // so it fires immediately, while the reaper correctly declines to kill the
+  // previous run - two unattended agents in one working tree.
+  function orphanPilotIds() {
+    return new Set(carried.flatMap((entry) => entry.pilotIds || []));
+  }
+
+  // Shutdown's last resort. Only touches entries THIS process owns: a
+  // carried-forward orphan is by definition one we could not verify, and
+  // that verdict does not change just because we are exiting.
+  async function killTracked({ signal = 'SIGKILL' } = {}) {
+    const killed = [];
+    for (const entry of ownedEntries()) {
+      if (!processExists(entry.pid, probeDeps)) continue;
+      if (killProcessTree(entry.pid, { ...probeDeps, signal })) killed.push(entry);
+    }
+    for (const entry of killed) owned.delete(entry.pid);
+    await persist();
+    return killed;
+  }
+
   return {
     runtimePath,
     retain,
@@ -234,7 +345,12 @@ export function createChildTracker({
     list: ownedEntries,
     runtimeEntries,
     settled,
-    // Task 3 adds reapOrphans / killTracked / orphanPilotIds here.
-    _internals: { probeDeps, owned, setCarried: (list) => { carried = list; }, getCarried: () => carried, persist, readRuntime: () => readJson(runtimePath, []) },
+    reapOrphans,
+    orphanPilotIds,
+    killTracked,
+    // Awaitable flush. Every mutator above already persists, but they are all
+    // called fire-and-forget from the session modules; shutdown() needs one
+    // write it can actually await before process.exit(0).
+    persistNow: persist,
   };
 }

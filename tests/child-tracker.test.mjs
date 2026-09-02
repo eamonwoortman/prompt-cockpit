@@ -6,8 +6,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createChildTracker, defaultRuntimePath } from '../src/child-tracker.js';
+import { createChildTracker, defaultRuntimePath, killProcessTree, verifyEntry, START_TIME_TOLERANCE_MS } from '../src/child-tracker.js';
 import { readJson } from '../src/json-store.js';
+import { writeJsonAtomic } from '../src/json-store.js';
 
 async function makeTmpDir() {
   return mkdtemp(path.join(tmpdir(), 'cockpit-child-tracker-'));
@@ -201,6 +202,192 @@ test('overlapping persists leave runtime.json agreeing with the tracker, not wit
 
     assert.deepEqual(tracker.list().map((e) => e.pid), [12]);
     assert.deepEqual(await readJson(runtimePath, []), tracker.list());
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('killProcessTree uses taskkill /T /F on Windows and a signal elsewhere', () => {
+  const calls = [];
+  assert.equal(killProcessTree(1234, {
+    platform: 'win32',
+    spawnSyncImpl: (cmd, args, opts) => { calls.push({ cmd, args, opts }); return { status: 0 }; },
+  }), true);
+  assert.equal(calls[0].cmd, 'taskkill');
+  assert.deepEqual(calls[0].args, ['/pid', '1234', '/t', '/f']);
+  assert.equal(calls[0].opts.windowsHide, true);
+
+  // A graceful pass drops /f so the tree gets a chance to exit on its own.
+  killProcessTree(1234, {
+    platform: 'win32',
+    signal: 'SIGTERM',
+    spawnSyncImpl: (cmd, args) => { calls.push({ cmd, args }); return { status: 0 }; },
+  });
+  assert.deepEqual(calls[1].args, ['/pid', '1234', '/t']);
+
+  const signalled = [];
+  assert.equal(killProcessTree(9, {
+    platform: 'linux',
+    killImpl: (pid, signal) => { signalled.push([pid, signal]); },
+    spawnSyncImpl: () => { throw new Error('should not spawn'); },
+  }), true);
+  assert.deepEqual(signalled, [[9, 'SIGKILL']]);
+});
+
+test('killProcessTree refuses a non-positive-integer pid', () => {
+  const spawnSyncImpl = () => { throw new Error('should not spawn'); };
+  assert.equal(killProcessTree(0, { platform: 'win32', spawnSyncImpl }), false);
+  assert.equal(killProcessTree(-1, { platform: 'win32', spawnSyncImpl }), false);
+  assert.equal(killProcessTree(undefined, { platform: 'win32', spawnSyncImpl }), false);
+});
+
+test('verifyEntry matches within the tolerance and mismatches outside it', async () => {
+  const started = Date.parse('2026-09-01T10:00:00Z');
+  const alive = new Set([50]);
+  const deps = (osReading) => fakeDeps({ startTimes: new Map([[50, osReading]]), alive });
+
+  // `ps -o lstart` truncates to whole seconds, so an exact match is the
+  // exception, not the rule - the tolerance is what makes this work at all.
+  assert.equal(await verifyEntry({ pid: 50, osStartedAt: started + 400 }, deps(started)), 'match');
+  assert.equal(
+    await verifyEntry({ pid: 50, osStartedAt: started + START_TIME_TOLERANCE_MS }, deps(started)),
+    'match',
+  );
+  assert.equal(
+    await verifyEntry({ pid: 50, osStartedAt: started + START_TIME_TOLERANCE_MS + 1 }, deps(started)),
+    'mismatch',
+  );
+});
+
+test('verifyEntry reports gone for a dead pid and unverifiable when the start time is unreadable', async () => {
+  assert.equal(
+    await verifyEntry({ pid: 51, osStartedAt: 1_000 }, fakeDeps({ alive: new Set() })),
+    'gone',
+  );
+  assert.equal(
+    await verifyEntry({ pid: 52, osStartedAt: 1_000 }, fakeDeps({ startTimes: new Map(), alive: new Set([52]) })),
+    'unverifiable',
+  );
+  // Recorded with no start time at all - either retain's probe came back
+  // empty, or the cockpit died before it landed. Never confirmable, so never
+  // killable.
+  assert.equal(
+    await verifyEntry({ pid: 53, osStartedAt: null }, fakeDeps({ startTimes: new Map([[53, 1_000]]), alive: new Set([53]) })),
+    'unverifiable',
+  );
+});
+
+test('reapOrphans kills a confirmed orphan and clears it from runtime.json', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    const started = Date.parse('2026-09-01T10:00:00Z');
+    await writeJsonAtomic(runtimePath, [
+      { pid: 300, provider: 'grok', osStartedAt: started, command: 'grok', pilotIds: ['pilot-a'] },
+    ]);
+    const deps = fakeDeps({ startTimes: new Map([[300, started]]), alive: new Set([300]) });
+    const tracker = createChildTracker({ runtimePath, ...deps });
+
+    const result = await tracker.reapOrphans();
+
+    assert.deepEqual(result.reaped.map((e) => e.pid), [300]);
+    assert.deepEqual(result.skipped, []);
+    assert.deepEqual(deps.killed, [300]);
+    assert.deepEqual(await readJson(runtimePath, []), []);
+    assert.deepEqual([...tracker.orphanPilotIds()], []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('reapOrphans REFUSES to kill an unverifiable pid and blocks that pilot from firing', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    await writeJsonAtomic(runtimePath, [
+      { pid: 301, provider: 'codex', osStartedAt: 1_000, command: 'codex', pilotIds: ['pilot-b', 'pilot-c'] },
+    ]);
+    // Alive, but its start time can't be read - could be anything now.
+    const deps = fakeDeps({ startTimes: new Map(), alive: new Set([301]) });
+    const logged = [];
+    const tracker = createChildTracker({ runtimePath, ...deps, logImpl: (m) => logged.push(m) });
+
+    const result = await tracker.reapOrphans();
+
+    assert.deepEqual(deps.killed, [], 'killing the operator\'s unrelated process is worse than logging an orphan');
+    assert.deepEqual(result.skipped.map((e) => e.pid), [301]);
+    assert.match(logged.join('\n'), /refus/i);
+    // Carried forward, so another restart still sees it.
+    assert.deepEqual((await readJson(runtimePath, [])).map((e) => e.pid), [301]);
+    // And its pilots stay blocked - otherwise the pilot is overdue and
+    // lock-free on the next heartbeat, putting a second unattended agent in
+    // the same working tree as the one we just declined to kill.
+    assert.deepEqual([...tracker.orphanPilotIds()].sort(), ['pilot-b', 'pilot-c']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('reapOrphans drops a reused pid without killing it and does not block its pilots', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    await writeJsonAtomic(runtimePath, [
+      { pid: 302, provider: 'grok', osStartedAt: 1_000, command: 'grok', pilotIds: ['pilot-d'] },
+    ]);
+    // Same pid, started an hour later - this is somebody else's process now,
+    // and the one we recorded is provably gone.
+    const deps = fakeDeps({ startTimes: new Map([[302, 3_601_000]]), alive: new Set([302]) });
+    const tracker = createChildTracker({ runtimePath, ...deps });
+
+    const result = await tracker.reapOrphans();
+
+    assert.deepEqual(deps.killed, []);
+    assert.deepEqual(result.vanished.map((e) => e.pid), [302]);
+    assert.deepEqual(await readJson(runtimePath, []), []);
+    assert.deepEqual([...tracker.orphanPilotIds()], []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('reapOrphans treats a corrupt or non-array runtime.json as empty rather than throwing', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    await writeJsonAtomic(runtimePath, { not: 'an array' });
+    const tracker = createChildTracker({ runtimePath, ...fakeDeps() });
+    assert.deepEqual(await tracker.reapOrphans(), { reaped: [], skipped: [], vanished: [] });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('killTracked kills what this process owns and never a carried-forward orphan', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    // One unverifiable orphan carried forward from a previous run...
+    await writeJsonAtomic(runtimePath, [
+      { pid: 400, provider: 'grok', osStartedAt: 1_000, command: 'grok', pilotIds: [] },
+    ]);
+    const deps = fakeDeps({
+      startTimes: new Map([[401, 2_000]]),
+      alive: new Set([400, 401]),
+    });
+    const tracker = createChildTracker({ runtimePath, ...deps });
+    await tracker.reapOrphans();
+    assert.deepEqual(deps.killed, [], 'the carried orphan was refused, not killed');
+
+    // ...and one process we spawned ourselves.
+    await tracker.retain({ pid: 401, provider: 'grok', command: 'grok' });
+    await tracker.settled();
+
+    const killed = await tracker.killTracked();
+    assert.deepEqual(killed.map((e) => e.pid), [401]);
+    assert.deepEqual(deps.killed, [401]);
+    // The carried orphan is still recorded, so a later start can retry it.
+    assert.deepEqual((await readJson(runtimePath, [])).map((e) => e.pid), [400]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
