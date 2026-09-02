@@ -2,18 +2,22 @@
 // (registry row, ws route, token); Claude's own session id is a mutable
 // attribute refreshed as messages arrive (see plan Decisions).
 //
-// Settings-store boundary (three stores exist; this is one of them): a registry row is
+// State-store boundary (four stores exist; this is one of them): a registry row is
 // the live, in-memory mirror of one running session's SDK-reported state
 // (model, mode, thinking budget, auto-continue, usage, etc). Purely
 // ephemeral - nothing here ever touches disk, and the whole row is gone the
 // moment the session closes or the process restarts. That's deliberate: a
 // row's job is to reflect what the SDK connection is doing *right now*, not
-// to remember anything. The other two stores: public/settings.js
+// to remember anything. The other three stores: public/settings.js
 // (localStorage) holds per-browser UI preferences that never leave the
 // client; session-defaults.js + plugin-settings.js (both under one cwd's
 // `.claude/settings.local.json`) hold per-project preferences that survive
-// a restart and are shared across every tab/browser pointed at that cwd.
-// server.js is what bridges this row to that persisted store (see
+// a restart and are shared across every tab/browser pointed at that cwd;
+// and ~/.prompt-cockpit/ holds cockpit's own per-USER durable files -
+// operator-auth.js's `operator-token` and child-tracker.js's
+// `runtime.json`, the PID record that lets shutdown.js (and the next
+// start's orphan reaper) kill the CLIs a row like this one spawned.
+// server.js is what bridges this row to the persisted project store (see
 // seedSessionDefaults() and the 'thinking'/'auto-continue' routes there) -
 // this module itself stays filesystem-free.
 import { randomUUID, timingSafeEqual } from 'node:crypto';

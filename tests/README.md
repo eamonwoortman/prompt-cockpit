@@ -303,3 +303,70 @@ when `query()` is fed an `AsyncIterable` prompt, and the session hangs
 forever. It also checks the compose box's most interesting failure mode
 per the plan's Verification section - sending a second message while the
 first turn is still running queues it rather than dropping or interleaving it.
+
+## Process ownership, shutdown, and orphan reaping
+
+**Run the suite as `node --test tests/`.** Node 20's `--test` has no glob
+support, so `package.json`'s `node --test tests/*.test.mjs` only works where
+the *shell* expands the glob (bash/zsh) - in PowerShell or cmd it is passed
+through literally and the runner finds nothing. Naming the directory works
+everywhere; it also picks up `*.test.mjs` only, so the `*.manual.mjs` files
+stay excluded either way. **Never run a `*.manual.mjs` file to "check the
+suite"** - several spawn real, paid CLI sessions.
+
+Four files cover this feature, and the split between them is deliberate:
+
+- `json-store.test.mjs` - the atomic write/queue helper. `updateJson` mutates
+  in place and refuses a corrupt file; `replaceJson` returns the value to
+  write and replaces one (that is `runtime.json`, where refusing would mean
+  silently not recording PIDs). Also pins the two properties `child-tracker`
+  leans on: writes land in call order, and awaiting one is a full flush of
+  everything queued before it.
+- `child-tracker.test.mjs` - the registry, ref-counting for Codex's shared
+  app-server, start-time tolerance, the four `verifyEntry` verdicts, the
+  owner discriminator, and refuse-to-kill-when-unverifiable. Every probe and
+  kill is injected, so nothing is spawned and nothing is killed.
+- `shutdown.test.mjs` - ordering, idempotence, the grace period, and one bad
+  hook not stranding the CLIs, all against fakes.
+- `shutdown-integration.test.mjs` - the seam between the three. This one
+  exists because every critical found in the final review of this feature was
+  invisible to the three files above: they fake each other's boundaries, and
+  `shutdown.test.mjs` in particular models `tracker.list()` as independent of
+  `registry.closeSession()` when in production closing a session was exactly
+  what emptied the tracker. It drives the **real** registry, tracker, Codex
+  app-server manager and shutdown against bare `process.execPath -e
+  'setInterval(...)'` children, and asserts the properties those bugs broke:
+  a survivor of the grace period is really killed, `runtime.json` really ends
+  `[]`, a child that dies on its own releases its entry, and an entry owned by
+  a still-live cockpit PID is left alone. The kill is the real OS kill
+  (`taskkill /t /f` on Windows, `process.kill` elsewhere) - the point is that
+  the process is gone, not that a stub was called. No provider CLI, no
+  network, no cost. Only the OS start-time probe is injected, since the real
+  one shells out to PowerShell/`ps` and nothing here is testing PowerShell.
+
+**Not covered by unit tests, hand-verified only** - all three are the parts
+that cannot be faked without testing the fake instead:
+
+- **The real Ctrl-C path.** `process.stdin.setRawMode(true)` means the OS
+  never delivers `SIGINT`, so the TTY keypress handler in `server.js` is the
+  only Ctrl-C the process sees. Verify by hand: `npm start`, open a Grok
+  session and send one message, note the pid in
+  `~/.prompt-cockpit/runtime.json`, press Ctrl-C. Expect `shutting down
+  (keypress-ctrl-c)…`, a terminal that still echoes (that is
+  `setRawMode(false)`), `Get-Process -Id <pid>` finding nothing, and
+  `runtime.json` back to `[]`. Repeat with one Codex session, and with two
+  Codex sessions open (one shared app-server pid, killed once). Repeat once
+  more pressing Ctrl-C twice, which must exit immediately rather than wait.
+- **The real `taskkill` tree-kill.** Only `shutdown-integration.test.mjs`
+  exercises the actual kill, and only against a plain node child - not
+  against a Windows `.cmd` shim with a grandchild under it, which is the case
+  `/t` exists for. Verify by hand whenever the Grok or Codex launcher changes
+  how it resolves a binary.
+- **The real PowerShell/`ps` start-time probe.** Its output parsing (`Date.parse`
+  over `Get-Process | StartTime.ToUniversalTime().ToString('o')` and over `ps
+  -o lstart=`) is fake-driven in every test, because a real probe makes the
+  suite spawn a shell and vary by OS. The 3s tolerance exists precisely
+  because those two formats round differently, so re-check it by hand after
+  `taskkill /f`-ing a cockpit: the next start must either reap the orphaned
+  CLI or log a refusal naming the pid. A silent no-op means the probe is
+  returning something `Date.parse` cannot read.

@@ -293,10 +293,6 @@ if (isMain) {
   // OS SIGINT delivery while stdin IS a TTY - piped/service invocations get
   // the real signal.
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK']) {
-    // The .catch matters: a rejection escaping a fire-and-forget exitVia is
-    // an unhandled rejection, and Node 20 kills the process on those without
-    // finishing the teardown. Exit anyway, non-zero, so a wrapper script can
-    // tell a broken teardown from a clean one.
     process.on(signal, () => { exitNow(signal); });
   }
 

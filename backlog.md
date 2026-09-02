@@ -8,7 +8,11 @@ Ordered by severity: [C] critical/crash, [H] potentially bad, [M] can wait, [L] 
 
 ## [H] Potentially bad
 
-(none open)
+- [2026-09-02] Claude's transport is still outside `child-tracker.js`, and on Windows the SDK does not kill it. The SDK's own exit cleanup is `if (process.platform === "win32") try { e.stdin.end() } catch {} else e.kill("SIGTERM")` (`node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs`) - so on the platform this repo actually targets, a Ctrl-C closes the transport's stdin and hopes. Excluding Claude from process ownership was a deliberate scope decision (the auto-pilot design spec's Decision 7), not a claim that the SDK guarantees teardown, so this is a real residual gap: if a Claude transport is ever observed surviving exit on Windows, the fix is to retain its PID like Grok's and Codex's, next to the `spawnClaudeCodeProcess` follow-up. Needs a measurement first - watch for a surviving `claude`/node transport after Ctrl-C with a live Claude session - rather than widening scope on suspicion.
+
+- [2026-09-02] Two short-lived `grok` spawns are untracked, so a Ctrl-C at the wrong moment leaks one: `src/grok-cli.js` (the capability/model probes, killed on a timeout only) and `rewindGrokSession`'s helper connection in `src/grok-session.js` (killed in a `finally`, which a `process.exit` never reaches). Both are seconds-long rather than session-length, so the exposure is one stray agent process, not a running turn - but a rewind is exactly when a user is likely to be impatient. Retaining them means `retain`/`release` around two more spawn sites; the awkward part is that `grok-cli.js` has no long-lived handle to hang the release off, so it wants a small `withTrackedSpawn` wrapper rather than another copy of the same four lines.
+
+- [2026-09-02] `startGrokSession`'s connect/initialize failure path sets `closed = true` without killing the agent it just spawned, and `close()` then early-returns on that flag - so a `grok agent stdio` process whose `initialize` or `session/new` failed while the process itself stayed alive survives until `shutdown()`. Now bounded (the pid is tracked, so shutdown kills it), but it should not need shutdown to notice: the catch should tear the connection down the way `close()` does.
 
 ## [M] Can wait
 
