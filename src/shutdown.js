@@ -40,8 +40,10 @@ export function createShutdown({
     }
 
     // Every live session, pilot-owned or not. closeSession is synchronous and
-    // removes the row, so snapshot the ids first.
-    for (const { id } of registry.list()) {
+    // removes the row, so snapshot the ids first rather than iterating a view
+    // of the collection we are mutating.
+    const ids = registry.list().map(({ id }) => id);
+    for (const id of ids) {
       try {
         registry.closeSession(id);
       } catch (err) {

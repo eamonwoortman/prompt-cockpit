@@ -32,8 +32,22 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { readJson, replaceJson } from './json-store.js';
 
-export function defaultRuntimePath(home = homedir()) {
-  return path.join(home, '.prompt-cockpit', 'runtime.json');
+// COCKPIT_RUNTIME_FILE overrides the path, exactly as COCKPIT_OPERATOR_FILE
+// does for the operator token (operator-auth.js:16,62), and for the same
+// reason: tests must never write into the real home directory. That matters
+// more here than there - server.js exports `shutdown` and `tracker` so a test
+// can drive teardown directly, and a test taking that invitation against the
+// real runtime.json would run killTracked() over the developer's own live
+// pids. An explicit `home` argument still wins, so callers that pass one get
+// what they asked for.
+export function defaultRuntimePath(home) {
+  if (home === undefined) {
+    const fromEnv = typeof process.env.COCKPIT_RUNTIME_FILE === 'string'
+      ? process.env.COCKPIT_RUNTIME_FILE.trim()
+      : '';
+    if (fromEnv) return fromEnv;
+  }
+  return path.join(home ?? homedir(), '.prompt-cockpit', 'runtime.json');
 }
 
 // The OS's own start time for a pid, as epoch-ms, or null if it can't be

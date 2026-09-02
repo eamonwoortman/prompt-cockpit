@@ -217,9 +217,28 @@ function copyToClipboard(text) {
   });
 }
 
+// Upper bound on the whole teardown. Without one, Ctrl-C has no worst case a
+// user can rely on: today it is bounded but unpleasant (tracker.settled()'s
+// probe timeout plus the grace period), and it becomes unbounded the moment
+// the auto-pilot supervisor registers a shutdown.onBeforeClose hook that can
+// hang. Comfortably above grace (3s) + killTracked's verify budget (1.5s).
+const FORCE_EXIT_MS = 8000;
+
 if (isMain) {
+  let exiting = false;
+
   // Exits once, through shutdown(), whichever route got us here.
   async function exitVia(reason) {
+    // A second Ctrl-C is an escape hatch, not a no-op. shutdown.run() is
+    // idempotent, so joining the first teardown changes nothing when that
+    // teardown is the thing that is wedged. Raw mode is already off by then,
+    // so the terminal survives this path too.
+    if (exiting) {
+      console.error('second interrupt - exiting now. Any CLI still running has to be killed by hand.');
+      process.exit(1);
+    }
+    exiting = true;
+
     // Leaving the terminal in raw mode makes the shell unusable afterwards -
     // and this has to happen BEFORE the await, not after, or a slow teardown
     // leaves the user with a dead prompt for seconds. pause() is inside the
@@ -233,12 +252,26 @@ if (isMain) {
         process.stdin.pause();
       } catch { /* not a TTY any more */ }
     }
+
+    // .unref() so the watchdog alone never holds the process open: if the
+    // event loop empties first we exit anyway, which is the same outcome.
+    const watchdog = setTimeout(() => {
+      console.error(`teardown did not finish within ${FORCE_EXIT_MS}ms - exiting anyway. Check for surviving CLI processes.`);
+      process.exit(1);
+    }, FORCE_EXIT_MS);
+    watchdog.unref();
+
+    let failed = false;
     try {
       await shutdown.run(reason);
     } catch (err) {
+      failed = true;
       console.error(`shutdown failed: ${String(err?.message || err)}`);
     }
-    process.exit(0);
+    clearTimeout(watchdog);
+    // Non-zero on a failed teardown, so a wrapper script can tell the
+    // difference instead of reading every clean exit into a broken one.
+    process.exit(failed ? 1 : 0);
   }
 
   // Every fire-and-forget exit route goes through this rather than calling

@@ -4,11 +4,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import { createChildTracker, defaultRuntimePath, killProcessTree, verifyEntry, START_TIME_TOLERANCE_MS } from '../src/child-tracker.js';
-import { readJson } from '../src/json-store.js';
-import { writeJsonAtomic } from '../src/json-store.js';
+import {
+  createChildTracker,
+  defaultRuntimePath,
+  getChildTracker,
+  killProcessTree,
+  verifyEntry,
+  _resetChildTracker,
+  START_TIME_TOLERANCE_MS,
+} from '../src/child-tracker.js';
+import { readJson, writeJsonAtomic } from '../src/json-store.js';
 
 async function makeTmpDir() {
   return mkdtemp(path.join(tmpdir(), 'cockpit-child-tracker-'));
@@ -69,6 +76,21 @@ test('defaultRuntimePath sits beside the operator token under ~/.prompt-cockpit'
     defaultRuntimePath('/home/x'),
     path.join('/home/x', '.prompt-cockpit', 'runtime.json'),
   );
+});
+
+test('COCKPIT_RUNTIME_FILE overrides the path, so a test can never killTracked() the real home\'s pids', () => {
+  const before = process.env.COCKPIT_RUNTIME_FILE;
+  try {
+    process.env.COCKPIT_RUNTIME_FILE = path.join('/tmp', 'elsewhere.json');
+    assert.equal(defaultRuntimePath(), path.join('/tmp', 'elsewhere.json'));
+    // An explicit home still wins - same as operator-auth's own override.
+    assert.equal(defaultRuntimePath('/home/x'), path.join('/home/x', '.prompt-cockpit', 'runtime.json'));
+    process.env.COCKPIT_RUNTIME_FILE = '   ';
+    assert.equal(defaultRuntimePath(), defaultRuntimePath(homedir()));
+  } finally {
+    if (before === undefined) delete process.env.COCKPIT_RUNTIME_FILE;
+    else process.env.COCKPIT_RUNTIME_FILE = before;
+  }
 });
 
 test('retain records the OS-reported start time and persists the entry', async () => {
@@ -183,6 +205,8 @@ test('retain ignores a pid that is not a positive integer', async () => {
     const tracker = createChildTracker({ runtimePath, ...fakeDeps() });
     assert.equal(await tracker.retain({ pid: undefined, provider: 'grok', command: 'grok' }), null);
     assert.equal(await tracker.retain({ pid: 0, provider: 'grok', command: 'grok' }), null);
+    // A negative pid is `kill(-pgid)` on POSIX - a whole process group.
+    assert.equal(await tracker.retain({ pid: -1, provider: 'grok', command: 'grok' }), null);
     assert.deepEqual(tracker.list(), []);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -562,8 +586,6 @@ test('killTracked logs and skips an owned entry whose kill fails', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
-
-import { getChildTracker, _resetChildTracker } from '../src/child-tracker.js';
 
 test('getChildTracker returns one process-wide tracker until reset', async () => {
   const dir = await makeTmpDir();
