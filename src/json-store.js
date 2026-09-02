@@ -69,6 +69,27 @@ export async function writeJsonAtomic(filePath, value) {
 // long-running process.
 const writeQueues = new Map();
 
+// Runs `job` while holding this path's queue slot, and hands back a promise
+// that settles when the job does - so `await` on the return value is a
+// complete flush of everything queued up to that point, and two writers in
+// the same tick land in call order rather than whichever rename won.
+function withPathLock(filePath, job) {
+  const key = path.resolve(filePath);
+  const prev = writeQueues.get(key) || Promise.resolve();
+  const run = prev.catch(() => {}).then(job);
+  writeQueues.set(key, run);
+  // `run.finally(...)` returns a new derived promise that also rejects
+  // whenever `run` rejects, and nothing awaits that derived promise - Node's
+  // default unhandled-rejection handling would kill the whole process on any
+  // write failure (disk full, permissions, the corrupt-file guard below).
+  // `run` itself still carries the rejection forward to whoever awaits the
+  // public function's return value.
+  run.finally(() => {
+    if (writeQueues.get(key) === run) writeQueues.delete(key);
+  }).catch(() => {});
+  return run;
+}
+
 // `mutator(value)` is called with the freshly-read value and may mutate it
 // in place and/or return a value; whatever it returns is this function's
 // return value. The read, mutate, and write all happen while holding this
@@ -78,9 +99,7 @@ const writeQueues = new Map();
 // mutator and then written, so a shared value would leak one call's
 // mutations into the next call for a different path.
 export async function updateJson(filePath, mutator, { fallback = () => ({}) } = {}) {
-  const key = path.resolve(filePath);
-  const prev = writeQueues.get(key) || Promise.resolve();
-  const run = prev.catch(() => {}).then(async () => {
+  return withPathLock(filePath, async () => {
     const { value, corrupt } = await readJsonChecked(filePath, fallback());
     if (corrupt) {
       // Refuse to proceed rather than silently writing the fallback back
@@ -92,15 +111,24 @@ export async function updateJson(filePath, mutator, { fallback = () => ({}) } = 
     await writeJsonAtomic(filePath, value);
     return result;
   });
-  writeQueues.set(key, run);
-  // `run.finally(...)` returns a new derived promise that also rejects
-  // whenever `run` rejects, and nothing awaits that derived promise - Node's
-  // default unhandled-rejection handling would kill the whole process on any
-  // write failure (disk full, permissions, the corrupt-file guard above).
-  // `run` itself still carries the rejection forward to whoever awaits
-  // updateJson's return value.
-  run.finally(() => {
-    if (writeQueues.get(key) === run) writeQueues.delete(key);
-  }).catch(() => {});
-  return run;
+}
+
+// Same per-path serialization as updateJson, but `transform(current, corrupt)`
+// RETURNS the value to write instead of mutating one in place, and a corrupt
+// file is reported rather than refused.
+//
+// Both differences exist for runtime.json (child-tracker.js): its payload is
+// an array rebuilt wholesale from in-memory state, so there is nothing to
+// mutate in place when the file holds something else entirely (or nothing);
+// and refusing to write it would mean a cockpit whose runtime.json got
+// corrupted silently stops recording the PIDs it spawns - strictly worse than
+// replacing the file, since the only thing lost is orphan reaping, which a
+// corrupt file has already lost.
+export async function replaceJson(filePath, transform, { fallback = () => ({}) } = {}) {
+  return withPathLock(filePath, async () => {
+    const { value, corrupt } = await readJsonChecked(filePath, fallback());
+    const next = await transform(value, corrupt);
+    await writeJsonAtomic(filePath, next);
+    return next;
+  });
 }

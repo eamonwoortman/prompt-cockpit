@@ -4,7 +4,6 @@ import { randomUUID } from 'node:crypto';
 import { getCodexAppServerManager } from './codex-app-server.js';
 import { codexNotificationToMessages } from './codex-messages.js';
 import { createResultEpochTracker } from './result-epoch.js';
-import { getChildTracker } from './child-tracker.js';
 
 function unsupported(name) {
   return async () => { throw new Error(`${name} is not supported on Codex sessions yet`); };
@@ -50,12 +49,11 @@ export function startCodexSession({
   onQueueChange,
   manager = getCodexAppServerManager(),
 }) {
-  // The shared app-server is ref-counted by child-tracker, exactly like
-  // manager.retainThread/releaseThread ref-counts a thread - one Codex row
-  // closing must not drop the PID entry every other Codex row still needs.
-  const tracker = getChildTracker();
+  // Read-only here. The app-server's pid is retained with child-tracker by
+  // codex-app-server.js itself, for the whole life of that shared process -
+  // ref-counting it per session made the last session's close() un-track a
+  // process that was still running (and still billing).
   const trackedPid = manager.pid?.() ?? null;
-  if (trackedPid != null) tracker.retain({ pid: trackedPid, provider: 'codex', command: 'codex app-server' }).catch(() => {});
   let threadId = resume || null;
   let currentMode = permissionMode || 'default';
   let currentModel = model || null;
@@ -311,7 +309,6 @@ export function startCodexSession({
         interrupted.then(() => manager.request('thread/unsubscribe', { threadId }).catch(() => {}));
       }
     }
-    if (trackedPid != null) tracker.release({ pid: trackedPid }).catch(() => {});
     onStateChange('closed');
   }
 

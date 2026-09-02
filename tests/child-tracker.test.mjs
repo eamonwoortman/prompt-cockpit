@@ -92,6 +92,12 @@ test('retain records the OS-reported start time and persists the entry', async (
       osStartedAt: started,
       command: '/usr/bin/grok',
       pilotIds: [],
+      // Which cockpit owns this CLI. Another instance sharing the same
+      // per-user runtime.json reaps only entries whose owner is provably
+      // gone. `ownerStartedAt` is null here because fakeDeps knows no start
+      // time for the test runner's own pid.
+      ownerPid: process.pid,
+      ownerStartedAt: null,
     }]);
     assert.deepEqual(await readJson(runtimePath, []), tracker.list());
   } finally {
@@ -357,7 +363,128 @@ test('reapOrphans treats a corrupt or non-array runtime.json as empty rather tha
     const runtimePath = path.join(dir, 'runtime.json');
     await writeJsonAtomic(runtimePath, { not: 'an array' });
     const tracker = createChildTracker({ runtimePath, ...fakeDeps() });
-    assert.deepEqual(await tracker.reapOrphans(), { reaped: [], skipped: [], vanished: [] });
+    assert.deepEqual(await tracker.reapOrphans(), { reaped: [], skipped: [], vanished: [], foreign: [] });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// The three tests below are the owner discriminator. runtime.json is per
+// USER, not per cockpit (README tells you to start a second instance on
+// another PORT), and start-time verification only proves a pid IS the CLI
+// that was recorded - not that nobody is still driving it. Without an owner
+// check, a second cockpit tree-killed the first one's live, paid sessions
+// about a second into its own boot.
+test('reapOrphans leaves a still-running cockpit instance\'s CLIs alone, and does not block their pilots', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    const childStart = Date.parse('2026-09-01T10:00:00Z');
+    const ownerStart = Date.parse('2026-09-01T09:59:00Z');
+    await writeJsonAtomic(runtimePath, [
+      {
+        pid: 310, provider: 'grok', osStartedAt: childStart, command: 'grok', pilotIds: ['pilot-e'],
+        ownerPid: 9000, ownerStartedAt: ownerStart,
+      },
+    ]);
+    const deps = fakeDeps({
+      startTimes: new Map([[310, childStart], [9000, ownerStart], [311, 5_000]]),
+      alive: new Set([310, 9000, 311]),
+    });
+    const logged = [];
+    const tracker = createChildTracker({ runtimePath, ...deps, ownerPid: 9001, logImpl: (m) => logged.push(m) });
+
+    const result = await tracker.reapOrphans();
+
+    assert.deepEqual(deps.killed, [], 'that is another cockpit\'s live session, not an orphan');
+    assert.deepEqual(result.foreign.map((e) => e.pid), [310]);
+    assert.deepEqual(result.skipped, [], 'skipped-because-owner-alive is not skipped-because-unverifiable');
+    assert.deepEqual([...tracker.orphanPilotIds()], [], 'the other instance owns that pilot; ours must not freeze');
+    assert.match(logged.join('\n'), /still running/);
+
+    // ...and our own writes must not erase it, or instance A's real orphans
+    // become unreapable the moment we exit.
+    await tracker.retain({ pid: 311, provider: 'grok', command: 'grok' });
+    await tracker.settled();
+    assert.deepEqual((await readJson(runtimePath, [])).map((e) => e.pid).sort(), [310, 311]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('reapOrphans still reaps when the owning cockpit pid has been recycled by something else', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    const childStart = Date.parse('2026-09-01T10:00:00Z');
+    await writeJsonAtomic(runtimePath, [
+      {
+        pid: 320, provider: 'grok', osStartedAt: childStart, command: 'grok', pilotIds: [],
+        ownerPid: 9100, ownerStartedAt: Date.parse('2026-09-01T09:00:00Z'),
+      },
+    ]);
+    // Something is running as pid 9100, but it started an hour after the
+    // cockpit that recorded this entry - so that cockpit is provably gone.
+    const deps = fakeDeps({
+      startTimes: new Map([[320, childStart], [9100, Date.parse('2026-09-01T10:30:00Z')]]),
+      alive: new Set([320, 9100]),
+    });
+    const tracker = createChildTracker({ runtimePath, ...deps, ownerPid: 9101 });
+
+    const result = await tracker.reapOrphans();
+
+    assert.deepEqual(result.reaped.map((e) => e.pid), [320]);
+    assert.deepEqual(deps.killed, [320], 'the recorded cockpit is dead, so this really is an orphan');
+    assert.deepEqual(await readJson(runtimePath, []), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an entry with no ownerPid reads as reapable, so a runtime.json from an older build still works', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    const started = Date.parse('2026-09-01T10:00:00Z');
+    await writeJsonAtomic(runtimePath, [
+      { pid: 330, provider: 'grok', osStartedAt: started, command: 'grok', pilotIds: [] },
+    ]);
+    const deps = fakeDeps({ startTimes: new Map([[330, started]]), alive: new Set([330]) });
+    const tracker = createChildTracker({ runtimePath, ...deps });
+
+    const result = await tracker.reapOrphans();
+
+    assert.deepEqual(result.reaped.map((e) => e.pid), [330]);
+    assert.deepEqual(deps.killed, [330]);
+    assert.deepEqual(await readJson(runtimePath, []), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('killTracked drops a recycled pid instead of tree-killing whatever now holds it', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    const startTimes = new Map([[601, 1_000]]);
+    const deps = fakeDeps({ startTimes, alive: new Set([601]) });
+    const logged = [];
+    const tracker = createChildTracker({ runtimePath, ...deps, logImpl: (m) => logged.push(m) });
+
+    await tracker.retain({ pid: 601, provider: 'grok', command: 'grok' });
+    await tracker.settled();
+    // Our CLI died without us noticing and the OS handed 601 to the
+    // operator's editor. `taskkill /t /f` on it is the outcome the design
+    // forbids outright.
+    startTimes.set(601, 9_999_000);
+
+    const killed = await tracker.killTracked();
+
+    assert.deepEqual(killed, []);
+    assert.deepEqual(deps.killed, []);
+    assert.deepEqual(tracker.list(), [], 'and the stale entry is gone, not carried into runtime.json');
+    assert.deepEqual(await readJson(runtimePath, []), []);
+    assert.match(logged.join('\n'), /no longer the process we spawned/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -7,6 +7,7 @@ import { access, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { getChildTracker } from './child-tracker.js';
 
 const REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
 const CLIENT_INFO = {
@@ -289,8 +290,30 @@ export function spawnCodexAppServer({ spawnImpl = spawn, resolveSpawn = resolveC
   return { proc, client, command, getStderr: () => stderr };
 }
 
-export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer } = {}) {
+export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer, tracker = getChildTracker() } = {}) {
   const connection = connectImpl();
+  // Tracked here, at the spawn, rather than per Codex session: the entry has
+  // to exist for exactly as long as the PROCESS can be alive. Ref-counting it
+  // from codex-session.js instead meant the last session closing dropped the
+  // entry while the app-server was still running - so shutdown() saw nothing
+  // tracked, skipped its grace period and its whole force-kill pass, and left
+  // a live CLI behind with runtime.json claiming there was nothing to reap.
+  // It also left codex-history.js's own getCodexAppServerManager() spawn
+  // (listCodexSessions / fetchCodexSessionHistory - the history pane, no
+  // session involved) tracked by nobody at all.
+  const trackedPid = connection.proc?.pid ?? null;
+  if (trackedPid != null) {
+    tracker.retain({ pid: trackedPid, provider: 'codex', command: 'codex app-server' }).catch(() => {});
+  }
+  let releasedPid = false;
+  // Only on real process death, and only once. Not in close(): close() kills
+  // the process but cannot prove the kill landed, and an entry that outlives
+  // its process by a moment is harmless where one that dies early is not.
+  function releaseTracked() {
+    if (trackedPid == null || releasedPid) return;
+    releasedPid = true;
+    tracker.release({ pid: trackedPid }).catch(() => {});
+  }
   const notificationHandlers = new Set();
   const requestHandlers = new Set();
   const closeHandlers = new Set();
@@ -334,19 +357,22 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
   }
 
   connection.proc?.on('error', (err) => {
+    releaseTracked();
     fail(new Error(`Unable to start codex app-server: ${String(err?.message || err)}`, { cause: err }));
   });
   connection.proc?.on('exit', (code) => {
+    releaseTracked();
     fail(new Error(`codex app-server exited ${code}: ${connection.getStderr?.() || ''}`));
   });
 
   return {
     ready: () => readyPromise,
     isClosed: () => closed,
-    // The shared app-server's own pid. child-tracker.js keys runtime.json by
-    // process, and this one process backs every Codex session - see that
-    // module's comment on why a per-session row would be wrong.
-    pid: () => connection.proc?.pid ?? null,
+    // The shared app-server's own pid, retained with child-tracker for this
+    // process's whole life (see the retain above). Read by codex-session.js
+    // for handle.trackedPid, which the auto-pilot supervisor uses to attach a
+    // pilotId to the process behind a session.
+    pid: () => trackedPid,
     async request(method, params = {}, options) {
       if (closed) throw new Error('codex app-server is closed');
       await readyPromise;

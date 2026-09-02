@@ -218,19 +218,20 @@ function copyToClipboard(text) {
 }
 
 if (isMain) {
-  // Anything still in runtime.json belongs to a cockpit process that died
-  // without running shutdown(). Reap before listening, so a pilot cannot
-  // fire into a working tree an orphan is still writing to.
-  tracker.reapOrphans().catch((err) => console.error(`orphan reap failed: ${String(err?.message || err)}`));
-
   // Exits once, through shutdown(), whichever route got us here.
   async function exitVia(reason) {
     // Leaving the terminal in raw mode makes the shell unusable afterwards -
     // and this has to happen BEFORE the await, not after, or a slow teardown
-    // leaves the user with a dead prompt for seconds.
+    // leaves the user with a dead prompt for seconds. pause() is inside the
+    // try with setRawMode: a throw from it used to escape exitVia entirely,
+    // which on the signal paths below became an unhandled rejection - and in
+    // Node 20 that terminates the process without running the teardown, on
+    // the one path that must never fail.
     if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(false); } catch { /* not a TTY any more */ }
-      process.stdin.pause();
+      try {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+      } catch { /* not a TTY any more */ }
     }
     try {
       await shutdown.run(reason);
@@ -240,16 +241,41 @@ if (isMain) {
     process.exit(0);
   }
 
+  // Every fire-and-forget exit route goes through this rather than calling
+  // exitVia() bare. A rejection escaping exitVia would otherwise be an
+  // unhandled rejection, and Node 20 terminates the process on those WITHOUT
+  // finishing the teardown - the exact failure this whole path exists to
+  // prevent. Exit anyway, non-zero, so a wrapper script can tell a broken
+  // teardown from a clean one.
+  function exitNow(reason) {
+    exitVia(reason).catch((err) => {
+      console.error(`shutdown failed hard: ${String(err?.message || err)}`);
+      process.exit(1);
+    });
+  }
+
   // SIGTERM is not meaningfully deliverable on Windows; SIGBREAK is the
   // closer analogue (Ctrl+Break, and what a console-window close sends).
   // SIGINT is still registered because setRawMode(true) below only suppresses
   // OS SIGINT delivery while stdin IS a TTY - piped/service invocations get
   // the real signal.
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK']) {
-    process.on(signal, () => { exitVia(signal); });
+    // The .catch matters: a rejection escaping a fire-and-forget exitVia is
+    // an unhandled rejection, and Node 20 kills the process on those without
+    // finishing the teardown. Exit anyway, non-zero, so a wrapper script can
+    // tell a broken teardown from a clean one.
+    process.on(signal, () => { exitNow(signal); });
   }
 
   server.listen(PORT, HOST, () => {
+    // Anything still in runtime.json belongs to a cockpit process that died
+    // without running shutdown(). Reaping AFTER listen() succeeds is what
+    // makes a second `npm start` on the same port harmless: it dies on
+    // EADDRINUSE before it can touch another instance's PIDs, rather than
+    // relying on the crash beating the kill by a second. (Entries owned by a
+    // cockpit that is still alive are skipped regardless - see child-tracker.)
+    tracker.reapOrphans().catch((err) => console.error(`orphan reap failed: ${String(err?.message || err)}`));
+
     const op = getOperatorToken();
     const url = `http://${HOST}:${PORT}/?op=${op}`;
     console.log(`prompt-cockpit listening on ${url}`);
@@ -262,7 +288,7 @@ if (isMain) {
       process.stdin.on('keypress', (str, key) => {
         // With raw mode on, this is the only Ctrl-C the process ever sees.
         if (key && key.ctrl && key.name === 'c') {
-          exitVia('keypress-ctrl-c');
+          exitNow('keypress-ctrl-c');
           return;
         }
         if (str === 'c') {

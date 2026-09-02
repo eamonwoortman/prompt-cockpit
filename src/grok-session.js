@@ -91,6 +91,17 @@ export function startGrokSession({
   let connection = null;
   const tracker = getChildTracker();
   let trackedPid = null;
+  // Idempotent: the agent dying on its own and an explicit close() both land
+  // here, in either order. Whichever is first drops the pid, so the second
+  // cannot decrement a ref count a second time - and an agent that exits by
+  // itself no longer leaves a stale entry in runtime.json for the rest of the
+  // cockpit's life.
+  function releaseTracked() {
+    if (trackedPid == null) return;
+    const pid = trackedPid;
+    trackedPid = null;
+    tracker.release({ pid }).catch(() => {});
+  }
   const pendingApprovals = new Map();
   let approvalSeq = 0;
   let promptTail = Promise.resolve();
@@ -137,9 +148,13 @@ export function startGrokSession({
       }
 
       proc?.on('exit', (code) => {
+        // fail() sets closed, which makes the later close() early-return - so
+        // without releasing here the entry outlived the process it describes.
+        releaseTracked();
         fail(new Error(`grok agent exited ${code}${connection.getStderr?.() ? `: ${connection.getStderr()}` : ''}`));
       });
       proc?.on('error', (err) => {
+        releaseTracked();
         fail(err);
       });
 
@@ -361,10 +376,7 @@ export function startGrokSession({
     } catch {
       // already dead
     }
-    if (trackedPid != null) {
-      tracker.release({ pid: trackedPid }).catch(() => {});
-      trackedPid = null;
-    }
+    releaseTracked();
     onStateChange('closed');
   }
 

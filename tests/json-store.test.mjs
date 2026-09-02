@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { readJson, readJsonChecked, writeJsonAtomic, updateJson } from '../src/json-store.js';
+import { readJson, readJsonChecked, writeJsonAtomic, updateJson, replaceJson } from '../src/json-store.js';
 
 async function makeTmpDir() {
   return mkdtemp(path.join(tmpdir(), 'cockpit-json-store-'));
@@ -136,6 +136,54 @@ test('a fallback factory is called per update, so two updates cannot share one m
     await updateJson(b, (list) => { list.push('b'); }, { fallback });
     assert.deepEqual(await readJson(a, []), ['a']);
     assert.deepEqual(await readJson(b, []), ['b']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// replaceJson: same per-path queue as updateJson, but the transform returns
+// the value to write. child-tracker.js's runtime.json needs both halves of
+// that difference - its payload is an array rebuilt wholesale from in-memory
+// state, and it must replace a file holding something else rather than refuse.
+test('replaceJson writes what the transform returns and reports a corrupt file instead of refusing', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const dest = path.join(dir, 'runtime.json');
+    await writeFile(dest, '{ not json', 'utf-8');
+    const seen = [];
+    const written = await replaceJson(dest, (value, corrupt) => {
+      seen.push({ value, corrupt });
+      return [{ pid: 1 }];
+    }, { fallback: () => [] });
+    assert.deepEqual(seen, [{ value: [], corrupt: true }]);
+    assert.deepEqual(written, [{ pid: 1 }]);
+    assert.deepEqual(await readJson(dest, []), [{ pid: 1 }]);
+
+    // A non-array file is replaceable too - there is nothing to mutate in
+    // place when the payload's whole shape is wrong.
+    await writeJsonAtomic(dest, { not: 'an array' });
+    await replaceJson(dest, () => [], { fallback: () => [] });
+    assert.deepEqual(await readJson(dest, []), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replaceJson and updateJson share one queue per path, so writes stay ordered and awaiting one is a full flush', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const dest = path.join(dir, 'runtime.json');
+    const order = [];
+    // Deliberately fire-and-forget, like child-tracker's retain/release
+    // persists, then await only the last one: json-store's queue is what
+    // makes that a complete flush of everything before it.
+    replaceJson(dest, () => { order.push('a'); return ['a']; }, { fallback: () => [] });
+    replaceJson(dest, () => { order.push('b'); return ['b']; }, { fallback: () => [] });
+    const last = replaceJson(dest, (prev) => { order.push('c'); return [...prev, 'c']; }, { fallback: () => [] });
+    await last;
+    assert.deepEqual(order, ['a', 'b', 'c'], 'in call order, not whichever rename won');
+    // 'c' saw 'b's write, which only holds if the reads are serialized too.
+    assert.deepEqual(await readJson(dest, []), ['b', 'c']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
