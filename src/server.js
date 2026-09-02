@@ -22,6 +22,8 @@ import { registerSystemRoutes } from './routes/system.js';
 import { registerSessionActionRoutes } from './routes/session-actions.js';
 import { serveStatic } from './static-files.js';
 import { checkOperatorToken, getOperatorToken } from './operator-auth.js';
+import { getChildTracker } from './child-tracker.js';
+import { createShutdown } from './shutdown.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
@@ -33,6 +35,12 @@ registerSessionRoutes(router);
 registerHistoryRoutes(router);
 registerSystemRoutes(router);
 registerSessionActionRoutes(router);
+
+// Process ownership for the Grok/Codex CLIs (child-tracker.js). Exported so
+// the auto-pilot supervisor can register its heartbeat stop via
+// shutdown.onBeforeClose, and so a test can drive teardown directly.
+const tracker = getChildTracker();
+const shutdown = createShutdown({ registry, tracker });
 
 const server = createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
@@ -189,7 +197,7 @@ wss.on('connection', (ws, req, id, since) => {
   });
 });
 
-export { server, PORT, HOST, seedSessionDefaults };
+export { server, PORT, HOST, seedSessionDefaults, shutdown, tracker };
 
 // Only auto-listen when run directly (`node src/server.js`), not when
 // imported by tests - lets tests bind an ephemeral port and drive the same
@@ -210,6 +218,37 @@ function copyToClipboard(text) {
 }
 
 if (isMain) {
+  // Anything still in runtime.json belongs to a cockpit process that died
+  // without running shutdown(). Reap before listening, so a pilot cannot
+  // fire into a working tree an orphan is still writing to.
+  tracker.reapOrphans().catch((err) => console.error(`orphan reap failed: ${String(err?.message || err)}`));
+
+  // Exits once, through shutdown(), whichever route got us here.
+  async function exitVia(reason) {
+    // Leaving the terminal in raw mode makes the shell unusable afterwards -
+    // and this has to happen BEFORE the await, not after, or a slow teardown
+    // leaves the user with a dead prompt for seconds.
+    if (process.stdin.isTTY) {
+      try { process.stdin.setRawMode(false); } catch { /* not a TTY any more */ }
+      process.stdin.pause();
+    }
+    try {
+      await shutdown.run(reason);
+    } catch (err) {
+      console.error(`shutdown failed: ${String(err?.message || err)}`);
+    }
+    process.exit(0);
+  }
+
+  // SIGTERM is not meaningfully deliverable on Windows; SIGBREAK is the
+  // closer analogue (Ctrl+Break, and what a console-window close sends).
+  // SIGINT is still registered because setRawMode(true) below only suppresses
+  // OS SIGINT delivery while stdin IS a TTY - piped/service invocations get
+  // the real signal.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK']) {
+    process.on(signal, () => { exitVia(signal); });
+  }
+
   server.listen(PORT, HOST, () => {
     const op = getOperatorToken();
     const url = `http://${HOST}:${PORT}/?op=${op}`;
@@ -221,8 +260,10 @@ if (isMain) {
       process.stdin.setRawMode(true);
       process.stdin.resume();
       process.stdin.on('keypress', (str, key) => {
+        // With raw mode on, this is the only Ctrl-C the process ever sees.
         if (key && key.ctrl && key.name === 'c') {
-          process.exit(0);
+          exitVia('keypress-ctrl-c');
+          return;
         }
         if (str === 'c') {
           copyToClipboard(url)
