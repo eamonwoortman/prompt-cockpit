@@ -17,7 +17,7 @@ export const ROTATE_BYTES = 2 * 1024 * 1024;
 
 // `carry-forward` is not one of the spec's outcome events - it is the
 // synthetic first line rotate() writes so dailyCostUsd survives a rotation.
-// It is excluded from tail()'s default view for the same reason.
+// It is included only when a pilotId filter is absent, since it belongs to no pilot.
 // Two events beyond the spec's seven, both deliberate additions rather than
 // overloading an existing one:
 //   `answered`      - a question the interceptor auto-answered. That run was
@@ -58,6 +58,8 @@ export function createAutopilotLog({
   filePath = defaultAutopilotLogPath(),
   now = () => Date.now(),
   rotateBytes = ROTATE_BYTES,
+  logger = console.error,
+  _testThrowOnRotate = false,
 } = {}) {
   // Serialize appends: two entries landing in the same tick must not
   // interleave partial lines.
@@ -90,6 +92,7 @@ export function createAutopilotLog({
   }
 
   async function rotateNow() {
+    if (_testThrowOnRotate) throw new Error('test rotation failure');
     let entries;
     try {
       entries = parseLines(await readFile(filePath, 'utf-8'));
@@ -145,11 +148,23 @@ export function createAutopilotLog({
         const record = { ts: entry.ts ?? now(), ...entry };
         // A rotation check BEFORE the write, so the carry-forward line is
         // never itself the thing that pushes the file over the threshold.
+        let fileSize;
         try {
-          const { size } = await stat(filePath);
-          if (size >= rotateBytes) await rotateNow();
+          const stat_result = await stat(filePath);
+          fileSize = stat_result.size;
         } catch {
           // missing file - nothing to rotate
+        }
+        if (fileSize >= rotateBytes) {
+          try {
+            await rotateNow();
+          } catch (err) {
+            // Log the failure but do not fail the append - losing a run-history
+            // entry is worse than a file that grew too big, and dailyCostUsd
+            // sums the whole live file, so an unrotated file still yields a
+            // correct spend total.
+            logger(`Failed to rotate auto-pilot log at ${filePath}: ${err.message}`);
+          }
         }
         await writeLine(record);
         return record;

@@ -147,3 +147,35 @@ test('append rotates automatically once the file passes rotateBytes', async () =
 test('the default rotate threshold is 2 MB', () => {
   assert.equal(ROTATE_BYTES, 2 * 1024 * 1024);
 });
+
+test('rotation failure is logged but does not fail append', async () => {
+  const { dir, filePath, log } = await makeLog({ now: () => 1_700_000_000_000, rotateBytes: 50, _testThrowOnRotate: true });
+  const logCalls = [];
+  const testLog = createAutopilotLog({
+    filePath,
+    now: () => 1_700_000_000_000,
+    rotateBytes: 50,
+    logger: (msg) => logCalls.push(msg),
+    _testThrowOnRotate: true,
+  });
+
+  try {
+    // First entry is small, doesn't trigger rotation
+    await testLog.append({ event: 'fired', pilotId: 'p1', pilotName: 'A' });
+
+    // Now fill the file to trigger rotation, which will fail
+    for (let i = 0; i < 5; i++) {
+      await testLog.append({ event: 'finished', pilotId: 'p1', pilotName: 'A', costUsd: 0.1 });
+    }
+
+    // Verify entries were written despite rotation failure
+    const entries = await testLog.tail({});
+    assert.ok(entries.length > 0, 'entries were appended despite rotation failure');
+
+    // Verify the rotation failure was logged
+    assert.ok(logCalls.length > 0, 'rotation failure was logged');
+    assert.ok(logCalls.some((msg) => msg.includes('Failed to rotate')), 'error message mentions rotation failure');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
