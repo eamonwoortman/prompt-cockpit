@@ -225,12 +225,18 @@ export function createChildTracker({
     return [...ownedEntries(), ...carried];
   }
 
-  // Is this file entry owned by a DIFFERENT cockpit process that is still
-  // running? Those must survive our writes untouched. Cheap sync existence
-  // probe only - persist() runs on every retain/release, so it cannot afford
-  // the async start-time probe reapOrphans() uses. A recycled owner pid
-  // therefore preserves a stale entry until the next boot, where reapOrphans'
-  // full verification adjudicates it for good.
+  // Is this file entry owned by a DIFFERENT cockpit process, adjudicated by
+  // neither of us? Those must survive our writes untouched, regardless of
+  // whether that owner is still alive right now. persist() runs on every
+  // retain/release and cannot afford reapOrphans()'s async start-time probe,
+  // but liveness isn't actually persist()'s call to make: if we dropped a
+  // foreign row the moment its owner's pid stopped responding, a cockpit that
+  // crashes between our boots would have its still-running, paid CLI erased
+  // from runtime.json with nothing having ever killed it - no future boot
+  // would even know to look (backlog.md, 2026-09-02). So a foreign row is
+  // preserved unconditionally here, exactly like a `carried` one, and left
+  // for the next boot's reapOrphans() - which DOES pay for full verification
+  // - to adjudicate for good.
   function belongsToAnotherInstance(entry) {
     const child = Number(entry?.pid);
     if (!Number.isInteger(child) || child <= 0) return false;
@@ -239,7 +245,7 @@ export function createChildTracker({
     // No ownerPid at all means a runtime.json written by an older cockpit
     // build: it must read as reapable, not as somebody's live process.
     if (!Number.isInteger(owner) || owner <= 0 || owner === ownerPid) return false;
-    return processExists(owner, probeDeps);
+    return true;
   }
 
   // Serialized read-modify-write via json-store, NOT the whole-file rewrite

@@ -454,6 +454,38 @@ test('reapOrphans leaves a still-running cockpit instance\'s CLIs alone, and doe
   }
 });
 
+test('persist preserves a foreign row whose owning cockpit has crashed, leaving it for the next boot to adjudicate', async () => {
+  const dir = await makeTmpDir();
+  try {
+    const runtimePath = path.join(dir, 'runtime.json');
+    await writeJsonAtomic(runtimePath, [
+      {
+        pid: 700, provider: 'grok', osStartedAt: 1_000, command: 'grok', pilotIds: ['pilot-f'],
+        ownerPid: 9200, ownerStartedAt: 1_000,
+      },
+    ]);
+    // Owner 9200 is dead - absent from `alive` entirely, and never probed via
+    // reapOrphans in this test - so belongsToAnotherInstance's OLD liveness
+    // check would have dropped this row the moment we persisted anything of
+    // our own. It must survive regardless, exactly like a carried row does.
+    const deps = fakeDeps({ startTimes: new Map([[701, 2_000]]), alive: new Set([701]) });
+    const tracker = createChildTracker({ runtimePath, ...deps, ownerPid: 9201 });
+
+    await tracker.retain({ pid: 701, provider: 'grok', command: 'grok' });
+    await tracker.settled();
+    assert.deepEqual((await readJson(runtimePath, [])).map((e) => e.pid).sort(), [700, 701]);
+
+    await tracker.release({ pid: 701 });
+    assert.deepEqual(
+      (await readJson(runtimePath, [])).map((e) => e.pid),
+      [700],
+      'the foreign row survives even once we have nothing else of our own left in the file',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('reapOrphans still reaps when the owning cockpit pid has been recycled by something else', async () => {
   const dir = await makeTmpDir();
   try {
