@@ -24,6 +24,17 @@ import { startCodexSession } from '../src/codex-session.js';
 import { createShutdown } from '../src/shutdown.js';
 import { readJson, writeJsonAtomic } from '../src/json-store.js';
 
+// Every test below builds its own createChildTracker with an explicit
+// runtimePath (withTracker, below), so the singleton's real-home default is
+// never actually reached today. This guards it anyway: codex-app-server.js
+// and codex-session.js both fall back to getChildTracker()'s singleton
+// whenever a caller omits an explicit tracker, and that singleton is built
+// once per process from whatever COCKPIT_RUNTIME_FILE was at the time -
+// belt and braces against a future test in this file forgetting to inject
+// one.
+const guardRuntimeDir = await mkdtemp(path.join(tmpdir(), 'cockpit-shutdown-integration-guard-'));
+process.env.COCKPIT_RUNTIME_FILE = path.join(guardRuntimeDir, 'runtime.json');
+
 // Every child this file starts, so a failed assertion cannot leave an idle
 // node process behind. Belt and braces: each test also cleans up in a
 // finally, and this sweeps whatever a throw skipped.
@@ -49,6 +60,7 @@ function killChildren() {
 }
 
 after(killChildren);
+after(() => rm(guardRuntimeDir, { recursive: true, force: true }));
 
 function hasExited(proc) {
   return proc.exitCode !== null || proc.signalCode !== null;

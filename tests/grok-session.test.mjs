@@ -1,7 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { startGrokSession, rewindGrokSession } from '../src/grok-session.js';
+
+// startGrokSession() falls back to getChildTracker()'s real singleton
+// whenever no tracker is injected (there is no override point here at all -
+// see child-tracker.js). Today's fake `proc`s below are plain EventEmitters
+// with no `.pid`, so retain() never actually fires and nothing persists -
+// but that is an accident of the current fakes, not a guarantee, so this
+// guards it the same way tests/codex-app-server.test.mjs does.
+process.env.COCKPIT_RUNTIME_FILE = path.join(await mkdtemp(path.join(tmpdir(), 'cockpit-grok-session-runtime-')), 'runtime.json');
 
 function flush() {
   return new Promise((resolve) => setImmediate(resolve));

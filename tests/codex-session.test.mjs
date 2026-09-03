@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { startCodexSession } from '../src/codex-session.js';
+
+// Every test below passes its own fake `manager`, so codex-session.js's
+// `manager = getCodexAppServerManager()` default (which falls back to
+// getChildTracker()'s real singleton) is never actually reached today - this
+// guards it anyway, same reasoning as tests/grok-session.test.mjs and
+// tests/codex-app-server.test.mjs.
+process.env.COCKPIT_RUNTIME_FILE = path.join(await mkdtemp(path.join(tmpdir(), 'cockpit-codex-session-runtime-')), 'runtime.json');
 
 function createManager() {
   const calls = [];

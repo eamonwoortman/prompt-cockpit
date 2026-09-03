@@ -16,6 +16,14 @@ import {
   _resetCodexAppServerManager,
 } from '../src/codex-app-server.js';
 
+// createCodexAppServerManager()/getCodexAppServerManager() default to
+// getChildTracker()'s real singleton whenever a test omits `tracker`, as
+// most below do - this file is exactly the case the module comment on
+// COCKPIT_RUNTIME_FILE calls out: today's fake `proc`s have no `.pid`, so
+// nothing actually persists, but the first one that grows one would write
+// straight into the developer's real ~/.prompt-cockpit/runtime.json.
+process.env.COCKPIT_RUNTIME_FILE = path.join(await mkdtemp(path.join(tmpdir(), 'cockpit-codex-app-server-runtime-')), 'runtime.json');
+
 function fakeConnection() {
   const proc = new EventEmitter();
   let rejectPending;

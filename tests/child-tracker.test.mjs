@@ -93,6 +93,24 @@ test('COCKPIT_RUNTIME_FILE overrides the path, so a test can never killTracked()
   }
 });
 
+test('getChildTracker resolves the override, not the real-home default, when COCKPIT_RUNTIME_FILE is set', () => {
+  const before = process.env.COCKPIT_RUNTIME_FILE;
+  try {
+    process.env.COCKPIT_RUNTIME_FILE = path.join(tmpdir(), 'cockpit-child-tracker-getter-test', 'runtime.json');
+    _resetChildTracker();
+    const tracker = getChildTracker();
+    assert.equal(tracker.runtimePath, process.env.COCKPIT_RUNTIME_FILE);
+    // defaultRuntimePath(homedir()) passes an explicit home, so it always
+    // names the real ~/.prompt-cockpit/runtime.json regardless of the env
+    // override - the value the singleton must NOT have resolved to.
+    assert.notEqual(tracker.runtimePath, defaultRuntimePath(homedir()));
+  } finally {
+    if (before === undefined) delete process.env.COCKPIT_RUNTIME_FILE;
+    else process.env.COCKPIT_RUNTIME_FILE = before;
+    _resetChildTracker();
+  }
+});
+
 test('retain records the OS-reported start time and persists the entry', async () => {
   const dir = await makeTmpDir();
   try {
