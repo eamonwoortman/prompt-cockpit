@@ -2,7 +2,7 @@
 // spawns a CLI, opens a socket, or reads the real ~/.prompt-cockpit.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createAutopilot, HEARTBEAT_MS } from '../src/autopilot.js';
@@ -97,7 +97,10 @@ const availableProviders = {
   }),
 };
 
-async function harness({ nowMs = 1_000_000, providers = availableProviders, spawnImpl } = {}) {
+async function harness({
+  nowMs = 1_000_000, providers = availableProviders, spawnImpl,
+  providerProbeTimeoutMs, platform, spawnSyncImpl, killImpl,
+} = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'cockpit-autopilot-'));
   let clock = nowMs;
   let n = 0;
@@ -112,6 +115,10 @@ async function harness({ nowMs = 1_000_000, providers = availableProviders, spaw
     clearIntervalImpl: () => {},
     spawnImpl,
     logImpl: () => {},
+    ...(providerProbeTimeoutMs !== undefined ? { providerProbeTimeoutMs } : {}),
+    ...(platform !== undefined ? { platform } : {}),
+    ...(spawnSyncImpl !== undefined ? { spawnSyncImpl } : {}),
+    ...(killImpl !== undefined ? { killImpl } : {}),
   });
   return {
     dir, store, log, registry, tracker, supervisor,
@@ -496,6 +503,347 @@ test('a createSession failure records an errored run immediately instead of spaw
     assert.equal(after.lastRunAt, h.now(), 'lastRunAt stamped, so the next heartbeat is not another attempt');
     const errored = (await h.log.tail({})).filter((e) => e.event === 'errored');
     assert.match(errored[0].reason, /no such directory/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// --- Round 1 findings -------------------------------------------------
+
+test('C1: two overlapping runNow calls for the same pilot fire at most once (the lock is reserved synchronously, not after the provider probe)', async () => {
+  const resolvers = [];
+  const providers = {
+    getProvider: (id) => ({
+      id, label: id, efforts: ['low'],
+      isAvailable: () => new Promise((resolve) => resolvers.push(resolve)),
+    }),
+  };
+  const h = await harness({ providers });
+  try {
+    const p = await h.store.createPilot(pilotInput());
+
+    const call1 = h.supervisor.runNow(p.id);
+    const call2 = h.supervisor.runNow(p.id);
+
+    // Wait until BOTH calls have reached the provider probe before releasing
+    // either one - this is the exact race window C1 closes.
+    while (resolvers.length < 2) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    resolvers.forEach((resolve) => resolve(true));
+
+    const results = await Promise.all([call1, call2]);
+    const fired = results.filter((r) => r.fired);
+    const blocked = results.filter((r) => !r.fired);
+    assert.equal(fired.length, 1, 'exactly one of the two overlapping calls may fire');
+    assert.equal(blocked.length, 1);
+    assert.match(blocked[0].reason, /already running/i);
+    assert.equal(h.registry.created.length, 1, 'only one session was ever created');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I2: a gate whose spawnImpl throws synchronously skips without touching a real process', async () => {
+  const spawnImpl = () => { throw new Error('spawn ENOENT'); };
+  const h = await harness({ spawnImpl });
+  try {
+    await h.store.createPilot(pilotInput({ gate: { command: 'nonexistent-cmd', timeoutMs: 1000 } }));
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 0);
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
+    assert.match(skips[0].reason, /run gate failed to start/i);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("I2: a gate process that emits 'error' instead of exiting skips with that error, not a hang", async () => {
+  const spawnImpl = () => {
+    const listeners = {};
+    return {
+      pid: 99,
+      stdout: { on: () => {} },
+      stderr: { on: () => {} },
+      on: (event, fn) => {
+        listeners[event] = fn;
+        if (event === 'error') setTimeout(() => listeners.error?.(new Error('spawn EACCES')), 0);
+      },
+      kill: () => {},
+    };
+  };
+  const h = await harness({ spawnImpl });
+  try {
+    await h.store.createPilot(pilotInput({ gate: { command: 'blocked-cmd', timeoutMs: 1000 } }));
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 0);
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
+    assert.match(skips[0].reason, /run gate failed:/i);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I2/I3: a gate that times out on Windows is killed via the injected killProcessTree dependencies, not the real OS', async () => {
+  const spawnSyncCalls = [];
+  const spawnImpl = () => ({
+    pid: 555,
+    stdout: { on: () => {} },
+    stderr: { on: () => {} },
+    on: () => {}, // never emits exit/error - this gate hangs forever
+    kill: () => {},
+  });
+  const spawnSyncImpl = (cmd, args, opts) => {
+    spawnSyncCalls.push({ cmd, args, opts });
+    return { status: 0 };
+  };
+  const h = await harness({
+    spawnImpl, platform: 'win32', spawnSyncImpl, killImpl: () => { throw new Error('must not call the real killImpl on win32'); },
+  });
+  try {
+    await h.store.createPilot(pilotInput({ gate: { command: 'sleep forever', timeoutMs: 1000 } }));
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 0);
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
+    assert.match(skips[0].reason, /timed out/i);
+    assert.equal(spawnSyncCalls.length, 1, 'the timeout kill went through the injected spawnSyncImpl, not a real taskkill');
+    assert.equal(spawnSyncCalls[0].cmd, 'taskkill');
+    assert.ok(spawnSyncCalls[0].args.includes('555'));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I3: a gate that times out on POSIX is killed as a process GROUP via the injected killImpl, not just the shell pid', async () => {
+  const killCalls = [];
+  const spawnImpl = () => ({
+    pid: 777,
+    stdout: { on: () => {} },
+    stderr: { on: () => {} },
+    on: () => {}, // never emits exit/error - this gate hangs forever
+    kill: () => {},
+  });
+  const killImpl = (pid, signal) => { killCalls.push({ pid, signal }); };
+  const h = await harness({ spawnImpl, platform: 'linux', killImpl });
+  try {
+    await h.store.createPilot(pilotInput({ gate: { command: 'sleep forever', timeoutMs: 1000 } }));
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 0);
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
+    assert.match(skips[0].reason, /timed out/i);
+    assert.equal(killCalls.length, 1);
+    assert.equal(killCalls[0].pid, -777, 'a negative pid signals the whole process GROUP, not just the shell');
+    assert.equal(killCalls[0].signal, 'SIGKILL');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I4: a malformed pilot record (missing schedule) is skipped without crashing the heartbeat for the pilots after it', async () => {
+  const h = await harness();
+  try {
+    const good = await h.store.createPilot(pilotInput({ name: 'Good' }));
+    const raw = JSON.parse(await readFile(h.store.filePath, 'utf8'));
+    raw.pilots.unshift({
+      id: 'p-bad', name: 'Bad', enabled: true, cwd: '/repo', provider: 'claude',
+      mode: 'acceptEdits', prompt: 'do the thing', lastRunAt: null, consecutiveFailures: 0,
+      // `schedule` is deliberately absent - a hand-edited or partially-migrated record.
+    });
+    await writeFile(h.store.filePath, JSON.stringify(raw));
+
+    await h.supervisor.tick();
+
+    assert.equal(h.registry.created.length, 1, 'the well-formed pilot after the malformed one still fires');
+    assert.equal(h.registry.created[0].name, 'Good');
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped' && e.pilotId === 'p-bad');
+    assert.equal(skips.length, 1, 'the malformed record is logged once, not once per heartbeat');
+
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick();
+    const skipsAfter = (await h.log.tail({})).filter((e) => e.event === 'skipped' && e.pilotId === 'p-bad');
+    assert.equal(skipsAfter.length, 1, 'still deduped on the next heartbeat');
+    void good;
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I5: a createSession failure stamps lastRunAt even when the log append itself fails', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    h.registry.failCreateWith = new Error('no such directory');
+    const originalAppend = h.log.append.bind(h.log);
+    h.log.append = async (entry) => {
+      if (entry.event === 'errored') throw new Error('disk full');
+      return originalAppend(entry);
+    };
+
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.lastOutcome, 'errored');
+    assert.equal(after.lastRunAt, h.now(), 'the store write is the safety property and must not depend on the log append succeeding');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I5: a fired-event log append failure does not stop the prompt from being sent', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput());
+    const originalAppend = h.log.append.bind(h.log);
+    h.log.append = async (entry) => {
+      if (entry.event === 'fired') throw new Error('disk full');
+      return originalAppend(entry);
+    };
+
+    await h.supervisor.tick();
+
+    assert.equal(h.registry.created.length, 1, 'the session was still created despite the log write failing');
+    assert.deepEqual(h.registry.inputs, [{ id: 's-1', text: 'do the thing' }]);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I6: a stop()/start() cycle does not drop the removal listener - a run finishing after restart is still recorded', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 1);
+
+    await h.supervisor.stop();
+    h.supervisor.start();
+
+    h.registry.emitRemoved('s-1', 'closed');
+    await h.supervisor.drain();
+
+    assert.deepEqual(h.supervisor.status(), [], 'the in-memory lock was cleared after the session was removed post-restart');
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.lastOutcome, 'closed-externally', 'the terminal outcome was recorded even though removal happened after a stop()/start() cycle');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I7: drain() awaits a promise added DURING the drain, not just a snapshot taken at call time', async () => {
+  const h = await harness();
+  try {
+    const pilotA = await h.store.createPilot(pilotInput({ name: 'A' }));
+    const pilotB = await h.store.createPilot(pilotInput({ name: 'B' }));
+    await h.supervisor.tick(); // fires A
+    await h.supervisor.tick(); // fires B (default maxConcurrentRuns is 2)
+    assert.equal(h.registry.created.length, 2);
+
+    const sessionFor = (name) => [...h.registry.rows.values()].find((r) => r.name === name)?.id;
+    const sessionA = sessionFor('A');
+    const sessionB = sessionFor('B');
+
+    let chained = false;
+    const originalRecordRun = h.store.recordRun.bind(h.store);
+    h.store.recordRun = async (pilotId, patch) => {
+      const result = await originalRecordRun(pilotId, patch);
+      if (pilotId === pilotA.id && !chained) {
+        chained = true;
+        // While A's outcome is still being recorded, B's session is removed too -
+        // this is what adds a NEW promise to `pending` mid-drain.
+        h.registry.emitRemoved(sessionB, 'closed');
+      }
+      return result;
+    };
+
+    h.registry.emitRemoved(sessionA, 'closed');
+    await h.supervisor.drain();
+
+    const afterB = await h.store.getPilot(pilotB.id);
+    assert.equal(afterB.lastOutcome, 'closed-externally', 'drain() must not return before a run added mid-drain also finishes');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('M8: a gate whose failing output changes on every run still dedupes to one skip line', async () => {
+  let n = 0;
+  const spawnImpl = () => {
+    n += 1;
+    const out = `nothing to do - build ${Date.now()}-${n}\n`; // different text every call
+    const listeners = {};
+    return {
+      pid: 4242,
+      stdout: { on: (_e, fn) => fn(Buffer.from(out)) },
+      stderr: { on: () => {} },
+      on: (event, fn) => { listeners[event] = fn; setTimeout(() => listeners.exit?.(1), 0); },
+      kill: () => {},
+    };
+  };
+  const h = await harness({ spawnImpl });
+  try {
+    await h.store.createPilot(pilotInput({ gate: { command: 'git status', timeoutMs: 5000 } }));
+    await h.supervisor.tick();
+    await h.supervisor.tick();
+    await h.supervisor.tick();
+
+    assert.equal(h.registry.created.length, 0);
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
+    assert.equal(skips.length, 1, 'a gate whose stdout embeds a changing value must dedupe by KIND, not by exact text');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('M11: a provider probe that never resolves is bounded by a timeout and treated as unavailable', async () => {
+  const providers = {
+    getProvider: (id) => ({ id, label: id, efforts: ['low'], isAvailable: () => new Promise(() => {}) }),
+  };
+  const h = await harness({ providers, providerProbeTimeoutMs: 20 });
+  try {
+    await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 0, 'a probe that never resolves must not wedge the heartbeat');
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
+    assert.match(skips[0].reason, /not available/i);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('M12: a rate-limited pilot never probes provider availability at all (the free checks run first)', async () => {
+  let probeCalls = 0;
+  const providers = {
+    getProvider: (id) => ({ id, label: id, efforts: ['low'], isAvailable: async () => { probeCalls += 1; return true; } }),
+  };
+  const h = await harness({ providers });
+  try {
+    await h.store.createPilot(pilotInput());
+    h.registry.rows.set('other', {
+      id: 'other', provider: 'claude',
+      rateLimitHit: { resetsAt: h.now() + 60 * MIN, rateLimitType: 'five_hour' },
+    });
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 0);
+    assert.equal(probeCalls, 0, 'a rate-limited pilot must not probe provider availability at all');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('M12: a spend-capped pilot never probes provider availability either', async () => {
+  let probeCalls = 0;
+  const providers = {
+    getProvider: (id) => ({ id, label: id, efforts: ['low'], isAvailable: async () => { probeCalls += 1; return true; } }),
+  };
+  const h = await harness({ providers });
+  try {
+    await h.store.updateSettings({ dailyCostCapUsd: 1 });
+    await h.store.createPilot(pilotInput());
+    await h.log.append({ event: 'finished', pilotId: 'x', pilotName: 'x', costUsd: 5, ts: h.now() });
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 0);
+    assert.equal(probeCalls, 0, 'a spend-capped pilot must not probe provider availability at all');
   } finally {
     await h.cleanup();
   }
