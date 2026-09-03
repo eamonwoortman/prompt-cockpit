@@ -1137,3 +1137,78 @@ test('a crash after a rate-limit hit disarms auto-continue instead of resurrecti
   assert.equal((impl.allInputs || []).length, inputsBefore);
   assert.equal(row.state, 'error');
 });
+
+test('setSessionRemovedListener fires with reason "closed" for an explicit close', () => {
+  registry._reset();
+  const seen = [];
+  registry.setSessionRemovedListener((e) => seen.push(e));
+  try {
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+    registry.closeSession(row.id);
+    assert.deepEqual(seen, [{ id: row.id, reason: 'closed' }]);
+    // Already gone - a second close must not fire it again.
+    registry.closeSession(row.id);
+    assert.equal(seen.length, 1);
+  } finally {
+    registry._reset();
+  }
+});
+
+test('setSessionRemovedListener fires with reason "closed" when the handle ends on its own', () => {
+  registry._reset();
+  const seen = [];
+  registry.setSessionRemovedListener((e) => seen.push(e));
+  try {
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    impl.emitState('closed');
+    assert.deepEqual(seen, [{ id: row.id, reason: 'closed' }]);
+  } finally {
+    registry._reset();
+  }
+});
+
+test('setSessionRemovedListener fires with reason "error" for both error paths', () => {
+  registry._reset();
+  const seen = [];
+  registry.setSessionRemovedListener((e) => seen.push(e));
+  try {
+    const viaState = fakeStartSession();
+    const a = registry.createSession({ cwd: '/tmp', name: 'A', startSessionImpl: viaState });
+    viaState.emitState('error');
+
+    const viaError = fakeStartSession();
+    const b = registry.createSession({ cwd: '/tmp', name: 'B', startSessionImpl: viaError });
+    viaError.emitError(new Error('CLI died'));
+
+    assert.deepEqual(seen, [
+      { id: a.id, reason: 'error' },
+      { id: b.id, reason: 'error' },
+    ]);
+  } finally {
+    registry._reset();
+  }
+});
+
+test('a throwing session-removed listener does not break session teardown', () => {
+  registry._reset();
+  registry.setSessionRemovedListener(() => { throw new Error('listener blew up'); });
+  try {
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+    assert.equal(registry.closeSession(row.id), true);
+    assert.equal(registry.get(row.id), undefined);
+  } finally {
+    registry._reset();
+  }
+});
+
+test('_reset clears the session-removed listener so test files cannot leak one', () => {
+  registry._reset();
+  const seen = [];
+  registry.setSessionRemovedListener((e) => seen.push(e));
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+  registry.closeSession(row.id);
+  assert.deepEqual(seen, []);
+  registry._reset();
+});

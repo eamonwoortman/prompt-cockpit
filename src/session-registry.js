@@ -35,6 +35,31 @@ import { getProvider, parseProvider, CLAUDE_EFFORTS, GROK_EFFORTS } from './prov
 import { createDelegation } from './delegation.js';
 const sessions = new Map();
 
+// Auto-pilot's terminal-outcome classifier (src/autopilot.js). Rows leave
+// `sessions` through THREE paths and only one of them is completion:
+// setState's 'closed'/'error' reap, handleError's own reap, and closeSession
+// (the supervisor's completion path, the DELETE route, and the user's "Close
+// session" button). A supervisor that can only test "is the row gone?" cannot
+// tell them apart - so on a crash or a human close it never stamps lastRunAt,
+// the pilot is due and lock-free on the very next heartbeat, and a session
+// dying at startup becomes a 15-second spawn loop.
+let sessionRemovedListener = null;
+
+export function setSessionRemovedListener(fn) {
+  sessionRemovedListener = typeof fn === 'function' ? fn : null;
+}
+
+// The single place a row is dropped. `reason` is 'closed' or 'error'.
+function removeSession(id, reason) {
+  if (!sessions.delete(id)) return false;
+  try {
+    sessionRemovedListener?.({ id, reason });
+  } catch (err) {
+    console.error(`session-removed listener failed for ${id}:`, err);
+  }
+  return true;
+}
+
 // Cross-session delegation (handshake trust + `/ask`) lives in delegation.js
 // now - see that module's own comment for why it takes these as constructor
 // params instead of importing this module back (would be a cycle).
@@ -344,14 +369,17 @@ export function closeSession(id) {
   // before the row disappears.
   delegation.failPendingDelegations(row, 'the target session was closed before it replied');
   row.handle.close();
-  sessions.delete(id);
+  removeSession(id, 'closed');
   return true;
 }
 
 // Test-only: drop all rows so test files don't leak state into each other
-// via this module's singleton map.
+// via this module's singleton map. Also drops the process-global listener,
+// for the same reason - a listener registered by one test file would
+// otherwise keep firing for every other file's sessions.
 export function _reset() {
   sessions.clear();
+  sessionRemovedListener = null;
 }
 
 export function list() {
@@ -786,7 +814,7 @@ function setState(id, state) {
   // connected client has already been told via the broadcastSummary above -
   // the handle is dead either way, so there's nothing left a manual close
   // would additionally have done.
-  if (state === 'closed' || state === 'error') sessions.delete(id);
+  if (state === 'closed' || state === 'error') removeSession(id, state === 'error' ? 'error' : 'closed');
 }
 
 function handleMessage(id, message) {
@@ -1426,8 +1454,8 @@ function handleError(id, err) {
   broadcast(id, { type: 'cockpit:error', error: String((err && err.stack) || err) });
   // Same reap as setState's 'error'/'closed' branch - this path sets
   // row.state directly instead of going through setState, so it needs its
-  // own sessions.delete once the error has been broadcast.
-  sessions.delete(id);
+  // own removeSession once the error has been broadcast.
+  removeSession(id, 'error');
 }
 
 function broadcastSummary(id) {
