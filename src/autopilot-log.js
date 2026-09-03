@@ -59,7 +59,8 @@ export function createAutopilotLog({
   now = () => Date.now(),
   rotateBytes = ROTATE_BYTES,
   logger = console.error,
-  _testThrowOnRotate = false,
+  renameImpl = rename,
+  writeFileImpl = writeFile,
 } = {}) {
   // Serialize appends: two entries landing in the same tick must not
   // interleave partial lines.
@@ -92,7 +93,6 @@ export function createAutopilotLog({
   }
 
   async function rotateNow() {
-    if (_testThrowOnRotate) throw new Error('test rotation failure');
     let entries;
     try {
       entries = parseLines(await readFile(filePath, 'utf-8'));
@@ -108,15 +108,15 @@ export function createAutopilotLog({
     // file is JSONL and has no json-store helper to reuse.
     const previous = `${filePath}.1`;
     try {
-      await rename(filePath, previous);
+      await renameImpl(filePath, previous);
     } catch (err) {
       if (process.platform !== 'win32') throw err;
       await unlink(previous).catch(() => {});
-      await rename(filePath, previous);
+      await renameImpl(filePath, previous);
     }
     // One generation only. The live file starts with the day's running total
     // so the spend cap does not reset just because the log got long.
-    await writeFile(filePath, `${JSON.stringify({
+    await writeFileImpl(filePath, `${JSON.stringify({
       ts: at,
       event: 'carry-forward',
       pilotId: null,
@@ -150,8 +150,8 @@ export function createAutopilotLog({
         // never itself the thing that pushes the file over the threshold.
         let fileSize;
         try {
-          const stat_result = await stat(filePath);
-          fileSize = stat_result.size;
+          const statResult = await stat(filePath);
+          fileSize = statResult.size;
         } catch {
           // missing file - nothing to rotate
         }

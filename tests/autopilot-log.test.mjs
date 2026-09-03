@@ -4,7 +4,7 @@
 // file or the cap silently resets mid-day.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, appendFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, appendFile, rm, stat, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createAutopilotLog, defaultAutopilotLogPath, ROTATE_BYTES } from '../src/autopilot-log.js';
@@ -149,14 +149,17 @@ test('the default rotate threshold is 2 MB', () => {
 });
 
 test('rotation failure is logged but does not fail append', async () => {
-  const { dir, filePath, log } = await makeLog({ now: () => 1_700_000_000_000, rotateBytes: 50, _testThrowOnRotate: true });
+  const dir = await mkdtemp(path.join(tmpdir(), 'cockpit-autopilot-log-'));
+  const filePath = path.join(dir, 'autopilot-log.jsonl');
   const logCalls = [];
   const testLog = createAutopilotLog({
     filePath,
     now: () => 1_700_000_000_000,
     rotateBytes: 50,
     logger: (msg) => logCalls.push(msg),
-    _testThrowOnRotate: true,
+    renameImpl: async () => {
+      throw new Error('rename failed');
+    },
   });
 
   try {
@@ -175,6 +178,54 @@ test('rotation failure is logged but does not fail append', async () => {
     // Verify the rotation failure was logged
     assert.ok(logCalls.length > 0, 'rotation failure was logged');
     assert.ok(logCalls.some((msg) => msg.includes('Failed to rotate')), 'error message mentions rotation failure');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rotation retries rename on Windows when first attempt fails', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cockpit-autopilot-log-'));
+  const filePath = path.join(dir, 'autopilot-log.jsonl');
+  let renameCalls = 0;
+  const logCalls = [];
+  const testLog = createAutopilotLog({
+    filePath,
+    now: () => 1_700_000_000_000,
+    rotateBytes: 50,
+    logger: (msg) => logCalls.push(msg),
+    renameImpl: async (src, dst) => {
+      renameCalls++;
+      // First call fails (simulating Windows conflict), second succeeds
+      if (renameCalls === 1) {
+        const err = new Error('EEXIST: file already exists');
+        err.code = 'EEXIST';
+        throw err;
+      }
+      // Second call succeeds
+      return rename(src, dst);
+    },
+  });
+
+  try {
+    // First entry is small, doesn't trigger rotation
+    await testLog.append({ event: 'fired', pilotId: 'p1', pilotName: 'A' });
+
+    // Now fill the file to trigger rotation
+    for (let i = 0; i < 5; i++) {
+      await testLog.append({ event: 'finished', pilotId: 'p1', pilotName: 'A', costUsd: 0.1 });
+    }
+
+    // Verify the retry path was taken: rename should have been called twice
+    // (once failed, once succeeded on the second rotation attempt or retry)
+    assert.ok(renameCalls >= 2, `expected rename to be retried, got ${renameCalls} calls`);
+
+    // Verify rotation eventually succeeded: entries should be present
+    const entries = await testLog.tail({});
+    assert.ok(entries.length > 0, 'entries were appended after rotation retry');
+
+    // Verify no error was logged (the retry should have succeeded)
+    const failureLogged = logCalls.some((msg) => msg.includes('Failed to rotate'));
+    assert.ok(!failureLogged, 'rotation succeeded after retry, no error logged');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
