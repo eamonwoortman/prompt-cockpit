@@ -183,7 +183,7 @@ test('rotation failure is logged but does not fail append', async () => {
   }
 });
 
-test('rotation retries rename on Windows when first attempt fails', async () => {
+test('on Windows platform, rotation retries rename when first attempt fails', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'cockpit-autopilot-log-'));
   const filePath = path.join(dir, 'autopilot-log.jsonl');
   let renameCalls = 0;
@@ -193,6 +193,7 @@ test('rotation retries rename on Windows when first attempt fails', async () => 
     now: () => 1_700_000_000_000,
     rotateBytes: 50,
     logger: (msg) => logCalls.push(msg),
+    platform: 'win32',
     renameImpl: async (src, dst) => {
       renameCalls++;
       // First call fails (simulating Windows conflict), second succeeds
@@ -216,7 +217,7 @@ test('rotation retries rename on Windows when first attempt fails', async () => 
     }
 
     // Verify the retry path was taken: rename should have been called twice
-    // (once failed, once succeeded on the second rotation attempt or retry)
+    // (once failed, once succeeded after unlink)
     assert.ok(renameCalls >= 2, `expected rename to be retried, got ${renameCalls} calls`);
 
     // Verify rotation eventually succeeded: entries should be present
@@ -226,6 +227,47 @@ test('rotation retries rename on Windows when first attempt fails', async () => 
     // Verify no error was logged (the retry should have succeeded)
     const failureLogged = logCalls.some((msg) => msg.includes('Failed to rotate'));
     assert.ok(!failureLogged, 'rotation succeeded after retry, no error logged');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('on non-Windows platform, rotation rethrows rename failure immediately', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cockpit-autopilot-log-'));
+  const filePath = path.join(dir, 'autopilot-log.jsonl');
+  let renameCalls = 0;
+  const logCalls = [];
+  const testLog = createAutopilotLog({
+    filePath,
+    now: () => 1_700_000_000_000,
+    rotateBytes: 50,
+    logger: (msg) => logCalls.push(msg),
+    platform: 'linux',
+    renameImpl: async (src, dst) => {
+      renameCalls++;
+      // Always fail on every call (simulating consistent rename failure on Linux)
+      const err = new Error('EEXIST: file already exists');
+      err.code = 'EEXIST';
+      throw err;
+    },
+  });
+
+  try {
+    // First entry is small, doesn't trigger rotation
+    await testLog.append({ event: 'fired', pilotId: 'p1', pilotName: 'A' });
+
+    // Second append is large enough to trigger rotation, which will fail
+    // (this is the first rotation attempt, should rethrow on Linux)
+    await testLog.append({ event: 'finished', pilotId: 'p1', pilotName: 'A', costUsd: 0.1, durationMs: 123_456 });
+
+    // Verify rename was called exactly once (no retry on Linux, just rethrow)
+    assert.equal(renameCalls, 1, `expected rename called once on Linux, got ${renameCalls} calls`);
+
+    // Verify rotation failure was logged (non-Windows rethrows immediately)
+    const entries = await testLog.tail({});
+    assert.ok(entries.length >= 2, 'both entries were appended despite rotation failure');
+    const failureLogged = logCalls.some((msg) => msg.includes('Failed to rotate'));
+    assert.ok(failureLogged, 'rotation failure was logged on non-Windows platform');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -61,6 +61,7 @@ export function createAutopilotLog({
   logger = console.error,
   renameImpl = rename,
   writeFileImpl = writeFile,
+  platform = process.platform,
 } = {}) {
   // Serialize appends: two entries landing in the same tick must not
   // interleave partial lines.
@@ -110,7 +111,7 @@ export function createAutopilotLog({
     try {
       await renameImpl(filePath, previous);
     } catch (err) {
-      if (process.platform !== 'win32') throw err;
+      if (platform !== 'win32') throw err;
       await unlink(previous).catch(() => {});
       await renameImpl(filePath, previous);
     }
