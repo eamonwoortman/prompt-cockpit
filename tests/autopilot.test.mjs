@@ -968,6 +968,62 @@ test('Critical-1: a session that dies during the attachPilot await does not resu
   }
 });
 
+// Parked residual from the final scoped re-review, picked up here: the bail
+// above checks that SOME reservation exists, not that it is still THIS
+// firing's. A run-now landing in the gap left by onSessionRemoved claims a
+// fresh one for the same pilot, and the earlier firing then stamps its own
+// dead session's bookkeeping onto it and prompts a row that no longer exists.
+test('Critical-1 follow-up: a firing whose session died mid-attach does not stamp itself onto a DIFFERENT reservation claimed in the gap', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput());
+    const originalCreateSession = h.registry.createSession;
+    // Codex assigns trackedPid synchronously, so force a non-null pid to
+    // reach the attachPilot await this race lives in - same reason as above.
+    h.registry.createSession = (opts) => {
+      const row = originalCreateSession(opts);
+      row.handle.trackedPid = 4242;
+      return row;
+    };
+    h.supervisor.start();
+
+    let attachCalls = 0;
+    h.tracker.attachPilot = async () => {
+      attachCalls += 1;
+      if (attachCalls > 1) return; // the second firing attaches cleanly
+      // s-1 dies while this await is in flight: onSessionRemoved deletes the
+      // first firing's reservation synchronously...
+      h.registry.emitRemoved('s-1', 'error');
+      // ...and a run-now lands in the gap it left, claiming a reservation of
+      // its own for the same pilot and running all the way to its prompt.
+      await h.supervisor.runNow('p-1');
+    };
+
+    await h.supervisor.runNow('p-1');
+
+    assert.deepEqual(
+      h.registry.inputs,
+      [{ id: 's-2', text: 'do the thing' }],
+      'only the live session was prompted - the dead s-1 was not, and s-2 was not prompted twice',
+    );
+    const fired = (await h.log.tail({})).filter((e) => e.event === 'fired');
+    assert.deepEqual(
+      fired.map((e) => e.sessionId),
+      ['s-2'],
+      'no fired event was recorded for a session that had already been removed',
+    );
+    assert.deepEqual(
+      h.supervisor.status().map((r) => ({ sessionId: r.sessionId, blocked: r.blocked })),
+      [{ sessionId: 's-2', blocked: false }],
+      'the surviving reservation is the second firing\'s own, still tracking s-2',
+    );
+    assert.equal(attachCalls, 2, 'both firings reached attachPilot - the race actually happened');
+  } finally {
+    await h.supervisor.drain();
+    await h.cleanup();
+  }
+});
+
 test('Important-2: the provider-probe timeout is driven by the injected timer, not a real delay', async () => {
   const timeoutCalls = [];
   const clearedCalls = [];

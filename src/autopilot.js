@@ -548,8 +548,16 @@ export function createAutopilot({
     // reservation in place instead of replacing it, and bail without
     // resending the prompt or logging a 'fired' event for a session that is
     // already gone - `onSessionRemoved` already recorded its real outcome.
+    //
+    // Scoped re-review residual, fixed here: existence is not enough, it has
+    // to be THIS firing's reservation. `onSessionRemoved` deleting the one
+    // claimed above frees the lock synchronously, so a run-now (or the next
+    // heartbeat) can claim a fresh reservation for the same pilot inside the
+    // remaining gap and stamp its own sessionId onto it. Matching on identity
+    // rather than presence is what stops this firing from overwriting that
+    // newer run's bookkeeping and then prompting its own dead row.
     const live = runs.get(pilot.id);
-    if (!live) return row;
+    if (!live || live.sessionId !== row.id) return row;
     live.trackedPid = pid;
     live.startedAt = now();
     live.lastProgressAt = now();
