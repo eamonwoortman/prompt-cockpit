@@ -9,8 +9,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // No Node-specific imports; shared verbatim with the browser rather than
 // duplicated into public/. permissions.js is mode-cycle order;
-// stream-join.js is Grok token-join whitespace (also imported by grok-messages.js).
-const SHARED_SRC_FILES = new Set(['permissions.js', 'stream-join.js']);
+// stream-join.js is Grok token-join whitespace (also imported by grok-messages.js);
+// autopilot-schedule.js is due-ness/window/back-off math, so the panel's
+// "next run" label and the supervisor's own precondition check are literally
+// the same code rather than two implementations that drift.
+const SHARED_SRC_FILES = new Set(['permissions.js', 'stream-join.js', 'autopilot-schedule.js']);
 
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
