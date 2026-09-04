@@ -1887,3 +1887,93 @@ test('Task 8 I3: stop() with a tick wedged on a never-resolving provider probe r
     await h.cleanup();
   }
 });
+
+// --- Task 8 fix round 2: Important-1 ---------------------------------------
+//
+// fire()'s I1 fix added `await store.getPilot(pilot.id)` between the
+// `stopping` check at its top and the synchronous reservation claim below -
+// a real file read, so it yields. A Ctrl-C landing in that window sets
+// `stopping = true` after the check above already passed, and fire() would
+// otherwise resume and create a session anyway: the exact "costs nothing
+// observable" invariant its own top-of-function comment documents. Both
+// tests intercept the SECOND store.getPilot() call (fire()'s own re-read,
+// not the caller's own upfront lookup) to open that window on purpose.
+
+test('Task 8 Important-1: runNow racing a Ctrl-C during fire()\'s record re-read does not create a session', async () => {
+  const h = await harness();
+  try {
+    h.supervisor.start();
+    const p = await h.store.createPilot(pilotInput());
+
+    let calls = 0;
+    let releaseSecondRead;
+    const realGetPilot = h.store.getPilot.bind(h.store);
+    h.store.getPilot = (id) => {
+      calls += 1;
+      if (calls < 2) return realGetPilot(id);
+      return new Promise((resolve) => { releaseSecondRead = () => resolve(realGetPilot(id)); });
+    };
+
+    const call = h.supervisor.runNow(p.id);
+    await pollUntil(() => releaseSecondRead !== undefined, { message: "fire()'s own record re-read was never reached" });
+
+    // The Ctrl-C: stop() must latch `stopping` and finish before fire()
+    // resumes from the read it was awaiting.
+    await h.supervisor.stop();
+    releaseSecondRead();
+
+    const result = await call;
+    assert.equal(result.fired, false);
+    assert.match(result.reason, /stopping/i);
+    assert.equal(h.registry.created.length, 0, 'a stop() that lands mid-read must still leave fire() unable to create a session');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('Task 8 Important-1: the heartbeat racing a Ctrl-C during fire()\'s record re-read does not create a session either', async () => {
+  const h = await harness({ stopTickDeadlineMs: 50 });
+  try {
+    await h.store.createPilot(pilotInput());
+
+    // Unlike runNow(), evaluate() never calls store.getPilot() itself (it
+    // gets pilots from store.read()'s list) - fire()'s own re-read is the
+    // FIRST and only call to intercept here, not the second.
+    let releaseRead;
+    const realGetPilot = h.store.getPilot.bind(h.store);
+    h.store.getPilot = (id) => new Promise((resolve) => { releaseRead = () => resolve(realGetPilot(id)); });
+
+    const wedged = h.supervisor.tick(); // evaluate() reaches fire() for the one due pilot
+    await pollUntil(() => releaseRead !== undefined, { message: "fire()'s own record re-read was never reached" });
+
+    // stop()'s own bounded race (Task 8 I3) times out on `ticking` here,
+    // since evaluate() is still parked on the intercepted read - that is
+    // fine, `stopping` is set as stop()'s first statement either way.
+    await h.supervisor.stop();
+    releaseRead();
+    await wedged;
+
+    assert.equal(h.registry.created.length, 0, 'the heartbeat path must not create a session once stopping was set mid-read either');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// --- Task 8 fix round 2: item 3 (I5's own missing test) --------------------
+
+test("Task 8 I5: runNow on a NEVER-STARTED supervisor refuses rather than spawning a real, unsupervised session", async () => {
+  // Deliberately does NOT call h.supervisor.start() - every other runNow
+  // test in this file does, which is exactly why this one refusal (the only
+  // line standing between `npm test` and a real, billing session against a
+  // real pilot id) had no coverage of its own.
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    const result = await h.supervisor.runNow(p.id);
+    assert.equal(result.fired, false);
+    assert.match(result.reason, /not running/i);
+    assert.equal(h.registry.created.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});

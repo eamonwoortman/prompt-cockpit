@@ -396,6 +396,14 @@ export function createAutopilot({
     // whole of blockingReason(). reviewRuns() below is the second half of
     // this fix, for whatever sliver of that gap remains.
     if (!(await store.getPilot(pilot.id))) return 'deleted';
+    // Fix round 2 (Important-1): that store.getPilot() await is itself a
+    // stopping-bypass window - a Ctrl-C landing while it is in flight sets
+    // `stopping` after the check above already passed, and this call would
+    // otherwise resume and create a session anyway. Re-check immediately
+    // before the synchronous claim below, so the check->claim span the C1
+    // comment relies on stays await-free - this is a second check, not a
+    // widened one.
+    if (stopping) return 'stopping';
     // Round 1 review (C1) - THE fix: claim the slot SYNCHRONOUSLY, with no
     // `await` between this check and the mutation that records it.
     // blockingReason's own checks of `runs` are necessarily stale by the

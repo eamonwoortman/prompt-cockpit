@@ -19,6 +19,11 @@ export async function readJsonBody(req) {
     // the guard in here, next to the JSON.parse that already special-cases
     // failure, makes it safe everywhere at once instead of one call site at
     // a time.
+    //
+    // Invariant this creates: every caller gets back a plain object or {},
+    // never a list or a scalar. A route whose body is legitimately an array
+    // or a bare value cannot use this helper as-is - it would silently lose
+    // that payload to the {} fallback - and needs its own parse instead.
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
