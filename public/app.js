@@ -25,6 +25,7 @@ import { initDetailPane } from '/detail-pane.js';
 import { initSessionListPane } from '/session-list-pane.js';
 import { initAutopilotPanel } from '/autopilot-panel.js';
 import { initAutopilotForm } from '/autopilot-form.js';
+import { initNotificationsPanel } from '/notifications-panel.js';
 import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
@@ -213,6 +214,19 @@ const autopilotForm = initAutopilotForm({
     inputPolicy: document.getElementById('apInputPolicy'),
     inputPolicyRow: document.getElementById('apInputPolicyRow'),
     maxStallMinutes: document.getElementById('apMaxStallMinutes'),
+  },
+});
+
+initNotificationsPanel({
+  button: document.getElementById('notificationsBtn'),
+  panel: document.getElementById('notificationsPanel'),
+  headerEl: document.querySelector('.app-header'),
+  // Not `autopilotBtn.click()`: that toggles, so it would CLOSE the pane
+  // whenever it was already open. Open explicitly and force the Pilots tab,
+  // since an operator sitting on Logs would otherwise see no pilot list.
+  onOpenPilots: () => {
+    autopilotPanel.openPane();
+    autopilotPanel.selectTab('pilots');
   },
 });
 
@@ -486,6 +500,43 @@ function clearActiveSession() {
   url.searchParams.delete('newTab');
   history.replaceState(null, '', url);
 })();
+
+// Opening a pilot's session from the notification bell. Same sessionStorage
+// trap as ?newTab=1 above: per the HTML spec a script-opened same-origin tab
+// gets a COPY of the opener's sessionStorage, so without clearing it first
+// rejoinActiveSession() below silently reattaches this tab to the OPENER's
+// session instead of the pilot's.
+//
+// The token deliberately is not in the URL - it is fetched from
+// /api/sessions/:id/attach-token, which is operator-gated (like every /api/
+// route) and scoped server-side to pilot-owned sessions.
+const attachSessionId = (() => {
+  const url = new URL(window.location.href);
+  const id = url.searchParams.get('attach');
+  if (!id) return null;
+  clearActiveSession();               // MUST happen before rejoinActiveSession
+  url.searchParams.delete('attach');
+  history.replaceState(null, '', url);
+  return id;
+})();
+
+async function adoptAttachedSession() {
+  if (!attachSessionId) return false;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(attachSessionId)}/attach-token`);
+    if (!res.ok) {
+      const { error } = await res.json().catch(() => ({}));
+      console.warn(`could not attach to ${attachSessionId}: ${error || res.status}`);
+      return false;
+    }
+    const { id, token } = await res.json();
+    saveActiveSession(id, token);
+    return true;
+  } catch (err) {
+    console.warn(`could not attach to ${attachSessionId}:`, err);
+    return false;
+  }
+}
 
 // Last 3 unique folders a session was started in, most-recent-first, so the
 // launcher can offer them as a dropdown instead of retyping/re-browsing the
@@ -2661,6 +2712,6 @@ async function rejoinActiveSession() {
   }
 }
 
-rejoinActiveSession().then((rejoined) => {
+adoptAttachedSession().then(() => rejoinActiveSession()).then((rejoined) => {
   if (!rejoined) loadResumable();
 });
