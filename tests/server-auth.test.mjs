@@ -20,6 +20,11 @@ process.env.PORT = process.env.PORT || '4319';
 // tracker points at the developer's real ~/.prompt-cockpit/runtime.json.
 const runtimeDir = await mkdtemp(path.join(tmpdir(), 'cockpit-server-auth-runtime-'));
 process.env.COCKPIT_RUNTIME_FILE = path.join(runtimeDir, 'runtime.json');
+// server.js also builds the auto-pilot store/log at module scope - same
+// reasoning as COCKPIT_RUNTIME_FILE above, this must precede the import too,
+// or autopilots.json/autopilot-log.jsonl land in the developer's real home.
+const cockpitHomeDir = await mkdtemp(path.join(tmpdir(), 'cockpit-server-auth-home-'));
+process.env.COCKPIT_HOME = cockpitHomeDir;
 const { server, PORT, HOST, seedSessionDefaults } = await import('../src/server.js');
 const { getOperatorToken } = await import('../src/operator-auth.js');
 const ORIGIN = `http://${HOST}:${PORT}`;
@@ -44,6 +49,7 @@ function wsUrl(pathAndQuery) {
 before(() => new Promise((resolve) => server.listen(PORT, HOST, resolve)));
 after(() => new Promise((resolve) => server.close(resolve)));
 after(() => rm(runtimeDir, { recursive: true, force: true }));
+after(() => rm(cockpitHomeDir, { recursive: true, force: true }));
 
 // The thinking/auto-continue/reload-plugins/plugin-enabled routes each
 // persist to <cwd>/.claude/settings.local.json (session-defaults.js/

@@ -36,7 +36,10 @@ export async function seedSessionDefaults(row, defaults) {
   }
 }
 
-export function registerSessionRoutes(router) {
+// `isPilotOwned(sessionId) => boolean` is supplied by server.js from the
+// auto-pilot supervisor. Optional so the route module stays importable (and
+// testable) without a supervisor; absent, attach-token refuses everything.
+export function registerSessionRoutes(router, { isPilotOwned } = {}) {
   router.get('/api/resumable', async (req, res, url) => {
     let provider;
     try {
@@ -176,5 +179,37 @@ export function registerSessionRoutes(router) {
     // one early.
     registry.closeSession(id);
     return respondJson(res, 200, { closed: true });
+  });
+
+  // A pilot's session is by definition one this tab is not attached to, so
+  // the notification bell needs a way to hand a NEW tab that session's bearer
+  // token. `window.open('/?session=<id>&token=<t>')` would put a credential in
+  // a URL - the leak backlog.md:27 already flags for /ws - so the bell opens
+  // `/?attach=<sessionId>` and the new tab fetches the token from here.
+  //
+  // REGISTRATION-ORDER DEPENDENT. This only ever matches because
+  // registerSessionRoutes runs before registerSessionActionRoutes's
+  // `any('/api/sessions/:id/:action')` catch-all (src/server.js:32-35) and the
+  // router's first match wins (src/router.js:45-47). Moving either
+  // registration silently routes this into session-actions.js instead, which
+  // has no 'attach-token' branch and would 404.
+  //
+  // Scoped to pilot-owned sessions. Being straight about why: this is not a
+  // real trust boundary, since anyone holding the operator token can already
+  // create sessions and read everything - per-session tokens are
+  // defense-in-depth against a leaked session *id*. Restricting it is
+  // least-privilege housekeeping costing one `if`.
+  router.get('/api/sessions/:id/attach-token', async (req, res, url, { id }) => {
+    const row = registry.get(id);
+    // The `(attach-token)` tag is load-bearing for the regression test above:
+    // session-actions.js's catch-all answers an unknown session with the
+    // byte-identical `unknown session: <id>`, so without a distinguishing
+    // marker there is no way to tell from a response whether this handler ran
+    // at all or the catch-all shadowed it.
+    if (!row) return respondJson(res, 404, { error: `unknown session: ${id} (attach-token)` });
+    if (!isPilotOwned || !isPilotOwned(id)) {
+      return respondJson(res, 403, { error: 'attach-token is only available for auto-pilot sessions' });
+    }
+    return respondJson(res, 200, { id: row.id, token: row.token });
   });
 }

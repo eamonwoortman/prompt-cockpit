@@ -24,23 +24,40 @@ import { serveStatic } from './static-files.js';
 import { checkOperatorToken, getOperatorToken } from './operator-auth.js';
 import { getChildTracker } from './child-tracker.js';
 import { createShutdown } from './shutdown.js';
+import { registerAutopilotRoutes } from './routes/autopilot.js';
+import { createAutopilotStore } from './autopilot-store.js';
+import { createAutopilotLog } from './autopilot-log.js';
+import { createAutopilot } from './autopilot.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
 const ALLOWED_ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
-const router = createRouter();
-registerSessionRoutes(router);
-registerHistoryRoutes(router);
-registerSystemRoutes(router);
-registerSessionActionRoutes(router);
-
 // Process ownership for the Grok/Codex CLIs (child-tracker.js). Exported so
 // the auto-pilot supervisor can register its heartbeat stop via
 // shutdown.onBeforeClose, and so a test can drive teardown directly.
 const tracker = getChildTracker();
 const shutdown = createShutdown({ registry, tracker });
+
+const autopilotStore = createAutopilotStore();
+const autopilotLog = createAutopilotLog();
+const autopilot = createAutopilot({ registry, store: autopilotStore, log: autopilotLog, tracker });
+const isPilotOwned = (sessionId) => autopilot.status().some((run) => run.sessionId === sessionId);
+
+const router = createRouter();
+// ORDER MATTERS: registerSessionRoutes must come before
+// registerSessionActionRoutes, whose any('/api/sessions/:id/:action')
+// catch-all would otherwise swallow GET /api/sessions/:id/attach-token.
+registerSessionRoutes(router, { isPilotOwned });
+registerHistoryRoutes(router);
+registerSystemRoutes(router);
+registerAutopilotRoutes(router, { store: autopilotStore, log: autopilotLog, supervisor: autopilot, registry });
+registerSessionActionRoutes(router);
+
+// The heartbeat has to stop before sessions start disappearing, or it sees
+// its own runs vanish mid-teardown and records them as terminal outcomes.
+shutdown.onBeforeClose(() => autopilot.stop());
 
 const server = createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
@@ -197,7 +214,7 @@ wss.on('connection', (ws, req, id, since) => {
   });
 });
 
-export { server, PORT, HOST, seedSessionDefaults, shutdown, tracker };
+export { server, PORT, HOST, seedSessionDefaults, shutdown, tracker, autopilot };
 
 // Only auto-listen when run directly (`node src/server.js`), not when
 // imported by tests - lets tests bind an ephemeral port and drive the same
@@ -304,6 +321,11 @@ if (isMain) {
     // relying on the crash beating the kill by a second. (Entries owned by a
     // cockpit that is still alive are skipped regardless - see child-tracker.)
     tracker.reapOrphans().catch((err) => console.error(`orphan reap failed: ${String(err?.message || err)}`));
+
+    // Pilots live and die with this process, by design (spec Non-goals). Not
+    // started when imported by tests - a 15-second interval would keep the
+    // test runner's event loop alive.
+    autopilot.start();
 
     const op = getOperatorToken();
     const url = `http://${HOST}:${PORT}/?op=${op}`;

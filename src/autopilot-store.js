@@ -31,7 +31,14 @@ export const INPUT_POLICIES = Object.freeze(['recommended', 'ask']);
 const MAX_EVERY_MINUTES = 7 * 24 * 60;
 const MINUTES_PER_DAY = 1440;
 
-export function defaultAutopilotsPath(home = homedir()) {
+// COCKPIT_HOME lets tests point every cockpit-owned durable file at a temp
+// directory, the same way COCKPIT_OPERATOR_FILE already does for the operator
+// token (src/operator-auth.js:62).
+function cockpitHome() {
+  return process.env.COCKPIT_HOME || homedir();
+}
+
+export function defaultAutopilotsPath(home = cockpitHome()) {
   return path.join(home, '.prompt-cockpit', 'autopilots.json');
 }
 
@@ -39,6 +46,19 @@ function invalid(message) {
   const err = new Error(message);
   err.code = 'ERR_INVALID_PILOT';
   return err;
+}
+
+// `p?.id === id` (the null-safety the finders below need so a hand-edited
+// literal `null` in `pilots` cannot crash the heartbeat) has a sharp edge on
+// a WRITE path: `p?.id` reads as `undefined` for that null row, so an id of
+// `undefined` (or `null`) would otherwise MATCH it - updatePilot would throw
+// deep inside normalizePilot instead of here, and deletePilot would silently
+// filter the null row out of the file, which is exactly the "never silently
+// dropped by a write" contract the null-safety exists to uphold. Routes take
+// `:id` straight from a URL and can never actually produce `undefined`, but
+// the store's own contract must hold regardless of what a caller passes.
+function requireId(id) {
+  if (id == null) throw invalid('pilot id is required');
 }
 
 function nameTaken(name) {
@@ -174,6 +194,7 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
   }
 
   async function getPilot(id) {
+    requireId(id);
     // Round 3 review (New-2): null-safe - a literal `null` in `pilots` (the
     // exact shape autopilot.js's own null-pilot guard defends against on the
     // read path) must not throw here on the write/lookup path. hydrate()
@@ -216,7 +237,13 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
       });
     },
 
-    updatePilot(id, patch) {
+    // `async` on these four (unlike createPilot above, which never needs to
+    // reject before mutate() ever runs): requireId's throw must always
+    // surface as a rejected Promise, matching every other error path in this
+    // store, not as a synchronous throw from the plain call itself - a bare
+    // `store.updatePilot(id, x).catch(...)` would otherwise not catch it.
+    async updatePilot(id, patch) {
+      requireId(id);
       return mutate((state) => {
         const i = state.pilots.findIndex((p) => p?.id === id);
         if (i < 0) throw invalid(`unknown pilot: ${id}`);
@@ -238,7 +265,8 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
     // the null row (its `p?.id` is `undefined`, never equal to `id`), which
     // is what the finding's "do not drop nulls" rule requires of every
     // write path, not just the five it happened to trace.
-    deletePilot(id) {
+    async deletePilot(id) {
+      requireId(id);
       return mutate((state) => {
         const before = state.pilots.length;
         state.pilots = state.pilots.filter((p) => p?.id !== id);
@@ -246,7 +274,8 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
       });
     },
 
-    setEnabled(id, enabled) {
+    async setEnabled(id, enabled) {
+      requireId(id);
       return mutate((state) => {
         const pilot = state.pilots.find((p) => p?.id === id);
         if (!pilot) throw invalid(`unknown pilot: ${id}`);
@@ -259,7 +288,8 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
     // supervisor writes this on every terminal outcome, and a pilot that was
     // hand-edited into an invalid state should still get its outcome recorded
     // rather than throwing inside the heartbeat.
-    recordRun(id, { lastRunAt, lastOutcome, consecutiveFailures, enabled } = {}) {
+    async recordRun(id, { lastRunAt, lastOutcome, consecutiveFailures, enabled } = {}) {
+      requireId(id);
       return mutate((state) => {
         // Round 3 review (New-2): this was the load-bearing one - a null
         // entry throwing here meant recordOutcome's own store.recordRun call

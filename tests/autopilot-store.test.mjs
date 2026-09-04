@@ -219,6 +219,40 @@ test('Round 3 New-2: a null entry in pilots does not crash getPilot, recordRun, 
   }
 });
 
+test('an id of null or undefined is rejected outright by every id-taking method, never matched against a null pilots entry', async () => {
+  // p?.id === id is what lets getPilot/recordRun/etc. skip a hand-edited
+  // null row instead of crashing on it (see the "Round 3 New-2" test above).
+  // Its sharp edge: p?.id reads as undefined for that row, so an id of
+  // undefined or null would otherwise MATCH it - updatePilot would throw
+  // deep inside normalizePilot instead of here, and deletePilot would
+  // silently filter the null row out of the file, exactly the "never
+  // silently dropped by a write" contract that null-safety exists to
+  // uphold. requireId() closes that gap before any of that logic runs.
+  const { dir, filePath, store } = await makeStore();
+  try {
+    const pilot = await store.createPilot(validInput({ name: 'Guarded' }));
+    const raw = JSON.parse(await readFile(filePath, 'utf-8'));
+    raw.pilots.unshift(null);
+    await writeFile(filePath, JSON.stringify(raw));
+
+    for (const badId of [null, undefined]) {
+      await assert.rejects(() => store.getPilot(badId), (err) => err.code === 'ERR_INVALID_PILOT');
+      await assert.rejects(() => store.updatePilot(badId, { prompt: 'x' }), (err) => err.code === 'ERR_INVALID_PILOT');
+      await assert.rejects(() => store.deletePilot(badId), (err) => err.code === 'ERR_INVALID_PILOT');
+      await assert.rejects(() => store.setEnabled(badId, false), (err) => err.code === 'ERR_INVALID_PILOT');
+      await assert.rejects(() => store.recordRun(badId, { lastOutcome: 'finished' }), (err) => err.code === 'ERR_INVALID_PILOT');
+    }
+
+    // None of the rejected calls above touched the file: the null row is
+    // still there, and the real pilot is untouched.
+    const rawAfter = JSON.parse(await readFile(filePath, 'utf-8'));
+    assert.ok(rawAfter.pilots.some((p) => p === null), 'the null row must survive every rejected call');
+    assert.equal((await store.getPilot(pilot.id)).prompt, '/triage-backlog', 'the real pilot must be untouched');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a corrupt autopilots.json is refused rather than silently replaced', async () => {
   const { dir, filePath, store } = await makeStore();
   try {

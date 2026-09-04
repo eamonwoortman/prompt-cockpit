@@ -40,6 +40,15 @@ import { readJson, replaceJson } from './json-store.js';
 // real runtime.json would run killTracked() over the developer's own live
 // pids. An explicit `home` argument still wins, so callers that pass one get
 // what they asked for.
+// COCKPIT_HOME lets tests point every cockpit-owned durable file at a temp
+// directory, the same way COCKPIT_OPERATOR_FILE already does for the operator
+// token (src/operator-auth.js:62). COCKPIT_RUNTIME_FILE, checked first below,
+// still takes precedence for this one file specifically - it predates
+// COCKPIT_HOME and existing callers (and tests) rely on it winning.
+function cockpitHome() {
+  return process.env.COCKPIT_HOME || homedir();
+}
+
 export function defaultRuntimePath(home) {
   if (home === undefined) {
     const fromEnv = typeof process.env.COCKPIT_RUNTIME_FILE === 'string'
@@ -47,7 +56,7 @@ export function defaultRuntimePath(home) {
       : '';
     if (fromEnv) return fromEnv;
   }
-  return path.join(home ?? homedir(), '.prompt-cockpit', 'runtime.json');
+  return path.join(home ?? cockpitHome(), '.prompt-cockpit', 'runtime.json');
 }
 
 // The OS's own start time for a pid, as epoch-ms, or null if it can't be

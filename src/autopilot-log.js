@@ -29,7 +29,14 @@ export const LOG_EVENTS = Object.freeze([
   'fired', 'skipped', 'blocked', 'answered', 'finished', 'timed-out', 'errored', 'closed-externally', 'carry-forward',
 ]);
 
-export function defaultAutopilotLogPath(home = homedir()) {
+// COCKPIT_HOME lets tests point every cockpit-owned durable file at a temp
+// directory, the same way COCKPIT_OPERATOR_FILE already does for the operator
+// token (src/operator-auth.js:62).
+function cockpitHome() {
+  return process.env.COCKPIT_HOME || homedir();
+}
+
+export function defaultAutopilotLogPath(home = cockpitHome()) {
   return path.join(home, '.prompt-cockpit', 'autopilot-log.jsonl');
 }
 
