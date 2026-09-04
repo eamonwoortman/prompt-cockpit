@@ -17,6 +17,10 @@ import { killProcessTree } from './child-tracker.js';
 import { isDue, isInsideWindow } from './autopilot-schedule.js';
 
 export const HEARTBEAT_MS = 15_000;
+// Five failures in a row is a broken configuration, not bad luck. Disabling
+// is actionable - a human must re-enable it - so it also raises a bell entry.
+export const MAX_CONSECUTIVE_FAILURES = 5;
+const FAILURE_OUTCOMES = new Set(['timed-out', 'errored']);
 const GATE_STDOUT_TAIL = 200;
 // Bounds precondition 5's `descriptor.isAvailable()` probe, which for grok and
 // codex is a real, uncached `--version` subprocess. Round 1 review (M11): an
@@ -470,6 +474,7 @@ export function createAutopilot({
       startedAt: now(),
       lastProgressAt: now(),
       scannedThrough: 0,
+      lastSeq: row.eventLog.nextSeq,
       sawResult: false,
       blockedLogged: false,
       intendedOutcome: null,
@@ -490,18 +495,145 @@ export function createAutopilot({
     // One stored prompt, sent verbatim on every firing. It may itself be a
     // slash command.
     registry.sendInput(row.id, pilot.prompt).catch((err) => {
-      logImpl(`autopilot: sendInput failed for ${pilot.name}: ${String(err?.message || err)}`);
+      // Round 3 review (cheap item 3) pattern, applied here too: this is a
+      // floating promise, so a throw out of logImpl would become an
+      // unhandled rejection - which terminates the process under default
+      // Node settings.
+      try {
+        logImpl(`autopilot: sendInput failed for ${pilot.name}: ${String(err?.message || err)}`);
+      } catch { /* logging must never break the floating promise */ }
     });
     return row;
   }
 
-  // Task 6 replaces this stub with the full terminal-outcome table.
+  // The four terminal outcomes and their differing effect on the record.
+  // `closed-externally` deliberately resets the failure count: a human
+  // closing a pilot's session in an attached tab is intentional.
   async function recordOutcome(pilotId, outcome, at) {
-    await store.recordRun(pilotId, { lastRunAt: at, lastOutcome: outcome, consecutiveFailures: 1 });
+    const pilot = await store.getPilot(pilotId);
+    if (!pilot) return null;
+    const failures = FAILURE_OUTCOMES.has(outcome) ? (pilot.consecutiveFailures || 0) + 1 : 0;
+    const patch = { lastRunAt: at, lastOutcome: outcome, consecutiveFailures: failures };
+    if (failures >= MAX_CONSECUTIVE_FAILURES) patch.enabled = false;
+    const updated = await store.recordRun(pilotId, patch);
+    if (patch.enabled === false) {
+      logImpl(`autopilot: "${pilot.name}" auto-disabled after ${failures} consecutive failures`);
+    }
+    return updated;
   }
 
-  // Task 6 replaces this stub with completion / stall / blocked handling.
-  async function reviewRuns(_pilotsById) {}
+  // One pass over every live run, before any new firing. Reads the row's
+  // event log for BOTH signals it needs: nextSeq advancing is progress, and a
+  // `result` message means the session actually produced something.
+  //
+  // Why the event log rather than row fields: nextSeq is monotonic and
+  // unaffected by byte-cap eviction (src/event-log.js:30-34), and the priming
+  // sentinel's own result is swallowed inside session.js
+  // (src/session.js:388-397) and never reaches the registry, so any result
+  // visible here is real. No row field counts results, which is why sawResult
+  // lives on the supervisor's own run state instead.
+  async function reviewRuns(pilotsById) {
+    // Task 6 own finding: onSessionRemoved (fired synchronously by
+    // closeSession below) frees `runs`' lock immediately, but recordOutcome's
+    // disk write (stamping lastRunAt) happens after, via a fire-and-forget
+    // track()ed promise. evaluate()'s own `pilots` array was already read
+    // from disk before this function ran, so a pilot closed HERE still shows
+    // lastRunAt: null to that stale array, and isDue() treats a null
+    // lastRunAt as always-due - without this set, evaluate()'s main loop
+    // would re-fire the same pilot again in this same tick. Returned to
+    // evaluate() so it can skip exactly the pilots settled this pass.
+    const settled = new Set();
+    for (const [pilotId, run] of [...runs]) {
+      const row = registry.get(run.sessionId);
+      if (!row) continue; // onSessionRemoved already classified it
+      const pilot = pilotsById.get(pilotId);
+      if (!pilot) continue; // deleted mid-run; the DELETE route force-closes it
+
+      // Ruling F1: fire()'s own eager `row.handle?.trackedPid` read is null
+      // for every provider at that instant - Grok assigns it inside an async
+      // IIFE behind a getter, and Codex freezes a null pid at session start
+      // on a cold app-server. Re-read it on every pass until it appears, and
+      // attach it to the tracker exactly once: setting run.trackedPid before
+      // the await (whether attachPilot resolves or rejects) is what stops a
+      // later pass from re-attaching the same pid, and onSessionRemoved's
+      // existing `if (run.trackedPid != null) detachPilot(...)` then balances
+      // it without any change there.
+      if (run.trackedPid == null) {
+        const pid = row.handle?.trackedPid ?? null;
+        if (pid != null) {
+          run.trackedPid = pid;
+          try {
+            await tracker.attachPilot(pid, pilotId);
+          } catch (err) {
+            // Defence-in-depth: attachPilot cannot actually reject today
+            // (child-tracker.js's persist() swallows its own errors), but a
+            // rejection here must not corrupt run state or throw out of
+            // reviewRuns and kill the heartbeat.
+            try {
+              logImpl(`autopilot: failed to attach ${pilot.name}'s process to the tracker: ${String(err?.message || err)}`);
+            } catch { /* logging must never break the heartbeat */ }
+          }
+        }
+      }
+
+      for (const { seq, message } of row.eventLog.entries) {
+        if (seq <= run.scannedThrough) continue;
+        run.scannedThrough = seq;
+        if (message && message.type === 'result') run.sawResult = true;
+      }
+      if (row.eventLog.nextSeq !== run.lastSeq) {
+        run.lastSeq = row.eventLog.nextSeq;
+        run.lastProgressAt = now();
+      }
+
+      // Blocked on a human: exempt from the stall backstop entirely, logged
+      // once, and it KEEPS the lock. A session waiting on an approval is not
+      // a runaway.
+      if (row.pendingApprovals.length > 0) {
+        if (!run.blockedLogged) {
+          run.blockedLogged = true;
+          await log.append({
+            event: 'blocked', pilotId, pilotName: pilot.name, sessionId: run.sessionId,
+            reason: `waiting on approval for ${row.pendingApprovals[0]?.toolName || 'a tool call'}`,
+          });
+        }
+        continue;
+      }
+      run.blockedLogged = false;
+
+      // Completion. The "at least one result" clause is load-bearing: a
+      // freshly created row is idle before the prompt lands.
+      const idle = row.state === 'idle';
+      const quiet = (row.queue || []).length === 0;
+      if (idle && quiet && run.sawResult) {
+        const usage = row.usageAcc?.snapshot?.() || {};
+        run.costUsd = typeof usage.costUsd === 'number' ? usage.costUsd : null;
+        run.costUnpriced = Array.isArray(usage.unpriced) && usage.unpriced.length > 0;
+        // Set the intended outcome BEFORE closing: closeSession fires the
+        // removal listener synchronously, which would otherwise classify our
+        // own completion as closed-externally.
+        run.intendedOutcome = 'finished';
+        registry.closeSession(run.sessionId);
+        settled.add(pilotId);
+        continue;
+      }
+
+      // Runaway backstop, NOT a hang detector - with the signals available an
+      // in-flight tool call is indistinguishable from a hang, so this is set
+      // generously (60 minutes by default) and only exists to stop a pilot
+      // burning money forever.
+      if (now() - run.lastProgressAt >= pilot.maxTurnStallMs) {
+        const usage = row.usageAcc?.snapshot?.() || {};
+        run.costUsd = typeof usage.costUsd === 'number' ? usage.costUsd : null;
+        run.costUnpriced = Array.isArray(usage.unpriced) && usage.unpriced.length > 0;
+        run.reason = `no new events for ${Math.round(pilot.maxTurnStallMs / 60_000)} minutes`;
+        run.intendedOutcome = 'timed-out';
+        registry.closeSession(run.sessionId);
+        settled.add(pilotId);
+      }
+    }
+    return settled;
+  }
 
   async function evaluate() {
     const { settings, pilots } = await store.read();
@@ -511,7 +643,7 @@ export function createAutopilot({
     // out of evaluate() entirely, on every heartbeat, for every pilot, not
     // just the null one.
     const pilotsById = new Map(pilots.filter((p) => p && p.id).map((p) => [p.id, p]));
-    await reviewRuns(pilotsById);
+    const settledThisTick = await reviewRuns(pilotsById);
 
     const { costUsd: dailySpend } = await log.dailyCostUsd(now());
     const rateLimited = rateLimitedProviders();
@@ -532,6 +664,10 @@ export function createAutopilot({
         // logged: "not due" is the normal state of every pilot most of the
         // time.
         if (!pilot.enabled) continue;
+        // Just settled by reviewRuns() above, this same tick: the disk write
+        // recording its outcome hasn't landed yet, so the `pilots` array
+        // above still shows a stale lastRunAt and would otherwise look due.
+        if (settledThisTick.has(pilot.id)) continue;
         if (!isDue(pilot, at)) continue;
         // 3 - inside the active window. Logged, but deduped by skip().
         if (!isInsideWindow(pilot.schedule.window, at)) {
@@ -593,9 +729,21 @@ export function createAutopilot({
     }
   }
 
-  // Task 6 fills this in.
   async function finishRun(pilotId, run, outcome) {
-    await recordOutcome(pilotId, outcome, now());
+    const at = now();
+    const pilot = await store.getPilot(pilotId);
+    const entry = {
+      event: outcome,
+      pilotId,
+      pilotName: pilot?.name ?? null,
+      sessionId: run.sessionId,
+      durationMs: at - run.startedAt,
+    };
+    if (run.costUsd != null) entry.costUsd = run.costUsd;
+    if (run.costUnpriced) entry.costUnpriced = true;
+    if (run.reason) entry.reason = run.reason;
+    await log.append(entry);
+    await recordOutcome(pilotId, outcome, at);
   }
 
   async function runNow(pilotId) {
@@ -678,5 +826,56 @@ export function createAutopilot({
     }));
   }
 
-  return { start, stop, tick, runNow, status, drain, _runs: runs };
+  // Derived, never stored: a projection over live state. There is nothing to
+  // persist and nothing to mark read - an entry vanishes when the state it
+  // was computed from is gone.
+  async function notifications() {
+    const { pilots } = await store.read();
+    const byId = new Map(pilots.map((p) => [p.id, p]));
+    const entries = [];
+
+    for (const run of runs.values()) {
+      const row = registry.get(run.sessionId);
+      const pilot = byId.get(run.pilotId);
+      if (!row || !pilot) continue;
+      for (const request of row.pendingApprovals) {
+        entries.push({
+          kind: 'needs-input',
+          pilotId: pilot.id,
+          pilotName: pilot.name,
+          sessionId: run.sessionId,
+          toolName: request.toolName,
+          requestId: request.requestId,
+          message: `"${pilot.name}" is waiting on ${request.toolName}`,
+        });
+      }
+    }
+
+    for (const pilot of pilots) {
+      if (pilot.enabled) continue;
+      if ((pilot.consecutiveFailures || 0) < MAX_CONSECUTIVE_FAILURES) continue;
+      entries.push({
+        kind: 'auto-disabled',
+        pilotId: pilot.id,
+        pilotName: pilot.name,
+        message: `"${pilot.name}" was auto-disabled after ${pilot.consecutiveFailures} consecutive failures - fix it, then re-enable it.`,
+      });
+    }
+
+    return { entries };
+  }
+
+  // Forget a run WITHOUT classifying it. Used only by the DELETE route: the
+  // pilot record is about to disappear, so there is no outcome to record
+  // against it and no failure count to increment.
+  async function abandonRun(pilotId) {
+    const run = runs.get(pilotId);
+    if (!run) return;
+    runs.delete(pilotId);
+    // pilotCache is added in Task 7; until then there is nothing else to
+    // release here.
+    if (run.trackedPid != null) await tracker.detachPilot(run.trackedPid, pilotId);
+  }
+
+  return { start, stop, tick, runNow, status, notifications, drain, abandonRun, _runs: runs };
 }

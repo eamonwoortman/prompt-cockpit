@@ -1233,3 +1233,348 @@ test('Round 3 New-2 (end-to-end): the well-formed pilot beside a null store entr
     await h.cleanup();
   }
 });
+
+// --- Task 6: terminal outcomes, completion, and the stall backstop ------
+
+test('completion needs idle AND an empty queue AND no pending approval AND at least one result', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    const row = h.registry.get('s-1');
+
+    // Freshly created: idle before the prompt even lands. Closing here would
+    // be wrong, which is exactly why sawResult is load-bearing.
+    row.state = 'idle';
+    await h.supervisor.tick();
+    assert.deepEqual(h.registry.closed, [], 'no result yet - not complete');
+
+    h.registry.advance('s-1', { result: true, state: 'idle' });
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+
+    assert.deepEqual(h.registry.closed, ['s-1']);
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.lastOutcome, 'finished');
+    assert.equal(after.consecutiveFailures, 0);
+    assert.equal(after.lastRunAt, h.now());
+    const events = (await h.log.tail({})).map((e) => e.event);
+    // The middle tick still sees an unfinished, unchanged run: blockingReason
+    // reports 'already running', and fire() cleared the dedupe cache when it
+    // fired, so this first post-fire check logs exactly once - the same
+    // "one skip line per run" mechanic asserted by the lock-skip test above.
+    assert.deepEqual(events, ['fired', 'skipped', 'finished']);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a non-empty queue or a pending approval defers completion', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    const row = h.registry.get('s-1');
+    h.registry.advance('s-1', { result: true, state: 'idle' });
+
+    row.queue = [{ id: 'q1', text: 'later' }];
+    await h.supervisor.tick();
+    assert.deepEqual(h.registry.closed, []);
+
+    row.queue = [];
+    row.pendingApprovals = [{ requestId: 'r1', toolName: 'Bash' }];
+    await h.supervisor.tick();
+    assert.deepEqual(h.registry.closed, []);
+
+    row.pendingApprovals = [];
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+    assert.deepEqual(h.registry.closed, ['s-1']);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a finished run records the session cost, and flags an unpriced model', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    const row = h.registry.get('s-1');
+    row.usageAcc = { snapshot: () => ({ costUsd: 1.75, unpriced: ['some-new-model'] }) };
+    h.registry.advance('s-1', { result: true, state: 'idle' });
+
+    h.advanceClock(90_000);
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+
+    const finished = (await h.log.tail({})).find((e) => e.event === 'finished');
+    assert.equal(finished.costUsd, 1.75);
+    assert.equal(finished.costUnpriced, true);
+    assert.equal(finished.durationMs, 90_000);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a row removed with reason "error" records errored and increments the failure count', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    h.registry.emitRemoved('s-1', 'error');
+    await h.supervisor.drain();
+
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.lastOutcome, 'errored');
+    assert.equal(after.consecutiveFailures, 1);
+    assert.equal(after.lastRunAt, h.now(), 'stamped, so this is not a 15-second spawn loop');
+    assert.ok((await h.log.tail({})).some((e) => e.event === 'errored'));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a human closing the pilot\'s session records closed-externally and is NOT a failure', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.store.recordRun(p.id, { consecutiveFailures: 3 });
+    await h.supervisor.tick();
+
+    // The DELETE route / "Close session" button, not us.
+    h.registry.closeSession('s-1');
+    await h.supervisor.drain();
+
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.lastOutcome, 'closed-externally');
+    assert.equal(after.consecutiveFailures, 0, 'a human close is intentional, not a failure');
+    assert.equal(after.lastRunAt, h.now());
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a stalled run is force-closed as timed-out once maxTurnStallMs passes with no new events', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput({ maxTurnStallMs: 10 * MIN }));
+    await h.supervisor.tick();
+
+    h.advanceClock(5 * MIN);
+    h.registry.advance('s-1', { seq: 40 });   // progress resets the stall clock
+    await h.supervisor.tick();
+    assert.deepEqual(h.registry.closed, []);
+
+    h.advanceClock(9 * MIN);
+    await h.supervisor.tick();
+    assert.deepEqual(h.registry.closed, [], 'still under the backstop');
+
+    h.advanceClock(2 * MIN);
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+
+    assert.deepEqual(h.registry.closed, ['s-1']);
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.lastOutcome, 'timed-out');
+    assert.equal(after.consecutiveFailures, 1);
+    assert.ok((await h.log.tail({})).some((e) => e.event === 'timed-out'));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a run blocked on a pending approval is exempt from the stall backstop, logged once, and keeps the lock', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput({ maxTurnStallMs: 10 * MIN }));
+    await h.supervisor.tick();
+    h.registry.get('s-1').pendingApprovals = [{ requestId: 'r1', toolName: 'Bash' }];
+
+    for (let i = 0; i < 4; i++) {
+      h.advanceClock(30 * MIN);
+      await h.supervisor.tick();
+    }
+
+    assert.deepEqual(h.registry.closed, [], 'blocked is waiting for a human, not a runaway');
+    const blocked = (await h.log.tail({})).filter((e) => e.event === 'blocked');
+    assert.equal(blocked.length, 1, 'logged once, not once per heartbeat');
+    assert.equal(h.supervisor.status().length, 1, 'still holds the lock');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('five consecutive failures auto-disable the pilot and surface an actionable notification', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    for (let i = 1; i <= 5; i++) {
+      // Clear the back-off each round so the next tick fires again.
+      await h.store.recordRun(p.id, { lastRunAt: null, consecutiveFailures: i - 1 });
+      await h.supervisor.tick();
+      h.registry.emitRemoved(`s-${i}`, 'error');
+      await h.supervisor.drain();
+    }
+
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.consecutiveFailures, 5);
+    assert.equal(after.enabled, false, 'auto-disabled');
+
+    const notes = await h.supervisor.notifications();
+    const disabled = notes.entries.find((e) => e.kind === 'auto-disabled');
+    assert.equal(disabled.pilotId, p.id);
+    assert.match(disabled.message, /re-enable/i);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('the spend cap NEVER kills a run already in flight', async () => {
+  const h = await harness();
+  try {
+    await h.store.updateSettings({ dailyCostCapUsd: 1 });
+    await h.store.createPilot(pilotInput({ maxTurnStallMs: 24 * 60 * MIN }));
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 1);
+
+    // Blow way past the cap while the run is mid-flight.
+    await h.log.append({ event: 'finished', pilotId: 'other', pilotName: 'other', costUsd: 999, ts: h.now() });
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+
+    // Killing an agent mid-edit to save a few cents trades a small cost for a
+    // broken working tree. The cap is a precondition on FIRING only.
+    assert.deepEqual(h.registry.closed, []);
+    assert.equal(h.supervisor.status().length, 1, 'still running, still holding the lock');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a successful run resets the failure count', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.store.recordRun(p.id, { consecutiveFailures: 3 });
+    await h.supervisor.tick();
+    h.registry.advance('s-1', { result: true, state: 'idle' });
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+    assert.equal((await h.store.getPilot(p.id)).consecutiveFailures, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('notifications project pending approvals on pilot-owned rows that a human must answer', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput({ inputPolicy: 'ask' }));
+    await h.supervisor.tick();
+    h.registry.get('s-1').pendingApprovals = [{ requestId: 'r1', toolName: 'Bash', input: { command: 'rm -rf build' } }];
+
+    const notes = await h.supervisor.notifications();
+    const entry = notes.entries.find((e) => e.kind === 'needs-input');
+    assert.equal(entry.pilotId, p.id);
+    assert.equal(entry.sessionId, 's-1');
+    assert.equal(entry.toolName, 'Bash');
+
+    // Derived, never stored: the entry vanishes when the state it was
+    // computed from is gone.
+    h.registry.get('s-1').pendingApprovals = [];
+    assert.equal((await h.supervisor.notifications()).entries.some((e) => e.kind === 'needs-input'), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('stop() awaits the in-flight tick and every pending outcome record', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    h.supervisor.start();
+    await h.supervisor.tick();
+    h.registry.emitRemoved('s-1', 'error');
+    await h.supervisor.stop();
+    assert.equal((await h.store.getPilot(p.id)).lastOutcome, 'errored', 'no write was left in flight');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// --- Ruling F1: the late-arriving trackedPid ----------------------------
+
+test('F1: a trackedPid that only appears on a later heartbeat is attached exactly once, and still detaches correctly on removal', async () => {
+  const h = await harness();
+  try {
+    const attachCalls = [];
+    h.tracker.attachPilot = async (pid, pilotId) => { attachCalls.push({ pid, pilotId }); };
+    const detachCalls = [];
+    h.tracker.detachPilot = async (pid, pilotId) => { detachCalls.push({ pid, pilotId }); };
+
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    assert.equal(h.registry.get('s-1').handle.trackedPid, null, 'no provider assigns a pid synchronously at session creation');
+    assert.deepEqual(attachCalls, [], 'not attached yet - the pid has not appeared');
+
+    // The pid arrives asynchronously, exactly as it really does for Grok
+    // (an async IIFE behind a getter) and Codex (null on a cold app-server).
+    h.registry.get('s-1').handle.trackedPid = 4242;
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick();
+    assert.deepEqual(attachCalls, [{ pid: 4242, pilotId: p.id }]);
+
+    // A subsequent heartbeat must not attach the same pid again.
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick();
+    assert.equal(attachCalls.length, 1, 'attachPilot is called exactly once, not on every heartbeat after the pid appears');
+
+    h.registry.emitRemoved('s-1', 'closed');
+    await h.supervisor.drain();
+    assert.deepEqual(detachCalls, [{ pid: 4242, pilotId: p.id }], 'the late-attached pid is still detached when the session is removed');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('F1: a rejecting attachPilot on the late-attach path does not corrupt run state or kill the heartbeat', async () => {
+  const h = await harness();
+  try {
+    h.tracker.attachPilot = async () => { throw new Error('runtime.json write failed'); };
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    h.registry.get('s-1').handle.trackedPid = 4242;
+
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick(); // must not throw out of the heartbeat
+
+    assert.equal(h.supervisor.status().length, 1, 'the run survives a rejecting late attach, unlike the eager fire() path');
+    // The heartbeat still works afterwards - completion is still detected.
+    h.registry.advance('s-1', { result: true, state: 'idle' });
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+    assert.deepEqual(h.registry.closed, ['s-1']);
+    assert.equal((await h.store.getPilot(p.id)).lastOutcome, 'finished');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// --- Cleanup: fire()'s own `stopping` guard, reached without a gate -----
+
+test("fire()'s own stopping guard refuses to create a session even for an UNGATED pilot (runGate's guard is never reached here)", async () => {
+  const h = await harness();
+  try {
+    const pilot = await h.store.createPilot(pilotInput());
+    await h.supervisor.stop(); // latches `stopping`; no gate, no heartbeat ever ran
+
+    const result = await h.supervisor.runNow(pilot.id);
+    assert.equal(result.fired, false, 'fire() itself must refuse once stopping is set');
+    assert.equal(h.registry.created.length, 0, 'no session was created');
+  } finally {
+    await h.cleanup();
+  }
+});
