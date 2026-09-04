@@ -653,10 +653,13 @@ export function createAutopilot({
       }
 
       // Ruling F1: fire()'s own eager `row.handle?.trackedPid` read is null
-      // for every provider at that instant - Grok assigns it inside an async
-      // IIFE behind a getter, and Codex freezes a null pid at session start
-      // on a cold app-server. Re-read it on every pass until it appears, and
-      // attach it to the tracker exactly once: setting run.trackedPid before
+      // at that instant for Grok, which assigns it inside an async IIFE -
+      // Codex assigns it synchronously in the spawn (codex-app-server.js:304,
+      // codex-session.js:56), including on a cold app-server, so this read is
+      // already a real pid for that provider. Re-read it on every pass until
+      // it appears (this loop is what makes Grok's later arrival safe, and is
+      // a harmless no-op for Codex's already-present one), and attach it to
+      // the tracker exactly once: setting run.trackedPid before
       // the await (whether attachPilot resolves or rejects) is what stops a
       // later pass from re-attaching the same pid, and onSessionRemoved's
       // existing `if (run.trackedPid != null) detachPilot(...)` then balances

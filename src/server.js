@@ -233,9 +233,10 @@ function copyToClipboard(text) {
 
 // Upper bound on the whole teardown. Without one, Ctrl-C has no worst case a
 // user can rely on: today it is bounded but unpleasant (tracker.settled()'s
-// probe timeout plus the grace period), and it becomes unbounded the moment
-// the auto-pilot supervisor registers a shutdown.onBeforeClose hook that can
-// hang. Comfortably above grace (3s) + killTracked's verify budget (1.5s).
+// probe timeout plus the grace period), and the auto-pilot supervisor's own
+// shutdown.onBeforeClose hook (autopilot.stop()) adds its own bounded wait
+// rather than an unbounded one. Comfortably above grace (3s) + killTracked's
+// verify budget (1.5s) + autopilot.stop()'s STOP_TICK_DEADLINE_MS (2s).
 const FORCE_EXIT_MS = 8000;
 
 if (isMain) {

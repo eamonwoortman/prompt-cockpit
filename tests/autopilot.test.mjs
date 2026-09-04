@@ -963,6 +963,7 @@ test('Critical-1: a session that dies during the attachPilot await does not resu
     assert.equal(attachCalls, 2, 'the pilot fires again on the very next heartbeat rather than being wedged forever');
     assert.deepEqual(h.supervisor.status().map((r) => r.sessionId), ['s-2'], 'the second attempt is tracked as a real run');
   } finally {
+    await h.supervisor.drain();
     await h.cleanup();
   }
 });
@@ -1602,7 +1603,7 @@ test('F1: a trackedPid that only appears on a later heartbeat is attached exactl
 
     const p = await h.store.createPilot(pilotInput());
     await h.supervisor.tick();
-    assert.equal(h.registry.get('s-1').handle.trackedPid, null, 'no provider assigns a pid synchronously at session creation');
+    assert.equal(h.registry.get('s-1').handle.trackedPid, null, 'the pid has not appeared yet on this pass, as it would not for Grok\'s async IIFE assignment');
     assert.deepEqual(attachCalls, [], 'not attached yet - the pid has not appeared');
 
     // The pid arrives asynchronously, exactly as it really does for Grok
