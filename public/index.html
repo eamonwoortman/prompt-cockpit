@@ -443,6 +443,109 @@
     </div>
   </dialog>
 
+  <dialog id="autopilotFormModal" class="modal" aria-labelledby="autopilotFormTitle">
+    <form class="modal-box" id="autopilotForm" method="dialog">
+      <header class="modal-header"><strong id="autopilotFormTitle">New pilot</strong></header>
+      <div class="modal-body settings-body">
+        <div id="autopilotFormWarnings"></div>
+        <div id="autopilotFormError" class="mcp-error" hidden></div>
+
+        <label class="settings-row">
+          <span>Name</span>
+          <input type="text" id="apName" required maxlength="80" placeholder="Nightly triage" />
+          <span class="hint" title="Unique across all pilots. The session it fires is named after the pilot, so another session can /ask it by name.">?</span>
+        </label>
+
+        <div class="settings-row">
+          <span>Project folder</span>
+          <input type="text" id="apCwd" required placeholder="C:\path\to\project" />
+          <button type="button" id="apBrowseBtn" class="btn" title="Browse for a project folder">Browse</button>
+        </div>
+
+        <label class="settings-row">
+          <span>Provider</span>
+          <select id="apProvider"></select>
+        </label>
+
+        <label class="settings-row">
+          <span>Model</span>
+          <input type="text" id="apModel" placeholder="(provider default)" />
+          <span class="hint" title="Leave blank for the provider's default. Validated against the same safe-argument rule a hand-started session uses.">?</span>
+        </label>
+
+        <label class="settings-row">
+          <span>Reasoning effort</span>
+          <select id="apEffort"></select>
+        </label>
+
+        <label class="settings-row">
+          <span>Permission mode</span>
+          <select id="apMode"></select>
+          <span class="hint" title="This governs tool permissions for the whole unattended run. acceptEdits / bypassPermissions / dontAsk / auto all write to the working tree without asking.">?</span>
+        </label>
+
+        <label class="settings-row settings-row-stacked">
+          <span>Prompt</span>
+          <textarea id="apPrompt" required rows="4" placeholder="/triage-backlog"></textarea>
+          <span class="hint" title="Sent verbatim on every firing, into a brand-new conversation. It may itself be a slash command.">?</span>
+        </label>
+
+        <label class="settings-row">
+          <span>Run every</span>
+          <input type="number" id="apEveryMinutes" min="1" max="10080" required />
+          <span>minutes</span>
+        </label>
+
+        <label class="settings-row">
+          <input type="checkbox" id="apWindowEnabled" />
+          <span>Only inside an active window</span>
+        </label>
+        <div class="settings-row autopilot-window-row" id="apWindowRow" hidden>
+          <label class="visually-hidden" for="apWindowFrom">Window start</label>
+          <input type="time" id="apWindowFrom" value="09:00" />
+          <span>to</span>
+          <label class="visually-hidden" for="apWindowTo">Window end</label>
+          <input type="time" id="apWindowTo" value="17:00" />
+          <div class="autopilot-weekdays" id="apWeekdays"></div>
+          <span class="hint" title="An end time earlier than the start crosses midnight. The weekday is the day the window OPENED, so 01:00 Saturday belongs to Friday night.">?</span>
+        </div>
+
+        <label class="settings-row">
+          <input type="checkbox" id="apGateEnabled" />
+          <span>Only run if a command succeeds</span>
+          <span class="hint" title="Runs in the project folder before each firing. A non-zero exit or a timeout skips the run, with the command's output as the reason. This executes arbitrary shell from your config file on a schedule.">?</span>
+        </label>
+        <div class="settings-row autopilot-window-row" id="apGateRow" hidden>
+          <label class="visually-hidden" for="apGateCommand">Gate command</label>
+          <input type="text" id="apGateCommand" placeholder="git fetch && git log --oneline -1 origin/main" />
+          <label class="visually-hidden" for="apGateTimeout">Gate timeout (ms)</label>
+          <input type="number" id="apGateTimeout" min="1000" max="600000" value="30000" />
+          <span>ms timeout</span>
+        </div>
+
+        <label class="settings-row" id="apInputPolicyRow">
+          <span>When it asks a question</span>
+          <select id="apInputPolicy">
+            <option value="ask">Wait for me (notify)</option>
+            <option value="recommended">Pick the recommended answer</option>
+          </select>
+          <span class="hint" title="Governs AskUserQuestion only. Tool permissions stay governed by the permission mode above, and an end-of-plan approval is never auto-approved. Claude only.">?</span>
+        </label>
+
+        <label class="settings-row">
+          <span>Runaway backstop</span>
+          <input type="number" id="apMaxStallMinutes" min="1" max="1440" value="60" />
+          <span>minutes</span>
+          <span class="hint" title="Force-closes a run after this long with no new messages. NOT a hang detector: a single long tool call (a build, a test suite) emits nothing while it works, so keep this generous.">?</span>
+        </label>
+      </div>
+      <footer>
+        <button type="button" id="apCancelBtn" class="btn" title="Discard changes">Cancel</button>
+        <button type="submit" id="apSaveBtn" class="btn btn-primary" title="Save this pilot">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
   <!-- Prism.js (MIT, vendor/prism/LICENSE), self-hosted - classic non-module
        scripts so Prism.languages.* is a plain global by the time app.js
        (type=module, deferred by default) runs. Load order matters: each

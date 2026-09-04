@@ -103,6 +103,10 @@
 /* --- create/edit form modal --- */
 
 #autopilotFormModal .modal-box { width: min(640px, 92vw); }
+/* .settings-row is a horizontal flex row (style-settings.css); the prompt
+   textarea needs to stack its label above a full-width control instead. */
+.settings-row-stacked { flex-direction: column; align-items: stretch; gap: 4px; }
+.settings-row-stacked textarea { width: 100%; resize: vertical; }
 .autopilot-form-warning {
   border-left: 3px solid var(--warn, #e0a030);
   padding: 0.4rem 0.6rem;

@@ -24,6 +24,7 @@ import { initTurnChart } from '/turn-chart.js';
 import { initDetailPane } from '/detail-pane.js';
 import { initSessionListPane } from '/session-list-pane.js';
 import { initAutopilotPanel } from '/autopilot-panel.js';
+import { initAutopilotForm } from '/autopilot-form.js';
 import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
@@ -176,8 +177,43 @@ const autopilotPanel = initAutopilotPanel({
   // Same persistence pair sessionListPane above uses.
   initialWidth: persistedTurnChartPrefs.autopilotPaneWidth,
   onWidthChange: (width) => patchSettings({ autopilotPaneWidth: width }),
-  onEdit: null,   // wired to autopilot-form.js below
-  onCreate: null,
+  onEdit: (pilot) => autopilotForm.openEdit(pilot),
+  onCreate: () => autopilotForm.openCreate(),
+});
+
+const autopilotForm = initAutopilotForm({
+  modal: document.getElementById('autopilotFormModal'),
+  form: document.getElementById('autopilotForm'),
+  titleEl: document.getElementById('autopilotFormTitle'),
+  errorEl: document.getElementById('autopilotFormError'),
+  warningsEl: document.getElementById('autopilotFormWarnings'),
+  cancelBtn: document.getElementById('apCancelBtn'),
+  browseBtn: document.getElementById('apBrowseBtn'),
+  getProviderCatalog: () => providerCatalog,
+  openDirBrowser: (onSelect) => dirBrowser.open(cwdInput.value || '', onSelect),
+  onSaved: () => autopilotPanel.refresh(),
+  fields: {
+    name: document.getElementById('apName'),
+    cwd: document.getElementById('apCwd'),
+    provider: document.getElementById('apProvider'),
+    model: document.getElementById('apModel'),
+    effort: document.getElementById('apEffort'),
+    mode: document.getElementById('apMode'),
+    prompt: document.getElementById('apPrompt'),
+    everyMinutes: document.getElementById('apEveryMinutes'),
+    windowEnabled: document.getElementById('apWindowEnabled'),
+    windowRow: document.getElementById('apWindowRow'),
+    windowFrom: document.getElementById('apWindowFrom'),
+    windowTo: document.getElementById('apWindowTo'),
+    weekdays: document.getElementById('apWeekdays'),
+    gateEnabled: document.getElementById('apGateEnabled'),
+    gateRow: document.getElementById('apGateRow'),
+    gateCommand: document.getElementById('apGateCommand'),
+    gateTimeout: document.getElementById('apGateTimeout'),
+    inputPolicy: document.getElementById('apInputPolicy'),
+    inputPolicyRow: document.getElementById('apInputPolicyRow'),
+    maxStallMinutes: document.getElementById('apMaxStallMinutes'),
+  },
 });
 
 const operatorGate = initOperatorGate({
@@ -2009,6 +2045,7 @@ async function applyAvailableProviders() {
     const providers = catalog.list();
     if (!providers.length) return;
     providerCatalog = catalog;
+    autopilotForm.refreshProviders(); // the placeholder catalog has no effort lists
     const selected = providerCatalog.validate(startProviderSelect.value) || providers[0].id;
     startProviderSelect.innerHTML = '';
     for (const provider of providers) {
