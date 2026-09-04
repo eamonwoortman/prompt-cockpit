@@ -86,6 +86,36 @@ test('shutdown is idempotent - a second call returns the same promise and does n
   assert.deepEqual(tracker.calls, ['SIGKILL', 'settled', 'persist']);
 });
 
+test('Task 8 I2: an onAfterClose hook runs after every session is closed, and is awaited before the grace period', async () => {
+  const order = [];
+  const registry = fakeRegistry(['a', 'b']);
+  const tracker = fakeTracker([{ pid: 1 }]);
+  const shutdown = createShutdown({
+    registry,
+    tracker,
+    graceMs: 5,
+    logImpl: () => {},
+    sleepImpl: async () => { order.push('grace'); },
+  });
+  shutdown.onBeforeClose(() => { order.push('before'); });
+
+  const patchedClose = registry.closeSession;
+  registry.closeSession = (id) => { order.push(`close:${id}`); return patchedClose(id); };
+
+  let resolveAfter;
+  shutdown.onAfterClose(() => new Promise((resolve) => {
+    resolveAfter = () => { order.push('after'); resolve(); };
+    // Prove perform() actually awaits this rather than firing it and moving
+    // on - if the grace period ran before we resolve, it would show up in
+    // `order` ahead of 'after'.
+    setTimeout(resolveAfter, 5);
+  }));
+
+  await shutdown.run('test');
+
+  assert.deepEqual(order, ['before', 'close:a', 'close:b', 'after', 'grace']);
+});
+
 test('a throwing hook or a throwing closeSession does not abort the rest of the shutdown', async () => {
   const registry = fakeRegistry(['a', 'b']);
   registry.closeSession = (id) => {
@@ -103,6 +133,8 @@ test('a throwing hook or a throwing closeSession does not abort the rest of the 
   });
   shutdown.onBeforeClose(() => { throw new Error('hook blew up'); });
   shutdown.onBeforeClose(async () => { throw new Error('async hook blew up'); });
+  // Task 8 I2: onAfterClose gets the same per-hook try/catch as onBeforeClose.
+  shutdown.onAfterClose(async () => { throw new Error('after hook blew up'); });
 
   await shutdown.run('test');
 
@@ -111,4 +143,5 @@ test('a throwing hook or a throwing closeSession does not abort the rest of the 
   assert.match(logged.join('\n'), /hook blew up/);
   assert.match(logged.join('\n'), /async hook blew up/);
   assert.match(logged.join('\n'), /close blew up/);
+  assert.match(logged.join('\n'), /after hook blew up/);
 });

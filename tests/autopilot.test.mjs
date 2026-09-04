@@ -105,7 +105,7 @@ const availableProviders = {
 async function harness({
   nowMs = 1_000_000, providers = availableProviders, spawnImpl,
   providerProbeTimeoutMs, platform, spawnSyncImpl, killImpl,
-  setTimeoutImpl, clearTimeoutImpl,
+  setTimeoutImpl, clearTimeoutImpl, stopTickDeadlineMs,
 } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'cockpit-autopilot-'));
   let clock = nowMs;
@@ -127,6 +127,7 @@ async function harness({
     ...(killImpl !== undefined ? { killImpl } : {}),
     ...(setTimeoutImpl !== undefined ? { setTimeoutImpl } : {}),
     ...(clearTimeoutImpl !== undefined ? { clearTimeoutImpl } : {}),
+    ...(stopTickDeadlineMs !== undefined ? { stopTickDeadlineMs } : {}),
   });
   return {
     dir, store, log, registry, tracker, supervisor,
@@ -481,6 +482,10 @@ test('runNow bypasses due-ness and the window but still honours the lock', async
   const outside = new Date(2026, 8, 1, 3, 0, 0, 0).getTime();
   const h = await harness({ nowMs: outside });
   try {
+    // Fix round 1 (I5): runNow now refuses outright on an unstarted
+    // supervisor - start() first so this test still exercises due-ness/
+    // window bypass and the lock, not the new guard.
+    h.supervisor.start();
     const p = await h.store.createPilot(pilotInput({
       schedule: { everyMinutes: 30, window: { fromMinute: 9 * 60, toMinute: 17 * 60, weekdays: [1] } },
     }));
@@ -501,6 +506,10 @@ test('runNow bypasses due-ness and the window but still honours the lock', async
 test('runNow on a disabled pilot refuses rather than silently running a pilot the operator turned off', async () => {
   const h = await harness();
   try {
+    // Fix round 1 (I5): the not-running guard runNow() now has sits AFTER
+    // the disabled check (see that guard's own comment), so this test still
+    // reaches it without needing start() - kept unstarted deliberately, to
+    // also prove the disabled check itself doesn't depend on being armed.
     const p = await h.store.createPilot(pilotInput());
     await h.store.setEnabled(p.id, false);
     const result = await h.supervisor.runNow(p.id);
@@ -543,6 +552,8 @@ test('C1: two overlapping runNow calls for the same pilot fire at most once (the
   };
   const h = await harness({ providers });
   try {
+    // Fix round 1 (I5): runNow now refuses on an unstarted supervisor.
+    h.supervisor.start();
     const p = await h.store.createPilot(pilotInput());
 
     const call1 = h.supervisor.runNow(p.id);
@@ -1045,6 +1056,8 @@ test('the cross-pilot cap race is closed too: two overlapping runNow calls for D
   };
   const h = await harness({ providers });
   try {
+    // Fix round 1 (I5): runNow now refuses on an unstarted supervisor.
+    h.supervisor.start();
     await h.store.updateSettings({ maxConcurrentRuns: 1 });
     const pB = await h.store.createPilot(pilotInput({ name: 'B' }));
     const pC = await h.store.createPilot(pilotInput({ name: 'C' }));
@@ -1772,6 +1785,105 @@ test('fix round 1, I-1: start() installs the interceptor and stop() tears it dow
     await h.supervisor.stop();
     assert.deepEqual(h.registry.approvalInterceptorCalls, [h.registry.approvalInterceptorCalls[0], null]);
   } finally {
+    await h.cleanup();
+  }
+});
+
+// --- Task 8 fix round 1: I1, I3 -------------------------------------------
+
+test('Task 8 I1: a pilot deleted while blockingReason is held open on the provider probe does not fire, and leaves no phantom lock', async () => {
+  const resolvers = [];
+  const providers = {
+    getProvider: (id) => ({
+      id, label: id, efforts: ['low'],
+      isAvailable: () => new Promise((resolve) => resolvers.push(resolve)),
+    }),
+  };
+  const h = await harness({ providers });
+  try {
+    h.supervisor.start();
+    const p = await h.store.createPilot(pilotInput());
+
+    const call = h.supervisor.runNow(p.id);
+    await pollUntil(() => resolvers.length === 1, { message: 'the provider probe was never reached' });
+
+    // Deleted mid-blockingReason - exactly the window I1 closes. There is no
+    // entry in `runs` yet for the DELETE route's own force-close to find,
+    // since fire() has not claimed a reservation.
+    await h.store.deletePilot(p.id);
+    resolvers[0](true);
+
+    const result = await call;
+    assert.equal(result.fired, false);
+    assert.match(result.reason, /deleted/i);
+    assert.equal(h.registry.created.length, 0, 'no session was created for a pilot that no longer exists');
+    assert.deepEqual(h.supervisor.status(), [], 'no phantom lock left behind');
+  } finally {
+    await h.supervisor.stop();
+    await h.cleanup();
+  }
+});
+
+test('Task 8 I1: reviewRuns releases the lock and closes the session for a run whose pilot vanished without going through the DELETE route (defense in depth)', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick(); // fires; s-1 is now live and holds the lock
+    assert.equal(h.supervisor.status().length, 1);
+
+    // The record disappears WITHOUT going through the DELETE route's own
+    // force-close (e.g. a hand-edited store, or whatever sliver of the race
+    // fire()'s own re-check doesn't fully close) - reviewRuns must not wedge
+    // this pilot's concurrency slot behind a run it can no longer classify.
+    await h.store.deletePilot(p.id);
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick();
+
+    assert.deepEqual(h.supervisor.status(), [], 'the lock must be released once the pilot record is gone');
+    assert.deepEqual(h.registry.closed, ['s-1'], 'the orphaned session must be closed, not left running unsupervised');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('Task 8 I3: stop() with a tick wedged on a never-resolving provider probe returns within its own deadline instead of hanging on it', async () => {
+  let probeReached = false;
+  const providers = {
+    getProvider: (id) => ({
+      id, label: id, efforts: ['low'],
+      isAvailable: () => { probeReached = true; return new Promise(() => {}); }, // never settles
+    }),
+  };
+  // providerProbeTimeoutMs: 0 disables probeAvailability's OWN timeout
+  // (`if (!providerProbeTimeoutMs) return attempt;`), so this proves stop()
+  // bounds the wait itself rather than relying on that unrelated timeout.
+  const h = await harness({ providers, providerProbeTimeoutMs: 0, stopTickDeadlineMs: 20 });
+  try {
+    await h.store.createPilot(pilotInput());
+    const wedged = h.supervisor.tick(); // will get stuck inside blockingReason's probe
+
+    // evaluate() only reaches the probe after its own first await (store.read())
+    // resumes - call stop() too early (synchronously, right after tick()) and
+    // its `stopping = true` lands before evaluate() ever reaches the probe,
+    // which would make this test pass for the wrong reason (evaluate() bailing
+    // on its own `if (stopping) return;` guard, not on the deadline below).
+    await pollUntil(() => probeReached, { message: 'the provider probe was never reached' });
+
+    const startedAt = Date.now();
+    await h.supervisor.stop();
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 500, `stop() must not wait on a probe that never resolves (took ${elapsedMs}ms)`);
+
+    // Nothing ever resolves the probe, so the wedged tick can never itself
+    // settle - confirm stop() abandoned the wait rather than somehow making
+    // it finish.
+    let settled = false;
+    wedged.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(settled, false, 'the wedged heartbeat must still be stuck on the probe, not finished');
+  } finally {
+    // Best-effort: nothing will ever resolve the wedged probe, so there is
+    // nothing left to await - cleanup() only removes the temp store dir.
     await h.cleanup();
   }
 });

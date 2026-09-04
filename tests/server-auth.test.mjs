@@ -25,7 +25,7 @@ process.env.COCKPIT_RUNTIME_FILE = path.join(runtimeDir, 'runtime.json');
 // or autopilots.json/autopilot-log.jsonl land in the developer's real home.
 const cockpitHomeDir = await mkdtemp(path.join(tmpdir(), 'cockpit-server-auth-home-'));
 process.env.COCKPIT_HOME = cockpitHomeDir;
-const { server, PORT, HOST, seedSessionDefaults } = await import('../src/server.js');
+const { server, PORT, HOST, seedSessionDefaults, autopilot } = await import('../src/server.js');
 const { getOperatorToken } = await import('../src/operator-auth.js');
 const ORIGIN = `http://${HOST}:${PORT}`;
 
@@ -113,6 +113,16 @@ function fakeStartSession() {
 
 let lastPluginEnabled = null;
 let lastInterruptCalled = false;
+
+// Fix round 1 (cheap item 5): `registry._reset()` (called throughout this
+// file, once per test) nulls the registry's own process-global hooks
+// (session-removed listener, approval interceptor) but has no reach into
+// `autopilot`'s internal state - the supervisor's constructor registers its
+// own session-removed listener directly against this same module instance
+// (autopilot.js: "registered in the CONSTRUCTOR, not in start()"), and that
+// registration survives every `_reset()` in this file. Harmless today since
+// no test here drives a real pilot run, but the next person adding one
+// should know `_reset()` alone will not un-wire it.
 
 test('GET / serves the launcher page', async () => {
   const res = await fetch(`${ORIGIN}/`);
@@ -249,6 +259,38 @@ test('GET /api/system/memory requires the operator token and reports live sessio
   assert.ok(reported, 'the live row must appear in the snapshot');
   assert.equal(reported.tasks, 0);
   assert.equal(reported.eventLogEntries, 0);
+});
+
+// Fix round 1 (I4): the only existing coverage of this route (in
+// tests/autopilot-routes.test.mjs) asserted a 404 on a nonexistent session -
+// neither the 200 (pilot-owned) nor the 403 (not pilot-owned) branch that
+// `isPilotOwned` (src/server.js:46) actually gates was covered. Fabricating
+// a run directly in `autopilot._runs` (autopilot.js exposes it verbatim for
+// exactly this) exercises both without starting the real supervisor or
+// spawning a pilot's session.
+test('GET /api/sessions/:id/attach-token returns the token for a pilot-owned session', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  autopilot._runs.set('fake-pilot-attach-token', {
+    pilotId: 'fake-pilot-attach-token', sessionId: row.id, startedAt: Date.now(), sawResult: false, blockedLogged: false,
+  });
+  try {
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/attach-token`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.id, row.id);
+    assert.equal(body.token, row.token);
+  } finally {
+    autopilot._runs.delete('fake-pilot-attach-token');
+  }
+});
+
+test('GET /api/sessions/:id/attach-token refuses a hand-driven session that is not pilot-owned', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/attach-token`);
+  assert.equal(res.status, 403);
+  assert.match((await res.json()).error, /auto-pilot/i);
 });
 
 test('a request with a foreign Host is rejected, even with the right Origin', async () => {

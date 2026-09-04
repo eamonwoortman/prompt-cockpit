@@ -100,6 +100,16 @@ test('POST /api/autopilots rejects a bad payload with 400 and a usable message',
   }
 });
 
+test('Task 8 (cheap item 1): a literal JSON null body is 400, not a 500 from dereferencing a null body', async () => {
+  // readJsonBody (src/http-utils.js) normalizes any non-object JSON value -
+  // null, an array, a bare number - to {} before a route ever sees it, so
+  // this exercises validateAgainstProviders' body.cwd/body.provider reads
+  // with nothing supplied, same as an empty object would.
+  const res = await api('/api/autopilots', { method: 'POST', body: 'null' });
+  assert.equal(res.status, 400);
+  assert.equal(typeof (await res.json()).error, 'string');
+});
+
 test('update, toggle, logs and delete round-trip', async () => {
   const pilot = await (await api('/api/autopilots', { method: 'POST', body: pilotBody({ name: 'RoundTrip' }) })).json();
 

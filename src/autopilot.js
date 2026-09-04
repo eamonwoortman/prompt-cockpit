@@ -30,6 +30,16 @@ const GATE_STDOUT_TAIL = 200;
 // Same order of magnitude as child-tracker.js's own probeProcessStartTime
 // default.
 const PROVIDER_PROBE_TIMEOUT_MS = 10_000;
+// Fix round 1 (I3): bounds stop()'s own wait on an in-flight tick.
+// PROVIDER_PROBE_TIMEOUT_MS (10s) alone can exceed server.js's FORCE_EXIT_MS
+// watchdog (8s), so an unbounded `await ticking` risked the watchdog firing
+// and process.exit()ing before the grace period, killTracked's force-kill
+// pass, and the runtime.json flush ever ran - leaving both a surviving paid
+// CLI and the stale runtime.json entry the whole process-ownership branch
+// exists to prevent. Safe to abandon: `stopping` is set as the very first
+// statement of stop(), before this wait, so the in-flight tick provably
+// cannot fire or spawn a gate regardless of whether this wait completes.
+const STOP_TICK_DEADLINE_MS = 2_000;
 
 export function createAutopilot({
   registry,
@@ -58,6 +68,9 @@ export function createAutopilot({
   // way setIntervalImpl/clearIntervalImpl already are.
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
+  // Fix round 1 (I3): threaded the same way providerProbeTimeoutMs is, so a
+  // test can prove stop() returns within the deadline without a real delay.
+  stopTickDeadlineMs = STOP_TICK_DEADLINE_MS,
 }) {
   // pilotId -> live run state. This map IS the concurrency lock: `sessionId`
   // checked against registry.get(), because the registry row knows whether a
@@ -374,6 +387,15 @@ export function createAutopilot({
     // distinct sentinel, same reasoning as 'locked' below - null also means
     // "createSession failed", which is not what happened here.
     if (stopping) return 'stopping';
+    // Fix round 1 (I1): the pilot record can be deleted while THIS call was
+    // awaiting blockingReason() - up to 10 minutes for a gated pilot - during
+    // which there is no entry in `runs` yet for the DELETE route's own
+    // force-close to find. Re-check the record still exists immediately
+    // before claiming a reservation for it, so that window closes to the gap
+    // between this read and the synchronous claim below, rather than the
+    // whole of blockingReason(). reviewRuns() below is the second half of
+    // this fix, for whatever sliver of that gap remains.
+    if (!(await store.getPilot(pilot.id))) return 'deleted';
     // Round 1 review (C1) - THE fix: claim the slot SYNCHRONOUSLY, with no
     // `await` between this check and the mutation that records it.
     // blockingReason's own checks of `runs` are necessarily stale by the
@@ -453,6 +475,18 @@ export function createAutopilot({
     // the cwd's persisted session-defaults here would let two pilots in one
     // folder clobber each other - the same reasoning as the rewind route
     // passing explicit defaults (src/routes/sessions.js:21-27).
+
+    // Fix round 1 (I1, narrower variant): stamp `sessionId` onto the existing
+    // reservation the instant the row exists, synchronously - not after the
+    // `await tracker.attachPilot` below. `runs.get(pilot.id)` is the same
+    // object already in the map, so this mutates it in place. Before this,
+    // `live.sessionId` stayed null for the whole span of that await, during
+    // which the DELETE route's `registry.closeSession(live.sessionId)` would
+    // silently no-op against a session that had, in fact, already been
+    // created - unreachable today only because `trackedPid` happens to be
+    // null for every provider at this exact instant (see below), not because
+    // the gap doesn't exist.
+    runs.get(pilot.id).sessionId = row.id;
 
     const pid = row.handle?.trackedPid ?? null;
     if (pid != null) {
@@ -566,7 +600,26 @@ export function createAutopilot({
       const row = registry.get(run.sessionId);
       if (!row) continue; // onSessionRemoved already classified it
       const pilot = pilotsById.get(pilotId);
-      if (!pilot) continue; // deleted mid-run; the DELETE route force-closes it
+      if (!pilot) {
+        // Fix round 1 (I1): this comment used to read "deleted mid-run; the
+        // DELETE route force-closes it" - true only when the DELETE route
+        // sees the run in `supervisor.status()` before it fires. fire()'s own
+        // re-check narrows that window but does not close it (the check and
+        // the reservation claim are still two ticks apart), so a pilot can
+        // still vanish while a run for it is live here. Release the lock and
+        // close the orphaned session ourselves, in the same order the DELETE
+        // route uses, rather than leaking this pilot's concurrency slot for
+        // the rest of the process's life.
+        await abandonRun(pilotId);
+        try {
+          registry.closeSession(run.sessionId);
+        } catch (err) {
+          try {
+            logImpl(`autopilot: failed to close a deleted pilot's orphaned session (${pilotId}): ${String(err?.message || err)}`);
+          } catch { /* logging must never break review of the remaining runs */ }
+        }
+        continue;
+      }
 
       // Ruling F1: fire()'s own eager `row.handle?.trackedPid` read is null
       // for every provider at that instant - Grok assigns it inside an async
@@ -885,6 +938,16 @@ export function createAutopilot({
     // run-now bypasses preconditions 2 and 3 (due-ness and the window) but
     // honours 4-8 - the safety ones.
     if (!pilot.enabled) return { fired: false, reason: 'this pilot is disabled' };
+    // Fix round 1 (I5): `start()` is what installs the approval interceptor
+    // and arms the heartbeat that reviewRuns() needs for completion
+    // detection, the stall backstop, and outcome recording - none of which
+    // exist on an unstarted supervisor. In production that's harmless
+    // because start() runs before any request can be dispatched, but every
+    // *importer* of this module gets a fully wired runNow() for free unless
+    // it calls start() itself - which made a stray test one line away from
+    // spawning a real, billing, unsupervised session. Refuse rather than
+    // silently launch something nothing will ever review.
+    if (!timer) return { fired: false, reason: 'auto-pilot is not running' };
     const { costUsd: dailySpend } = await log.dailyCostUsd(now());
     const reason = await blockingReason(pilot, settings, { dailySpend, rateLimited: rateLimitedProviders() });
     if (reason) {
@@ -897,6 +960,9 @@ export function createAutopilot({
     // failure, rather than misreporting both as "the session could not be
     // created".
     if (row === 'stopping') return { fired: false, reason: 'autopilot is stopping' };
+    // Fix round 1 (I1): fire()'s own re-check found the pilot gone between
+    // this call and the reservation it was about to claim.
+    if (row === 'deleted') return { fired: false, reason: 'this pilot was deleted' };
     return row ? { fired: true, sessionId: row.id } : { fired: false, reason: 'the session could not be created' };
   }
 
@@ -960,7 +1026,17 @@ export function createAutopilot({
     // never fires again and status() shows it running forever. (The approval
     // interceptor above genuinely does need to be torn down here, because
     // it changes live session behaviour - the removal listener does not.)
-    if (ticking) await ticking;
+    // Fix round 1 (I3): race rather than await unconditionally - see the
+    // STOP_TICK_DEADLINE_MS comment above for why abandoning this wait is
+    // safe. clearTimeoutImpl in .finally() so a tick that settles well within
+    // the deadline doesn't leave a stray timer behind.
+    if (ticking) {
+      let deadlineHandle;
+      const deadline = new Promise((resolve) => {
+        deadlineHandle = setTimeoutImpl(resolve, stopTickDeadlineMs);
+      });
+      await Promise.race([ticking, deadline]).finally(() => clearTimeoutImpl(deadlineHandle));
+    }
     await drain();
   }
 

@@ -19,10 +19,22 @@ export function createShutdown({
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   const beforeClose = [];
+  const afterClose = [];
   let running = null;
 
   function onBeforeClose(fn) {
     if (typeof fn === 'function') beforeClose.push(fn);
+  }
+
+  // Fix round 1 (I2): symmetric with onBeforeClose - same registration
+  // shape, same per-hook try/catch so one bad hook cannot strand teardown.
+  // Runs after every session is closed but before the grace/kill pass and
+  // the final flush, so a hook that needs the removal listener's own
+  // fire-and-forget writes to have been kicked off (autopilot.drain(), which
+  // awaits recordRun/log.append for every run this close loop just finished)
+  // can be awaited here instead of racing process.exit().
+  function onAfterClose(fn) {
+    if (typeof fn === 'function') afterClose.push(fn);
   }
 
   async function perform(reason) {
@@ -48,6 +60,21 @@ export function createShutdown({
         registry.closeSession(id);
       } catch (err) {
         logImpl(`closing session ${id} failed: ${String(err?.message || err)}`);
+      }
+    }
+
+    // Fix round 1 (I2): the removal listener stays registered deliberately
+    // (ruling I6 elsewhere), so each close above fired onSessionRemoved ->
+    // track(finishRun(...)) as a floating promise nothing here awaited -
+    // stop() had already returned by the time this loop ran, and
+    // process.exit() was one `await` away. Await every after-close hook
+    // before reaching for the grace period, so a hook whose job is draining
+    // exactly those floating writes (autopilot.drain()) gets the chance to.
+    for (const fn of afterClose) {
+      try {
+        await fn();
+      } catch (err) {
+        logImpl(`shutdown hook failed: ${String(err?.message || err)}`);
       }
     }
 
@@ -91,5 +118,5 @@ export function createShutdown({
     return running;
   }
 
-  return { run, onBeforeClose, isShuttingDown: () => running !== null };
+  return { run, onBeforeClose, onAfterClose, isShuttingDown: () => running !== null };
 }

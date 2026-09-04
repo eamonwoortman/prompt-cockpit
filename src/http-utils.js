@@ -9,7 +9,17 @@ export async function readJsonBody(req) {
   for await (const chunk of req) chunks.push(chunk);
   if (chunks.length === 0) return {};
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    // A syntactically valid but non-object JSON body (`null`, `42`, `"x"`, an
+    // array) used to come back verbatim, and every route dereferences a field
+    // straight off this return value with no guard of its own (e.g.
+    // routes/sessions.js's `body.cwd`, routes/autopilot.js's
+    // validateAgainstProviders) - so a literal `null` body 500'd as a
+    // TypeError instead of 400ing like every other malformed body. Folding
+    // the guard in here, next to the JSON.parse that already special-cases
+    // failure, makes it safe everywhere at once instead of one call site at
+    // a time.
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
   }

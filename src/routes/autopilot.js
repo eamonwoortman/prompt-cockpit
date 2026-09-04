@@ -118,11 +118,19 @@ export function registerAutopilotRoutes(router, { store, log, supervisor, regist
     if (!(await store.getPilot(id))) return respondJson(res, 404, { error: `unknown pilot: ${id}` });
     const result = await supervisor.runNow(id);
     if (result.fired) return respondJson(res, 200, result);
-    // `error` as well as `reason`: every client error path in this app reads
-    // `error` (public/autopilot-panel.js's post(), and the existing panels),
-    // so without it the pane renders a bare "409" instead of "already
+    // `error` as well as `reason`: every existing panel's client error path
+    // reads `error`, and the auto-pilot panel a later task adds will too -
+    // without it the pane renders a bare status code instead of "already
     // running".
-    return respondJson(res, 409, { error: result.reason, ...result });
+    //
+    // Fix round 1 (cheap item 4): "the session could not be created" is
+    // createSession itself failing (a bad cwd, a CLI that refuses to start)
+    // - a real internal failure, not a conflict with another run - so it
+    // gets its own 500-class status rather than being lumped in with the
+    // honest 409 refusals above it (already running, at the concurrency cap,
+    // rate limited, spend-capped, gate failed, deleted, not started).
+    const status = result.reason === 'the session could not be created' ? 500 : 409;
+    return respondJson(res, status, { error: result.reason, ...result });
   });
 
   router.get('/api/autopilots/:id/logs', async (req, res, url, { id }) => {
