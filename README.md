@@ -52,6 +52,38 @@ Settings (gear) covers MCP servers, plugins, permission rules, and UI prefs. On 
 
 MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`), plus Codex as a third provider. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
 
+**Auto-pilot** (scheduled unattended sessions). A pilot is a saved configuration
+plus a schedule; each firing starts a *new* session in a configured folder,
+sends one stored prompt, runs under a chosen permission mode, and is
+force-closed when the work is done. Configured from the header's Auto-pilot
+pane (Pilots and Logs tabs); notifications for anything needing a human land in
+the bell beside it. A global daily spend cap and a per-pilot failure back-off
+(auto-disable after 5 consecutive failures) are the guard rails. On Claude, a
+pilot can optionally auto-answer the agent's own `AskUserQuestion` prompts by
+taking the recommended option.
+
+Four limitations, by design or by available signal:
+
+- **Pilots do not run while the cockpit is down.** They live and die with the
+  process - there is no OS cron registration, deliberately. "Cron" invites the
+  opposite assumption, so: closing the cockpit stops every pilot.
+- **The spend cap is best-effort.** `costForUsage` returns `null` rather than
+  guessing for a model with no pricing entry, so runs on an unpriced model
+  contribute nothing to the total and can carry it past the cap. The pane says
+  so when it happens.
+- **The stall timeout is a runaway backstop, not a hang detector.** Only
+  `sdk:message` events advance the progress counter, so a single long tool call
+  (a build, a test suite, an `npm install`) looks identical to a hang. The
+  default is 60 minutes for that reason; anything shorter force-closes healthy
+  runs.
+- **Rate-limit back-off is best-effort.** The signal is polled and
+  self-clearing, so a short limit window can be missed entirely.
+
+Unattended agents in `acceptEdits` or `bypassPermissions` on a timer means
+unsupervised writes to real repositories. Run-now, the run log, the visible
+pane and the failure auto-disable are the mitigations; the git-commit-guard
+covers only its own narrow case.
+
 See `tests/README.md` for automated vs hand-verified coverage, and `backlog.md` for open follow-ups.
 
 ## License

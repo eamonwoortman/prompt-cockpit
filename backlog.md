@@ -30,7 +30,7 @@ Ordered by user-facing value if fixed (2026-08-25) - active pain points and near
 
 - [2026-09-04] [M] Final fix wave, item 6: `src/json-store.js`'s `readJsonChecked` cannot distinguish "file does not exist" from "file exists but is unreadable" - both take the same `catch` branch and both come back as "no pilots configured." An `EACCES` on `autopilots.json` (permissions changed under the target project, a locked-down `.claude/` directory, antivirus lock, etc.) now silently reads as zero pilots rather than surfacing as an error, which used to be a merely-confusing settings gap and now, on this branch, silently governs whether any unattended agent runs at all. Worth a distinct code path (log or surface `EACCES`/`EPERM` differently from `ENOENT`) precisely because this file's read result now has a bigger blast radius than every other consumer of `json-store.js`.
 
-- [2026-09-04] [M] Final fix wave, item 6: `tests/README.md` (the file CLAUDE.md names as the authority on what's unit-tested vs. hand-verified-only) has no auto-pilot entries at all, despite `tests/autopilot.test.mjs`, `tests/autopilot-store.test.mjs`, `tests/autopilot-log.test.mjs`, `tests/autopilot-schedule.test.mjs`, `tests/autopilot-answer.test.mjs` and `tests/autopilot-routes.test.mjs` all existing, plus this fix wave's own `wireAutopilot` coverage added to `tests/shutdown.test.mjs`. Debt filed here rather than fixed directly because `tests/README.md` carries an unrelated uncommitted operator change this fix wave was told not to touch. When it's next edited, the thin spots worth calling out explicitly are: the attach-token 200-vs-403 path in the autopilot routes, and `wireAutopilot`'s three production wiring lines in `src/server.js` (covered via fakes and `src/autopilot-wiring.js`'s own module, exercised in `tests/shutdown.test.mjs` rather than via a real `server.js` import).
+- [2026-09-04, section written 2026-09-04] [M] Final fix wave, item 6: `tests/README.md` (the file CLAUDE.md names as the authority on what's unit-tested vs. hand-verified-only) had no auto-pilot entries at all, despite `tests/autopilot.test.mjs`, `tests/autopilot-store.test.mjs`, `tests/autopilot-log.test.mjs`, `tests/autopilot-schedule.test.mjs`, `tests/autopilot-answer.test.mjs` and `tests/autopilot-routes.test.mjs` all existing, plus this fix wave's own `wireAutopilot` coverage added to `tests/shutdown.test.mjs`. The auto-pilot section has now been written into the working tree, but it is sitting alongside an unrelated uncommitted operator change to the same file that this task was told not to touch, so it is not yet committed - it is the operator's own commit to make, not a claim that the gap is closed in git. The thin spots the new section calls out, and that remain worth tracking here until they're addressed rather than just documented: the attach-token 200-vs-403 path in the autopilot routes, and `wireAutopilot`'s three production wiring lines in `src/server.js` (covered via fakes and `src/autopilot-wiring.js`'s own module, exercised in `tests/shutdown.test.mjs` rather than via a real `server.js` import).
 
 - [2026-09-04] [L] Final fix wave, item 6: `src/autopilot.js`'s `lastSkipReason` map is never pruned when a pilot is deleted, so a long-lived cockpit process that has pilots created and deleted over time accumulates one stale entry per deleted pilot for the life of the process. Unbounded but slow-growing (one small string per delete) and cosmetic rather than a real leak; fix is a one-line delete alongside wherever pilot deletion already touches the `runs` map.
 
@@ -66,6 +66,30 @@ Ordered by user-facing value if fixed (2026-08-25) - active pain points and near
 
 - [2026-08-25] [M] Reported: per-turn usage (tokens, and presumably cost derived from them) doesn't show for Codex sessions - stats-panel.js/turn-chart.js read it fine for Claude and Grok. Not yet investigated. First look: `src/codex-session.js` has no usage/tokens/cost_usd handling at all (grepped, zero hits), unlike session.js and grok-session.js which both feed per-turn usage into the same live-broadcast path session-registry.js expects - CLAUDE.md's Pricing note says Codex "relies on stamped cost_usd/ticks" from the app-server protocol, so check whether the app-server is even emitting that field, or whether it's emitted but codex-session.js is dropping it on the floor before it reaches the registry.
 
+- [2026-09-04] [M] Auto-pilot follow-ups, deliberately out of scope at ship
+  time (see `docs/superpowers/specs/2026-09-01-auto-pilot-design.md`):
+  (a) per-pilot spend caps alongside the global one - the cap is global because
+  one number is enough for a single operator, but two pilots with very
+  different budgets have no way to express that;
+  (b) a custom Claude spawner (`spawnClaudeCodeProcess`, `sdk.d.ts:2130`) for
+  Windows grandchild teardown. **Do not resurrect the revision-1 rationale for
+  this** - it claimed the SDK had no exit-time cleanup, which is false (it
+  registers its own `process.on('exit')`, and that applies to a custom spawner
+  too). The genuine open question is narrower: that handler only does
+  `stdin.end()` on win32, not a kill, so a Claude transport *may* survive exit
+  on Windows. Confirm that empirically before building anything;
+  (c) predictive limit checks, if a structured `/usage` ever exists. The
+  current one is unsuitable on purpose: `fetchAccountLimits()` spawns a real
+  `claude -p "/usage"` subprocess and returns plain text, and its own module
+  comment states it is on-demand and "never polled"
+  (`src/account-limits.js:1-34`). Parsing a human-readable table whose format
+  is not a contract, on a timer, against a module designed not to be polled, is
+  the brittle version;
+  (d) a rate-limit transition hook, if the current polled-and-self-clearing
+  signal proves too lossy in practice. The fix is a hook, not more polling;
+  (e) notifications covering non-pilot sessions - the natural base for the
+  MVP7 phone-approvals page above.
+
 ## [L] Cosmetic
 
 - [2026-08-20, restated 2026-08-24] [L] Docs/metadata drift: CLAUDE.md still describes two providers and server.js as the whole HTTP surface (Codex exists; routing is `router.js` + `src/routes/*`; grok-*, global-stats, git-commit-guard, markdown, titles, permission-rules, settings-file exist). tests/README.md's opening file list still names ~10 files; reality is 34 unit files. package.json still describes a Claude-only cockpit (`claude-prompt-cockpit`). grok-session.js's ACP `clientInfo` is still `claude-prompt-cockpit` `0.1.0`; Codex is `prompt_cockpit` `0.1.3`; package is `0.1.4`. Just do it - a fresh session starts from a wrong mental model. (The 2026-08-20 note that branch `stats-tab` was unmerged is no longer true - it is on `main`, `45cfeec`.)
@@ -99,4 +123,4 @@ Ordered by user-facing value if fixed (2026-08-25) - active pain points and near
 - File-content rewind (Grok does not offer it; do not fake Claude rewind)
 - Cross-provider resume
 - Live MCP reconnect on a running Grok ACP session (toggle persists; start a new session to pick it up)
-- [2026-08-26] app.js is still 2699 lines, above the thermo-nuclear-code-quality-review skill's 2000-line bar (down from 2811 after extracting settings-security-panel.js). Next candidates: the ~150-line block of loose getElementById DOM-lookup consts near the top; the recent-folders block (loadRecentFolders/rememberRecentFolder/renderRecentFolders); the agents-list rendering block (renderAgentsList/applyAgentArmedIndicator); and other per-feature settings-wiring blocks that could move into their owning modules' own init(), same pattern as settings-security-panel.js. Frontend has no jsdom test coverage (see tests/README.md), so any further split needs a manual browser click-through of the affected UI, not just a diff audit, before merging.
+- [2026-08-26] app.js is still 2699 lines, above the thermo-nuclear-code-quality-review skill's 2000-line bar (down from 2811 after extracting settings-security-panel.js). Next candidates: the ~150-line block of loose getElementById DOM-lookup consts near the top; the recent-folders block (loadRecentFolders/rememberRecentFolder/renderRecentFolders); the agents-list rendering block (renderAgentsList/applyAgentArmedIndicator); and other per-feature settings-wiring blocks that could move into their owning modules' own init(), same pattern as settings-security-panel.js. Frontend has no jsdom test coverage (see tests/README.md), so any further split needs a manual browser click-through of the affected UI, not just a diff audit, before merging. Auto-pilot's UI was added as four new modules (autopilot-panel.js, autopilot-form.js, notifications-panel.js, autopilot-format.js) with only wiring in app.js, so it is now 2717 lines - the pattern this entry asks for.
