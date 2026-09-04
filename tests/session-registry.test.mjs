@@ -1212,3 +1212,60 @@ test('_reset clears the session-removed listener so test files cannot leak one',
   assert.deepEqual(seen, []);
   registry._reset();
 });
+
+test('setApprovalInterceptor resolves a request before the row or any client ever sees it', () => {
+  registry._reset();
+  const seen = [];
+  registry.setApprovalInterceptor(({ row, request }) => {
+    seen.push({ id: row.id, toolName: request.toolName });
+    return { behavior: 'allow', updatedInput: { answered: true } };
+  });
+  try {
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    const ws = fakeWs();
+    registry.attachClient(row.id, ws);
+    ws.sent.length = 0;
+
+    const decision = impl.emitApprovalRequest({ questions: [] });
+
+    assert.equal(seen.length, 1);
+    assert.equal(row.pendingApprovals.length, 0, 'never pushed - the bell must not flicker');
+    assert.equal(ws.sent.some((m) => m.type === 'cockpit:approval-request'), false, 'never broadcast');
+    return decision.then((d) => assert.deepEqual(d, { behavior: 'allow', updatedInput: { answered: true } }));
+  } finally {
+    registry._reset();
+  }
+});
+
+test('an interceptor returning null falls through to today\'s behavior unchanged', () => {
+  registry._reset();
+  registry.setApprovalInterceptor(() => null);
+  try {
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    const ws = fakeWs();
+    registry.attachClient(row.id, ws);
+    ws.sent.length = 0;
+
+    impl.emitApprovalRequest({});
+
+    assert.equal(row.pendingApprovals.length, 1);
+    assert.equal(ws.sent.filter((m) => m.type === 'cockpit:approval-request').length, 1);
+  } finally {
+    registry._reset();
+  }
+});
+
+test('a throwing interceptor falls through rather than stranding the tool call', () => {
+  registry._reset();
+  registry.setApprovalInterceptor(() => { throw new Error('interceptor blew up'); });
+  try {
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    impl.emitApprovalRequest({});
+    assert.equal(row.pendingApprovals.length, 1);
+  } finally {
+    registry._reset();
+  }
+});

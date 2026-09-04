@@ -43,10 +43,36 @@ const sessions = new Map();
 // tell them apart - so on a crash or a human close it never stamps lastRunAt,
 // the pilot is due and lock-free on the very next heartbeat, and a session
 // dying at startup becomes a 15-second spawn loop.
+//
+// Like the approval interceptor below, the registry learns only that a
+// listener MAY exist here - never what a pilot is. Both hooks are documented
+// symmetrically for that reason.
 let sessionRemovedListener = null;
 
 export function setSessionRemovedListener(fn) {
   sessionRemovedListener = typeof fn === 'function' ? fn : null;
+}
+
+// Auto-pilot's AskUserQuestion auto-answer hook (src/autopilot.js +
+// src/autopilot-answer.js). Consulted in handleApprovalRequest BEFORE the row
+// push and the broadcast, so the bell never flickers for a question that is
+// about to be auto-answered. Returns a PermissionResult, or null to fall
+// through to today's behavior unchanged.
+//
+// MUST be synchronous: handleApprovalRequest is called from session.js's
+// canUseTool callback and pushes/broadcasts immediately afterwards. That is
+// safe - session.js registers the requestId in its own map (src/session.js:288)
+// BEFORE invoking this callback (:289), so an interceptor resolving
+// synchronously always finds its entry.
+//
+// Like the removed-listener above, the registry learns only that a hook may
+// exist - never what a pilot is. Scoping to pilot-owned rows is the
+// interceptor's own job; it is one process-global hook, and an unscoped one
+// would silently auto-answer questions in hand-driven sessions.
+let approvalInterceptor = null;
+
+export function setApprovalInterceptor(fn) {
+  approvalInterceptor = typeof fn === 'function' ? fn : null;
 }
 
 // The single place a row is dropped. `reason` is 'closed' or 'error'.
@@ -359,7 +385,7 @@ export function closeSession(id) {
   clearAutoContinueTimer(row);
   // For a delegated turn: session.js's close() only interrupts the current turn and closes
   // the input queue - the interrupted turn's own `result` still arrives
-  // asynchronously later, per its own comment - but sessions.delete(id)
+  // asynchronously later, per its own comment - but removeSession(id, 'closed')
   // below happens synchronously right now, so by the time that late
   // `result` reaches handleMessage, `sessions.get(id)` finds nothing and
   // bails before ever reaching the pendingResultTags shift/relay. Without
@@ -380,6 +406,7 @@ export function closeSession(id) {
 export function _reset() {
   sessions.clear();
   sessionRemovedListener = null;
+  approvalInterceptor = null;
 }
 
 export function list() {
@@ -1426,6 +1453,26 @@ function broadcastUsage(id) {
 
 function handleApprovalRequest(id, request) {
   const row = sessions.get(id);
+  if (row && approvalInterceptor) {
+    let decision = null;
+    try {
+      decision = approvalInterceptor({ row, request });
+    } catch (err) {
+      // Falling through to a human beats stranding the tool call.
+      console.error(`approval interceptor failed for ${id}:`, err);
+      decision = null;
+    }
+    if (decision) {
+      // Straight to the handle, not the exported resolveApproval() above:
+      // there is no pendingApprovals entry to splice (we never pushed one)
+      // and an auto-answer never grants an always-allow scope. It also cannot
+      // double-resolve - session.js's resolveApproval deletes before
+      // resolving (src/session.js:650-652), so a human click racing this is a
+      // no-op returning false.
+      row.handle.resolveApproval(request.requestId, decision);
+      return;
+    }
+  }
   if (row) {
     if (!row.pendingApprovals.some((r) => r.requestId === request.requestId)) {
       row.pendingApprovals.push(request);

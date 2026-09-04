@@ -1666,3 +1666,88 @@ test('I3: a run removed as errored after accruing usage still logs a costUsd, so
     await h.cleanup();
   }
 });
+
+test('the interceptor auto-answers AskUserQuestion only for pilot-owned rows on inputPolicy: recommended', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput({ name: 'Auto', inputPolicy: 'recommended' }));
+    let installed = null;
+    h.registry.setApprovalInterceptor = (fn) => { installed = fn; };
+    h.supervisor.start();
+    await h.supervisor.tick();
+
+    const pilotRow = h.registry.get('s-1');
+    const askInput = {
+      questions: [{
+        question: 'Ship it?',
+        header: 'Ship',
+        multiSelect: false,
+        options: [{ label: 'No' }, { label: 'Yes (Recommended)' }],
+      }],
+    };
+
+    const decision = installed({ row: pilotRow, request: { requestId: 'r1', toolName: 'AskUserQuestion', input: askInput } });
+    assert.equal(decision.behavior, 'allow');
+    assert.deepEqual(decision.updatedInput.answers, { 'Ship it?': 'Yes (Recommended)' });
+
+    // A hand-driven row must be untouched: this is one process-global hook.
+    const handRow = h.registry.createSession({ cwd: '/elsewhere', provider: 'claude', permissionMode: 'default' });
+    assert.equal(installed({ row: handRow, request: { requestId: 'r2', toolName: 'AskUserQuestion', input: askInput } }), null);
+
+    // A different tool on the pilot's own row is still the mode's business,
+    // not the input policy's.
+    assert.equal(installed({ row: pilotRow, request: { requestId: 'r3', toolName: 'Bash', input: {} } }), null);
+    // So is end-of-plan approval.
+    assert.equal(installed({ row: pilotRow, request: { requestId: 'r4', toolName: 'ExitPlanMode', input: {} } }), null);
+
+    await h.supervisor.drain();
+    const answered = (await h.log.tail({})).find((e) => Array.isArray(e.answered));
+    assert.deepEqual(answered.answered, [{ question: 'Ship it?', chosenLabel: 'Yes (Recommended)' }]);
+  } finally {
+    await h.supervisor.stop();
+    await h.cleanup();
+  }
+});
+
+test('inputPolicy: ask leaves the question for a human', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput({ inputPolicy: 'ask' }));
+    let installed = null;
+    h.registry.setApprovalInterceptor = (fn) => { installed = fn; };
+    h.supervisor.start();
+    await h.supervisor.tick();
+
+    const decision = installed({
+      row: h.registry.get('s-1'),
+      request: { requestId: 'r1', toolName: 'AskUserQuestion', input: { questions: [{ question: 'q?', options: [{ label: 'a' }] }] } },
+    });
+    assert.equal(decision, null);
+  } finally {
+    await h.supervisor.stop();
+    await h.cleanup();
+  }
+});
+
+test('a non-Claude pilot never auto-answers, whatever its inputPolicy says', async () => {
+  const h = await harness();
+  try {
+    // The form hides the field for Grok/Codex, but a hand-edited
+    // autopilots.json must not silently do something the provider has no
+    // concept of.
+    await h.store.createPilot(pilotInput({ provider: 'grok', effort: 'low', inputPolicy: 'recommended' }));
+    let installed = null;
+    h.registry.setApprovalInterceptor = (fn) => { installed = fn; };
+    h.supervisor.start();
+    await h.supervisor.tick();
+
+    const decision = installed({
+      row: h.registry.get('s-1'),
+      request: { requestId: 'r1', toolName: 'AskUserQuestion', input: { questions: [{ question: 'q?', options: [{ label: 'a' }] }] } },
+    });
+    assert.equal(decision, null);
+  } finally {
+    await h.supervisor.stop();
+    await h.cleanup();
+  }
+});

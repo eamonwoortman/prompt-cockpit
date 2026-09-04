@@ -15,6 +15,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { getProvider } from './provider-registry.js';
 import { killProcessTree } from './child-tracker.js';
 import { isDue, isInsideWindow } from './autopilot-schedule.js';
+import { buildAutoAnswer } from './autopilot-answer.js';
 
 export const HEARTBEAT_MS = 15_000;
 // Five failures in a row is a broken configuration, not bad luck. Disabling
@@ -63,6 +64,9 @@ export function createAutopilot({
   // session is running, blocked or idle, where a PID only proves a process
   // exists. The PID exists for killing, not locking.
   const runs = new Map();
+  // Pilot records as of the last heartbeat. The approval interceptor has to
+  // be synchronous, so it cannot await store.getPilot().
+  const pilotCache = new Map();
   // pilotId -> the last skip DEDUPE KEY logged, so a windowed pilot that is
   // out-of-window for eight hours produces one log line instead of ~1900.
   // Keyed on a stable kind, not the raw reason text - see dedupeKeyFor (M8):
@@ -489,6 +493,7 @@ export function createAutopilot({
       blockedLogged: false,
       intendedOutcome: null,
     });
+    pilotCache.set(pilot.id, pilot);
     clearSkip(pilot.id);
     // Round 1 review (I5): the log line is observability, not the safety
     // property - a failure here must not strand a started, billing session
@@ -699,6 +704,8 @@ export function createAutopilot({
     // out of evaluate() entirely, on every heartbeat, for every pilot, not
     // just the null one.
     const pilotsById = new Map(pilots.filter((p) => p && p.id).map((p) => [p.id, p]));
+    pilotCache.clear();
+    for (const [id, pilot] of pilotsById) pilotCache.set(id, pilot);
     // Cleared here, not carried over from the previous tick - see the
     // declaration comment by settledThisTick's definition.
     settledThisTick.clear();
@@ -781,6 +788,41 @@ export function createAutopilot({
       .catch((err) => logImpl(`autopilot heartbeat failed: ${String(err?.message || err)}`))
       .finally(() => { ticking = null; });
     return ticking;
+  }
+
+  // Synchronous by contract (see setApprovalInterceptor's comment in
+  // session-registry.js). Everything it needs is already in memory: the run
+  // map keyed by sessionId, and the pilot record cached each heartbeat.
+  function onApprovalRequest({ row, request }) {
+    // Scoped to pilot-owned rows: this is ONE process-global hook, and an
+    // unscoped interceptor would silently auto-answer questions in
+    // hand-driven sessions.
+    const run = [...runs.values()].find((r) => r.sessionId === row.id);
+    if (!run) return null;
+    const pilot = pilotCache.get(run.pilotId);
+    if (!pilot) return null;
+    // The input policy governs AskUserQuestion ONLY. Tool permissions stay
+    // governed by the pilot's permission mode, and end-of-plan approval is
+    // never auto-approved.
+    if (request.toolName !== 'AskUserQuestion') return null;
+    if (pilot.inputPolicy !== 'recommended') return null;
+    // Claude-only: AskUserQuestion exists nowhere else. Grok uses ACP
+    // permission options (src/grok-session.js:377-387) and Codex uses
+    // app-server approval methods (src/codex-session.js:150). The form hides
+    // the field for those providers; this is the backstop for a hand-edited
+    // autopilots.json.
+    if (pilot.provider !== 'claude') return null;
+
+    const answer = buildAutoAnswer(request.input);
+    if (!answer) return null;
+    track(log.append({
+      event: 'answered',
+      pilotId: pilot.id,
+      pilotName: pilot.name,
+      sessionId: row.id,
+      answered: answer.chosen,
+    }));
+    return answer.decision;
   }
 
   function onSessionRemoved({ id, reason }) {
@@ -872,6 +914,11 @@ export function createAutopilot({
     // single stop() would permanently latch the supervisor into refusing all
     // future work.
     stopping = false;
+    // Unlike the removal listener above (registered once, in the
+    // constructor), this one changes how a LIVE session behaves - so it must
+    // not outlive a stopped supervisor, and is installed/torn down here
+    // rather than once up front.
+    registry.setApprovalInterceptor(onApprovalRequest);
     timer = setIntervalImpl(() => { tick(); }, HEARTBEAT_MS);
   }
 
@@ -881,6 +928,8 @@ export function createAutopilot({
     // reached, and evaluate()'s loop checks it every iteration, so shutdown
     // drains whatever is already committed rather than picking up new work.
     stopping = true;
+    // See start()'s own comment: torn down here, unlike the removal listener.
+    registry.setApprovalInterceptor(null);
     if (timer) {
       clearIntervalImpl(timer);
       timer = null;
@@ -903,8 +952,8 @@ export function createAutopilot({
     // and the next start() - clearing it here defeated that. A run that
     // finishes while stopped (or across a stop()/start() cycle) still needs
     // its terminal outcome recorded and its lock released, or that pilot
-    // never fires again and status() shows it running forever. (A future
-    // approval interceptor genuinely does need to be torn down here, because
+    // never fires again and status() shows it running forever. (The approval
+    // interceptor above genuinely does need to be torn down here, because
     // it changes live session behaviour - the removal listener does not.)
     if (ticking) await ticking;
     await drain();
@@ -971,8 +1020,7 @@ export function createAutopilot({
     const run = runs.get(pilotId);
     if (!run) return;
     runs.delete(pilotId);
-    // pilotCache is added in Task 7; until then there is nothing else to
-    // release here.
+    pilotCache.delete(pilotId);
     if (run.trackedPid != null) await tracker.detachPilot(run.trackedPid, pilotId);
   }
 
