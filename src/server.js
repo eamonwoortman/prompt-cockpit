@@ -28,6 +28,7 @@ import { registerAutopilotRoutes } from './routes/autopilot.js';
 import { createAutopilotStore } from './autopilot-store.js';
 import { createAutopilotLog } from './autopilot-log.js';
 import { createAutopilot } from './autopilot.js';
+import { wireAutopilot } from './autopilot-wiring.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
@@ -54,17 +55,6 @@ registerHistoryRoutes(router);
 registerSystemRoutes(router);
 registerAutopilotRoutes(router, { store: autopilotStore, log: autopilotLog, supervisor: autopilot, registry });
 registerSessionActionRoutes(router);
-
-// The heartbeat has to stop before sessions start disappearing, or it sees
-// its own runs vanish mid-teardown and records them as terminal outcomes.
-shutdown.onBeforeClose(() => autopilot.stop());
-// Fix round 1 (I2): the removal listener stays registered through shutdown
-// (ruling I6), so each session shutdown.js closes fires a floating
-// track(finishRun(...)) write - outcome + spend log - that nothing awaited.
-// drain() here, after every session is closed but before the grace/kill pass
-// and the final runtime.json flush, is what stops those writes racing
-// process.exit().
-shutdown.onAfterClose(() => autopilot.drain());
 
 const server = createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
@@ -327,21 +317,12 @@ if (isMain) {
     // EADDRINUSE before it can touch another instance's PIDs, rather than
     // relying on the crash beating the kill by a second. (Entries owned by a
     // cockpit that is still alive are skipped regardless - see child-tracker.)
-    // Fix round 1 (cheap item 2): chained rather than fired in parallel with
-    // autopilot.start() below. orphanPilotIds() (blockingReason's
-    // precondition 4) returns an empty set until reapOrphans() resolves, and
-    // each entry costs a real 200-800ms probe on Windows - so after an
-    // unclean exit with several unverifiable pids, a pilot could fire while
-    // its own orphan was still billing, reliably only because the first
-    // heartbeat happened to be 15s away. Error logging unchanged either way.
-    tracker.reapOrphans()
-      .catch((err) => console.error(`orphan reap failed: ${String(err?.message || err)}`))
-      .finally(() => {
-        // Pilots live and die with this process, by design (spec Non-goals).
-        // Not started when imported by tests - a 15-second interval would
-        // keep the test runner's event loop alive.
-        autopilot.start();
-      });
+    // wireAutopilot (src/autopilot-wiring.js) also registers the shutdown
+    // hooks that stop/drain the heartbeat - done here, inside this callback,
+    // rather than at module load, so importing this file never starts a real
+    // heartbeat or touches ~/.prompt-cockpit on its own (a 15-second interval
+    // would also keep a test runner's event loop alive).
+    wireAutopilot({ shutdown, autopilot, tracker });
 
     const op = getOperatorToken();
     const url = `http://${HOST}:${PORT}/?op=${op}`;

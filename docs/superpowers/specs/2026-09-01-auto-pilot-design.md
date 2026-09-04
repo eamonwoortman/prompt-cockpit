@@ -579,8 +579,24 @@ Five phases, each independently mergeable, riskiest dependencies resolved earlie
    Precedented by Claude Code's own `hooks` key, but stated plainly.
 3. **PID reuse**, mitigated by refuse-to-kill-if-unverifiable — which in turn requires
    the orphan-blocks-firing rule, or the two mitigations combine into two agents in one
-   repo.
-4. **The spend cap is best-effort**, because unpriced models report `null` cost.
+   repo. That rule only covers a carried entry whose `pilotIds` were actually recorded
+   and whose owner is provably gone: a `'maybe-alive'` owner is routed into `foreign`
+   the same as `'alive'` (deliberately - `reapOrphans` predates this branch and its own
+   comment argues that carried entries must block pilots, so this is not being
+   reopened here), and it does not block. Separately, Grok's `tracker.retain(...)` call
+   (`src/grok-session.js:139`) records no `pilotId` at all - it is only attached on the
+   next heartbeat, up to 15s later, and never if the cockpit dies first - so a Grok
+   pilot's own crashed-but-still-billing session can carry no `pilotIds` and block
+   nothing, letting that pilot fire again alongside its own orphan.
+4. **The spend cap is best-effort and less complete than "best-effort" alone implies.**
+   Unpriced models report `null` cost and are excluded from the daily total, which
+   is the case the name describes - but Codex (`src/codex-session.js`) has no usage
+   handling at all, so a Codex run logs `costUsd: 0` with no `costUnpriced` flag: a
+   genuinely free run and an entirely unmeasured one are indistinguishable in the Logs
+   tab and in the cap total. Separately, `dailyCostUsd` sums only entries already
+   written at a run's terminal outcome, so a run still in flight contributes nothing -
+   with `maxConcurrentRuns` > 1 the cap can be overshot by roughly
+   `maxConcurrentRuns` × a full run's cost before the next heartbeat even reads it.
 5. **`maxTurnStallMs` cannot distinguish a long tool call from a hang.** It is a
    runaway backstop only.
 6. **Rate-limit back-off is best-effort**, because the signal is polled and

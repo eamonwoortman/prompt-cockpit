@@ -16,6 +16,7 @@ import { getProvider } from './provider-registry.js';
 import { killProcessTree } from './child-tracker.js';
 import { isDue, isInsideWindow } from './autopilot-schedule.js';
 import { buildAutoAnswer } from './autopilot-answer.js';
+import { DEFAULT_MAX_TURN_STALL_MS } from './autopilot-store.js';
 
 export const HEARTBEAT_MS = 15_000;
 // Five failures in a row is a broken configuration, not bad luck. Disabling
@@ -359,6 +360,16 @@ export function createAutopilot({
     // in flight, because killing an agent mid-edit to save a few cents trades
     // a small cost for a broken working tree. Also free - dailySpend is
     // computed once per heartbeat in evaluate().
+    //
+    // Final fix wave, item 5: this cap is less accurate than that reads.
+    // `dailySpend` sums LOGGED, terminal-outcome entries only (autopilot-log.js's
+    // dailyCostUsd) - a run's cost is written when it finishes, not while it
+    // runs, so with maxConcurrentRuns > 1 several long runs can each spend
+    // arbitrarily much while this check still reads $0.00; the cap can be
+    // overshot by roughly maxConcurrentRuns * a full run's cost, not by one
+    // run's cost. And Codex (src/codex-session.js) has zero usage handling,
+    // so a Codex run logs costUsd: 0 with no costUnpriced flag - indistinguishable
+    // here from a real $0.00 run, not surfaced as unmeasured.
     if (settings.dailyCostCapUsd != null && dailySpend >= settings.dailyCostCapUsd) {
       return `global daily spend cap reached ($${dailySpend.toFixed(2)} / $${settings.dailyCostCapUsd.toFixed(2)})`;
     }
@@ -491,9 +502,11 @@ export function createAutopilot({
     // `live.sessionId` stayed null for the whole span of that await, during
     // which the DELETE route's `registry.closeSession(live.sessionId)` would
     // silently no-op against a session that had, in fact, already been
-    // created - unreachable today only because `trackedPid` happens to be
-    // null for every provider at this exact instant (see below), not because
-    // the gap doesn't exist.
+    // created - unreachable only for Grok, whose `trackedPid` is assigned in
+    // an async IIFE and so reads null at this exact instant; Codex's is
+    // assigned synchronously in the spawn (codex-app-server.js:304,
+    // codex-session.js:56), so this instant's `trackedPid` is a real pid for
+    // that provider and the gap below is live.
     runs.get(pilot.id).sessionId = row.id;
 
     const pid = row.handle?.trackedPid ?? null;
@@ -523,18 +536,28 @@ export function createAutopilot({
       }
     }
 
-    runs.set(pilot.id, {
-      pilotId: pilot.id,
-      sessionId: row.id,
-      trackedPid: pid,
-      startedAt: now(),
-      lastProgressAt: now(),
-      scannedThrough: 0,
-      lastSeq: row.eventLog.nextSeq,
-      sawResult: false,
-      blockedLogged: false,
-      intendedOutcome: null,
-    });
+    // Final fix wave (Critical-1): for a Codex pilot, `pid` above is a real,
+    // synchronous pid, so the `await` just above is a real file write the
+    // session can die during - `proc.on('exit')` -> ... -> `onSessionRemoved`
+    // runs synchronously and deletes this same reservation (matched by the
+    // `sessionId` stamped above) before this line runs. Re-inserting here
+    // unconditionally would resurrect it as a phantom that nothing can ever
+    // remove: `onSessionRemoved` already ran and will not run again for this
+    // sessionId, so the phantom would sit in `runs` forever, permanently
+    // consuming one of `maxConcurrentRuns`' slots. Mutate the existing
+    // reservation in place instead of replacing it, and bail without
+    // resending the prompt or logging a 'fired' event for a session that is
+    // already gone - `onSessionRemoved` already recorded its real outcome.
+    const live = runs.get(pilot.id);
+    if (!live) return row;
+    live.trackedPid = pid;
+    live.startedAt = now();
+    live.lastProgressAt = now();
+    live.scannedThrough = 0;
+    live.lastSeq = row.eventLog.nextSeq;
+    live.sawResult = false;
+    live.blockedLogged = false;
+    live.intendedOutcome = null;
     pilotCache.set(pilot.id, pilot);
     clearSkip(pilot.id);
     // Round 1 review (I5): the log line is observability, not the safety
@@ -740,11 +763,19 @@ export function createAutopilot({
       // in-flight tool call is indistinguishable from a hang, so this is set
       // generously (60 minutes by default) and only exists to stop a pilot
       // burning money forever.
-      if (now() - run.lastProgressAt >= pilot.maxTurnStallMs) {
+      // Final fix wave (item 3): hydrate() returns raw.pilots verbatim
+      // (autopilot-store.js:174-175), and a hand-edited pilot record with a
+      // valid schedule but no maxTurnStallMs is anticipated across this
+      // whole branch. `x >= undefined` is always false, so without this
+      // fallback the backstop above silently never fires and an unattended
+      // agent runs forever - reviewRuns' per-pilot try/catch does not cover
+      // this branch either, since nothing here throws.
+      const stallMs = pilot.maxTurnStallMs || DEFAULT_MAX_TURN_STALL_MS;
+      if (now() - run.lastProgressAt >= stallMs) {
         const usage = row.usageAcc?.snapshot?.() || {};
         run.costUsd = typeof usage.costUsd === 'number' ? usage.costUsd : null;
         run.costUnpriced = Array.isArray(usage.unpriced) && usage.unpriced.length > 0;
-        run.reason = `no new events for ${Math.round(pilot.maxTurnStallMs / 60_000)} minutes`;
+        run.reason = `no new events for ${Math.round(stallMs / 60_000)} minutes`;
         run.intendedOutcome = 'timed-out';
         try {
           registry.closeSession(run.sessionId);
@@ -971,7 +1002,11 @@ export function createAutopilot({
     // Fix round 1 (I1): fire()'s own re-check found the pilot gone between
     // this call and the reservation it was about to claim.
     if (row === 'deleted') return { fired: false, reason: 'this pilot was deleted' };
-    return row ? { fired: true, sessionId: row.id } : { fired: false, reason: 'the session could not be created' };
+    // `internalError` is the sentinel routes/autopilot.js's run-now handler
+    // keys its 500-vs-409 choice off of - final fix wave, item 7: matching
+    // this reason string there was fragile (a copy-edit here would silently
+    // misroute the status code).
+    return row ? { fired: true, sessionId: row.id } : { fired: false, reason: 'the session could not be created', internalError: true };
   }
 
   // Registered in the CONSTRUCTOR, not in start(): a row can be removed at any

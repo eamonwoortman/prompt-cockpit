@@ -93,7 +93,12 @@ export function registerAutopilotRoutes(router, { store, log, supervisor, regist
       // against a pilot we delete two statements later - a phantom outcome in
       // the Logs tab for what was actually a delete.
       await supervisor.abandonRun(id);
-      registry.closeSession(live.sessionId);
+      // Final fix wave, item 7: match reviewRuns' own closeSession call sites
+      // (src/autopilot.js:646-651) - the lock is already released above, so a
+      // throw here must not abort the delete itself.
+      try {
+        registry.closeSession(live.sessionId);
+      } catch { /* best effort - the delete must proceed regardless */ }
     }
     await supervisor.drain();
     await store.deletePilot(id);
@@ -129,7 +134,11 @@ export function registerAutopilotRoutes(router, { store, log, supervisor, regist
     // gets its own 500-class status rather than being lumped in with the
     // honest 409 refusals above it (already running, at the concurrency cap,
     // rate limited, spend-capped, gate failed, deleted, not started).
-    const status = result.reason === 'the session could not be created' ? 500 : 409;
+    // Final fix wave, item 7: keyed off `internalError`, a sentinel field
+    // runNow() sets, rather than string-matching `result.reason` against the
+    // exact createSession-failure prose (a copy-edit there would have
+    // silently misrouted this to 409).
+    const status = result.internalError ? 500 : 409;
     return respondJson(res, status, { error: result.reason, ...result });
   });
 

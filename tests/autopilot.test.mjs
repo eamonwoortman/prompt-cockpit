@@ -929,6 +929,44 @@ test('Important-1: an attachPilot rejection releases the reservation instead of 
   }
 });
 
+// --- Final fix wave findings --------------------------------------------
+
+test('Critical-1: a session that dies during the attachPilot await does not resurrect as a phantom run', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput());
+    const originalCreateSession = h.registry.createSession;
+    // Codex assigns trackedPid synchronously (unlike Grok's async IIFE), so
+    // force a non-null pid to reach the attachPilot path this bug lives in.
+    h.registry.createSession = (opts) => {
+      const row = originalCreateSession(opts);
+      row.handle.trackedPid = 4242;
+      return row;
+    };
+    let attachCalls = 0;
+    h.tracker.attachPilot = async (pid, pilotId) => {
+      attachCalls += 1;
+      if (attachCalls > 1) return; // second firing attaches cleanly
+      // Simulate the codex app-server dying while this await is in flight:
+      // onSessionRemoved fires synchronously (deleting the reservation and
+      // recording a real 'errored' outcome) before attachPilot's own promise
+      // settles.
+      const [sessionId] = [...h.registry.rows.keys()].slice(-1);
+      h.registry.emitRemoved(sessionId, 'error');
+    };
+
+    await h.supervisor.tick();
+    assert.deepEqual(h.supervisor.status(), [], 'no phantom run may remain after the session died mid-attach');
+    assert.deepEqual(h.registry.inputs, [], 'no prompt was sent to a session that had already died');
+
+    await h.supervisor.tick();
+    assert.equal(attachCalls, 2, 'the pilot fires again on the very next heartbeat rather than being wedged forever');
+    assert.deepEqual(h.supervisor.status().map((r) => r.sessionId), ['s-2'], 'the second attempt is tracked as a real run');
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test('Important-2: the provider-probe timeout is driven by the injected timer, not a real delay', async () => {
   const timeoutCalls = [];
   const clearedCalls = [];
@@ -1401,6 +1439,32 @@ test('a stalled run is force-closed as timed-out once maxTurnStallMs passes with
     assert.equal(after.lastOutcome, 'timed-out');
     assert.equal(after.consecutiveFailures, 1);
     assert.ok((await h.log.tail({})).some((e) => e.event === 'timed-out'));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('final fix wave, item 3: a hand-edited pilot missing maxTurnStallMs still gets the runaway backstop, via the documented default', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick(); // fires it - s-1 is now live
+
+    const raw = JSON.parse(await readFile(h.store.filePath, 'utf8'));
+    const rec = raw.pilots.find((x) => x.id === p.id);
+    delete rec.maxTurnStallMs; // simulate a hand-edited / partially-migrated record
+    await writeFile(h.store.filePath, JSON.stringify(raw));
+
+    // `x >= undefined` is always false, so without the DEFAULT_MAX_TURN_STALL_MS
+    // fallback this backstop would never fire, however long we wait. Advance
+    // well past the documented 60-minute default with no progress at all.
+    h.advanceClock(61 * MIN);
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+
+    assert.deepEqual(h.registry.closed, ['s-1'], 'the backstop must still fire even though maxTurnStallMs is undefined');
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.lastOutcome, 'timed-out');
   } finally {
     await h.cleanup();
   }

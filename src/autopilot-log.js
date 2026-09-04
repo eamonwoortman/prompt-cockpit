@@ -9,6 +9,15 @@
 // cost into the fresh file as a `carry-forward` entry. At 2 MB rotation is
 // unlikely within one day, but "unlikely" is not "never", and the failure
 // mode is a spend cap that silently resets mid-day.
+//
+// Final fix wave, item 5: the spend cap this backs is materially less
+// accurate than "backs the cap" implies. dailyCostUsd sums only entries
+// already written here at a run's TERMINAL outcome, so a run still in
+// flight contributes nothing - with maxConcurrentRuns > 1 the cap can be
+// overshot by roughly maxConcurrentRuns * a full run's cost before the next
+// heartbeat even sees it. And Codex (src/codex-session.js) has no usage
+// handling at all, so its runs log costUsd: 0 with no costUnpriced flag -
+// a real $0.00 run and an entirely unmeasured one are written identically.
 import { appendFile, readFile, rename, writeFile, stat, mkdir, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';

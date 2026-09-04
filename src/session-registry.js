@@ -1476,11 +1476,14 @@ function handleApprovalRequest(id, request) {
       // today (no provider invokes onApprovalRequest synchronously from
       // inside its own startSession, and the interceptor's own `runs` lookup
       // can't match a row that young either), but this is an exported,
-      // generic, process-global hook, so the optional-chain (rather than a
-      // bare call inside the try) keeps a future caller from throwing past
-      // this function's own fall-through-to-human guarantee.
-      row.handle?.resolveApproval(request.requestId, decision);
-      return;
+      // generic, process-global hook, so a future caller reaching this with
+      // a null handle must not have its request silently dropped.
+      if (row.handle) {
+        row.handle.resolveApproval(request.requestId, decision);
+        return;
+      }
+      // No handle yet - fall through to the push/broadcast below so a human
+      // sees it, rather than resolving nothing and returning.
     }
   }
   if (row) {

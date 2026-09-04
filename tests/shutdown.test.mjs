@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShutdown } from '../src/shutdown.js';
+import { wireAutopilot } from '../src/autopilot-wiring.js';
 
 function fakeRegistry(ids) {
   const closed = [];
@@ -144,4 +145,82 @@ test('a throwing hook or a throwing closeSession does not abort the rest of the 
   assert.match(logged.join('\n'), /async hook blew up/);
   assert.match(logged.join('\n'), /close blew up/);
   assert.match(logged.join('\n'), /after hook blew up/);
+});
+
+// --- Final fix wave, Important-2: wireAutopilot (src/autopilot-wiring.js) --
+//
+// The three lines it composes - a before-close hook that stops the
+// heartbeat, an after-close hook that drains it, and start() chained after
+// the orphan reap - could each be deleted from server.js with the rest of
+// the suite staying green. Test the extracted function directly against
+// fakes, with no real shutdown, registry, or tracker involved.
+
+function fakeShutdownHooks() {
+  const before = [];
+  const after = [];
+  return {
+    before,
+    after,
+    onBeforeClose: (fn) => before.push(fn),
+    onAfterClose: (fn) => after.push(fn),
+  };
+}
+
+function fakeAutopilotLifecycle() {
+  const calls = [];
+  return {
+    calls,
+    stop: () => calls.push('stop'),
+    drain: () => calls.push('drain'),
+    start: () => calls.push('start'),
+  };
+}
+
+test('wireAutopilot: the before-close hook stops the heartbeat', async () => {
+  const shutdown = fakeShutdownHooks();
+  const autopilot = fakeAutopilotLifecycle();
+  const tracker = { reapOrphans: async () => {} };
+  await wireAutopilot({ shutdown, autopilot, tracker });
+
+  assert.equal(shutdown.before.length, 1, 'exactly one before-close hook was registered');
+  autopilot.calls.length = 0; // clear the reap-chained start() so only the hook's effect is asserted below
+  shutdown.before[0]();
+  assert.deepEqual(autopilot.calls, ['stop']);
+});
+
+test('wireAutopilot: the after-close hook drains outstanding outcome/spend writes', async () => {
+  const shutdown = fakeShutdownHooks();
+  const autopilot = fakeAutopilotLifecycle();
+  const tracker = { reapOrphans: async () => {} };
+  await wireAutopilot({ shutdown, autopilot, tracker });
+
+  assert.equal(shutdown.after.length, 1, 'exactly one after-close hook was registered');
+  autopilot.calls.length = 0; // clear the reap-chained start() so only the hook's effect is asserted below
+  shutdown.after[0]();
+  assert.deepEqual(autopilot.calls, ['drain']);
+});
+
+test('wireAutopilot: start() runs only after the orphan reap resolves', async () => {
+  const shutdown = fakeShutdownHooks();
+  const autopilot = fakeAutopilotLifecycle();
+  let resolveReap;
+  const tracker = { reapOrphans: () => new Promise((resolve) => { resolveReap = resolve; }) };
+
+  const pending = wireAutopilot({ shutdown, autopilot, tracker });
+  assert.deepEqual(autopilot.calls, [], 'start() must not run before the reap settles');
+  resolveReap();
+  await pending;
+  assert.deepEqual(autopilot.calls, ['start']);
+});
+
+test('wireAutopilot: start() still runs after the orphan reap rejects, and the error is logged rather than thrown', async () => {
+  const shutdown = fakeShutdownHooks();
+  const autopilot = fakeAutopilotLifecycle();
+  const tracker = { reapOrphans: async () => { throw new Error('reap failed'); } };
+  const logged = [];
+
+  await wireAutopilot({ shutdown, autopilot, tracker, logImpl: (m) => logged.push(String(m)) });
+
+  assert.deepEqual(autopilot.calls, ['start'], 'a rejected reap must not skip start()');
+  assert.match(logged.join('\n'), /reap failed/);
 });

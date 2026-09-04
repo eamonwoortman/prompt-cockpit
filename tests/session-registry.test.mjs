@@ -1269,3 +1269,25 @@ test('a throwing interceptor falls through rather than stranding the tool call',
     registry._reset();
   }
 });
+
+test('final fix wave, item 4: an interceptor decision arriving before row.handle is set falls through to a human instead of being dropped', () => {
+  registry._reset();
+  registry.setApprovalInterceptor(() => ({ behavior: 'allow' }));
+  try {
+    // row.handle is only assigned once startSessionImpl RETURNS
+    // (session-registry.js's createSession) - calling onApprovalRequest
+    // synchronously from inside startSessionImpl itself, before returning
+    // the handle, reproduces that brief window for real rather than faking
+    // row.handle = null after the fact.
+    const startSessionImpl = (opts) => {
+      opts.onApprovalRequest({ requestId: 'req-early', toolName: 'ExitPlanMode', input: {}, title: 'Exit plan mode?' });
+      return { resolveApproval: () => { throw new Error('must not be called - handle was still null'); } };
+    };
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+
+    assert.equal(row.pendingApprovals.length, 1, 'falls through to the pending-approvals queue rather than dropping the request');
+    assert.equal(row.pendingApprovals[0].requestId, 'req-early');
+  } finally {
+    registry._reset();
+  }
+});
