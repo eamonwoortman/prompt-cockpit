@@ -81,6 +81,14 @@ export function createAutopilot({
   // reaches it - closing that window without reverting detached means this
   // module has to track and kill its own gates itself.
   const inFlightGates = new Set();
+  // Round 1 review (I2, fold-in M9): pilotIds settled - by ANY route, not
+  // just reviewRuns' own closeSession calls - during the current evaluate()
+  // pass. onSessionRemoved fires synchronously on every removal, including
+  // one caused by an SDK error while THIS SAME tick's main loop is still
+  // awaiting a gated pilot's blockingReason() (which can run for minutes),
+  // so populating it there rather than only in reviewRuns is what covers
+  // that path too. Cleared at the top of evaluate(), read by its main loop.
+  const settledThisTick = new Set();
   let timer = null;
   let ticking = null;
   // Round 3 review (New-1): set at the top of stop(), before the in-flight
@@ -358,8 +366,10 @@ export function createAutopilot({
     // Round 3 review (New-1): refuse to start new work once shutdown is
     // draining - same reasoning as the guard in runGate() above. Checked
     // before the reservation is claimed, so a fire() reached during shutdown
-    // costs nothing observable (no session, no lock).
-    if (stopping) return null;
+    // costs nothing observable (no session, no lock). Fold-in item 7: a
+    // distinct sentinel, same reasoning as 'locked' below - null also means
+    // "createSession failed", which is not what happened here.
+    if (stopping) return 'stopping';
     // Round 1 review (C1) - THE fix: claim the slot SYNCHRONOUSLY, with no
     // `await` between this check and the mutation that records it.
     // blockingReason's own checks of `runs` are necessarily stale by the
@@ -517,7 +527,11 @@ export function createAutopilot({
     if (failures >= MAX_CONSECUTIVE_FAILURES) patch.enabled = false;
     const updated = await store.recordRun(pilotId, patch);
     if (patch.enabled === false) {
-      logImpl(`autopilot: "${pilot.name}" auto-disabled after ${failures} consecutive failures`);
+      // The store write above already landed - a throwing logImpl here must
+      // not be mistaken for the disable itself having failed.
+      try {
+        logImpl(`autopilot: "${pilot.name}" auto-disabled after ${failures} consecutive failures`);
+      } catch { /* logging must never break the caller */ }
     }
     return updated;
   }
@@ -539,10 +553,10 @@ export function createAutopilot({
     // track()ed promise. evaluate()'s own `pilots` array was already read
     // from disk before this function ran, so a pilot closed HERE still shows
     // lastRunAt: null to that stale array, and isDue() treats a null
-    // lastRunAt as always-due - without this set, evaluate()'s main loop
-    // would re-fire the same pilot again in this same tick. Returned to
-    // evaluate() so it can skip exactly the pilots settled this pass.
-    const settled = new Set();
+    // lastRunAt as always-due - without settledThisTick, evaluate()'s main
+    // loop would re-fire the same pilot again in this same tick. Populated by
+    // onSessionRemoved itself (below), not here, so it also catches a
+    // removal this function did not cause.
     for (const [pilotId, run] of [...runs]) {
       const row = registry.get(run.sessionId);
       if (!row) continue; // onSessionRemoved already classified it
@@ -576,6 +590,14 @@ export function createAutopilot({
         }
       }
 
+      // I3: cached on every pass, not just the settle branches below, so
+      // finishRun still has a recent figure when the run is removed via a
+      // path (an SDK error, a human closing the tab) that never reaches
+      // those branches at all - onSessionRemoved fires with the row already
+      // deleted from the registry (session-registry.js's removeSession runs
+      // before the listener), so there is no usageAcc left to read by then.
+      run.lastUsage = row.usageAcc?.snapshot?.() || run.lastUsage || {};
+
       for (const { seq, message } of row.eventLog.entries) {
         if (seq <= run.scannedThrough) continue;
         run.scannedThrough = seq;
@@ -592,13 +614,33 @@ export function createAutopilot({
       if (row.pendingApprovals.length > 0) {
         if (!run.blockedLogged) {
           run.blockedLogged = true;
-          await log.append({
-            event: 'blocked', pilotId, pilotName: pilot.name, sessionId: run.sessionId,
-            reason: `waiting on approval for ${row.pendingApprovals[0]?.toolName || 'a tool call'}`,
-          });
+          try {
+            await log.append({
+              event: 'blocked', pilotId, pilotName: pilot.name, sessionId: run.sessionId,
+              reason: `waiting on approval for ${row.pendingApprovals[0]?.toolName || 'a tool call'}`,
+            });
+          } catch (err) {
+            // blockedLogged is already latched above - a rejection here must
+            // lose only the observability line, not abort review of every
+            // remaining run in this pass.
+            try {
+              logImpl(`autopilot: failed to log a 'blocked' event for ${pilot.name}: ${String(err?.message || err)}`);
+            } catch { /* logging must never break review of the remaining runs */ }
+          }
         }
         continue;
       }
+      // I2: nothing but sdk:message traffic advances nextSeq (line 600-603
+      // above), and resolveApproval pushes nothing into the event log when a
+      // human answers - so without this, lastProgressAt is still whatever it
+      // was when the run first blocked. A pilot answered after sitting
+      // blocked for longer than maxTurnStallMs (default 60 minutes; an
+      // overnight `inputPolicy: 'ask'` pilot is the intended use case) would
+      // otherwise be force-closed as timed-out on the very next heartbeat,
+      // discarding the answer and counting a failure against it. Reset only
+      // on the blocked -> unblocked transition (blockedLogged was true), so
+      // a genuinely stalled, never-blocked run is not exempted.
+      if (run.blockedLogged) run.lastProgressAt = now();
       run.blockedLogged = false;
 
       // Completion. The "at least one result" clause is load-bearing: a
@@ -613,8 +655,18 @@ export function createAutopilot({
         // removal listener synchronously, which would otherwise classify our
         // own completion as closed-externally.
         run.intendedOutcome = 'finished';
-        registry.closeSession(run.sessionId);
-        settled.add(pilotId);
+        try {
+          registry.closeSession(run.sessionId);
+        } catch (err) {
+          // Unlike fire()'s reservation leak, there is nothing to release
+          // here - the run stays locked and intendedOutcome stays 'finished',
+          // so the very next pass finds the same idle/quiet/sawResult state
+          // and retries the close. What must not happen is this exception
+          // aborting review of every OTHER run still left in this pass.
+          try {
+            logImpl(`autopilot: failed to close ${pilot.name}'s completed session, will retry next heartbeat: ${String(err?.message || err)}`);
+          } catch { /* logging must never break review of the remaining runs */ }
+        }
         continue;
       }
 
@@ -628,11 +680,15 @@ export function createAutopilot({
         run.costUnpriced = Array.isArray(usage.unpriced) && usage.unpriced.length > 0;
         run.reason = `no new events for ${Math.round(pilot.maxTurnStallMs / 60_000)} minutes`;
         run.intendedOutcome = 'timed-out';
-        registry.closeSession(run.sessionId);
-        settled.add(pilotId);
+        try {
+          registry.closeSession(run.sessionId);
+        } catch (err) {
+          try {
+            logImpl(`autopilot: failed to close ${pilot.name}'s stalled session, will retry next heartbeat: ${String(err?.message || err)}`);
+          } catch { /* logging must never break review of the remaining runs */ }
+        }
       }
     }
-    return settled;
   }
 
   async function evaluate() {
@@ -643,7 +699,10 @@ export function createAutopilot({
     // out of evaluate() entirely, on every heartbeat, for every pilot, not
     // just the null one.
     const pilotsById = new Map(pilots.filter((p) => p && p.id).map((p) => [p.id, p]));
-    const settledThisTick = await reviewRuns(pilotsById);
+    // Cleared here, not carried over from the previous tick - see the
+    // declaration comment by settledThisTick's definition.
+    settledThisTick.clear();
+    await reviewRuns(pilotsById);
 
     const { costUsd: dailySpend } = await log.dailyCostUsd(now());
     const rateLimited = rateLimitedProviders();
@@ -683,6 +742,15 @@ export function createAutopilot({
         // can interleave and flip this pilot's OWN reason to null - recheck
         // right before firing, not just at the top of the next iteration.
         if (stopping) return;
+        // Fold-in M9: blockingReason() can await for minutes (a gated
+        // pilot), during which THIS pilot's own run can be removed - an SDK
+        // error, a human closing the tab - which frees runs' lock via
+        // onSessionRemoved. fire()'s own lock check would then see the lock
+        // as free and fire a second session for the run that JUST ended.
+        // settledThisTick is only checked once at the top of this iteration
+        // otherwise, so it must be rechecked here too, same reasoning as the
+        // `stopping` recheck immediately above.
+        if (settledThisTick.has(pilot.id)) continue;
         await fire(pilot, 'schedule', settings);
         // Startup stagger: at most ONE overdue pilot per heartbeat. Without
         // this, a cockpit restarted after an hour launches every pilot
@@ -719,6 +787,10 @@ export function createAutopilot({
     for (const [pilotId, run] of runs) {
       if (run.sessionId !== id) continue;
       runs.delete(pilotId);
+      // Fold-in M9: every removal populates this, not just the ones
+      // reviewRuns() itself causes - see settledThisTick's declaration
+      // comment for why that generalisation matters.
+      settledThisTick.add(pilotId);
       if (run.trackedPid != null) track(tracker.detachPilot(run.trackedPid, pilotId));
       // 'error' is a genuine failure; a bare 'closed' we did not ask for is a
       // human closing the pilot's session in an attached tab - intentional,
@@ -739,11 +811,29 @@ export function createAutopilot({
       sessionId: run.sessionId,
       durationMs: at - run.startedAt,
     };
-    if (run.costUsd != null) entry.costUsd = run.costUsd;
-    if (run.costUnpriced) entry.costUnpriced = true;
+    // I3: 'errored' and 'closed-externally' never went through reviewRuns'
+    // settle branches, so run.costUsd/costUnpriced are unset - fall back to
+    // the snapshot reviewRuns cached on its last pass. That figure is stale
+    // by at most one heartbeat, which beats the alternative: onSessionRemoved
+    // fires with the row already deleted from the registry (removeSession
+    // runs before the listener), so there is no usageAcc left to read here.
+    const costUsd = run.costUsd ?? (typeof run.lastUsage?.costUsd === 'number' ? run.lastUsage.costUsd : null);
+    const costUnpriced = run.costUnpriced || (Array.isArray(run.lastUsage?.unpriced) && run.lastUsage.unpriced.length > 0);
+    if (costUsd != null) entry.costUsd = costUsd;
+    if (costUnpriced) entry.costUnpriced = true;
     if (run.reason) entry.reason = run.reason;
-    await log.append(entry);
+    // I1: this same file documents the rule at :407-418 above - the STORE
+    // write is the safety property that stops the spawn loop (a rejected
+    // log.append must never cost it), so it happens first and unconditionally,
+    // exactly like the errored-outcome path in fire() already does.
     await recordOutcome(pilotId, outcome, at);
+    try {
+      await log.append(entry);
+    } catch (err) {
+      try {
+        logImpl(`autopilot: failed to log a '${outcome}' event for ${pilot?.name ?? pilotId}: ${String(err?.message || err)}`);
+      } catch { /* logging must never break the store write already committed above */ }
+    }
   }
 
   async function runNow(pilotId) {
@@ -761,6 +851,10 @@ export function createAutopilot({
     }
     const row = await fire(pilot, 'run-now', settings);
     if (row === 'locked') return { fired: false, reason: 'already running' };
+    // Fold-in item 7: distinguish shutdown from an actual createSession
+    // failure, rather than misreporting both as "the session could not be
+    // created".
+    if (row === 'stopping') return { fired: false, reason: 'autopilot is stopping' };
     return row ? { fired: true, sessionId: row.id } : { fired: false, reason: 'the session could not be created' };
   }
 
@@ -831,7 +925,12 @@ export function createAutopilot({
   // was computed from is gone.
   async function notifications() {
     const { pilots } = await store.read();
-    const byId = new Map(pilots.map((p) => [p.id, p]));
+    // Fold-in item 1: store.read() does not normalize (see evaluate()'s own
+    // guard above, and recordOutcome/reviewRuns's null pilot checks) - a bare
+    // `null` in a hand-edited autopilots.json must not throw here, since this
+    // is a public surface the next task wires straight into /api/notifications.
+    const validPilots = pilots.filter((p) => p && p.id);
+    const byId = new Map(validPilots.map((p) => [p.id, p]));
     const entries = [];
 
     for (const run of runs.values()) {
@@ -851,7 +950,7 @@ export function createAutopilot({
       }
     }
 
-    for (const pilot of pilots) {
+    for (const pilot of validPilots) {
       if (pilot.enabled) continue;
       if ((pilot.consecutiveFailures || 0) < MAX_CONSECUTIVE_FAILURES) continue;
       entries.push({

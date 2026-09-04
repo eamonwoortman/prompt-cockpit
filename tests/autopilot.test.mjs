@@ -1254,6 +1254,10 @@ test('completion needs idle AND an empty queue AND no pending approval AND at le
     await h.supervisor.drain();
 
     assert.deepEqual(h.registry.closed, ['s-1']);
+    // M10: named explicitly, not just incidentally pinned by the deepEqual
+    // below - without the settledThisTick fix this would be 2, one spurious
+    // re-fire in the same tick reviewRuns recorded the completion in.
+    assert.equal(h.registry.created.length, 1, 'the completed pilot must not re-fire in the same tick it completed in');
     const after = await h.store.getPilot(p.id);
     assert.equal(after.lastOutcome, 'finished');
     assert.equal(after.consecutiveFailures, 0);
@@ -1574,6 +1578,90 @@ test("fire()'s own stopping guard refuses to create a session even for an UNGATE
     const result = await h.supervisor.runNow(pilot.id);
     assert.equal(result.fired, false, 'fire() itself must refuse once stopping is set');
     assert.equal(h.registry.created.length, 0, 'no session was created');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// --- Fix round 1: I1, I2, I3 ---------------------------------------------
+
+test('I1: a rejecting log.append on a terminal outcome still stamps lastRunAt, and does not re-fire the pilot', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    h.registry.advance('s-1', { result: true, state: 'idle' });
+
+    const originalAppend = h.log.append.bind(h.log);
+    h.log.append = async (entry) => {
+      if (entry.event === 'finished') throw new Error('disk full');
+      return originalAppend(entry);
+    };
+
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+
+    assert.deepEqual(h.registry.closed, ['s-1']);
+    const after = await h.store.getPilot(p.id);
+    assert.equal(after.lastOutcome, 'finished', 'recordOutcome must run even though log.append rejected');
+    assert.equal(after.lastRunAt, h.now(), 'the store write is the safety property and must not depend on the log append succeeding');
+
+    // Restore so the next heartbeat's own bookkeeping doesn't also throw.
+    h.log.append = originalAppend;
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 1, 'lastRunAt was recorded despite the log failure, so the pilot must not re-fire');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I2: a run unblocked after a long approval wait is not force-closed as timed-out on the very next heartbeat', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput({ maxTurnStallMs: 10 * MIN }));
+    await h.supervisor.tick();
+    h.registry.get('s-1').pendingApprovals = [{ requestId: 'r1', toolName: 'Bash' }];
+
+    // Well past maxTurnStallMs while blocked - exempt (mirrors the sibling
+    // "blocked ... is exempt from the stall backstop" test above).
+    h.advanceClock(60 * MIN);
+    await h.supervisor.tick();
+    assert.deepEqual(h.registry.closed, [], 'still blocked - exempt from the backstop');
+
+    // The human answers. session-registry.js's resolveApproval only splices
+    // the request out - it pushes nothing into the event log - so without
+    // I2's fix lastProgressAt is still 60+ minutes stale here.
+    h.registry.get('s-1').pendingApprovals = [];
+    await h.supervisor.tick();
+    await h.supervisor.drain();
+
+    assert.deepEqual(h.registry.closed, [], 'answering must not be punished as a stall - the run just unblocked');
+    assert.equal(h.supervisor.status().length, 1, 'still holds the lock');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('I3: a run removed as errored after accruing usage still logs a costUsd, so the daily spend cap sees it', async () => {
+  const h = await harness();
+  try {
+    const p = await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    h.registry.get('s-1').usageAcc = { snapshot: () => ({ costUsd: 8.25, unpriced: [] }) };
+
+    // reviewRuns must run at least once with the row still present to cache
+    // run.lastUsage - onSessionRemoved fires with the row already deleted
+    // from the registry (removeSession runs before the listener), so there
+    // is nothing left to read by then.
+    await h.supervisor.tick();
+
+    h.registry.emitRemoved('s-1', 'error');
+    await h.supervisor.drain();
+
+    const errored = (await h.log.tail({})).find((e) => e.event === 'errored');
+    assert.equal(errored.costUsd, 8.25, 'the last cached usage snapshot must survive into the errored log entry');
+    assert.equal((await h.store.getPilot(p.id)).lastOutcome, 'errored');
   } finally {
     await h.cleanup();
   }
