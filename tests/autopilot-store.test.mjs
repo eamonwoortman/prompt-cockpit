@@ -182,6 +182,43 @@ test('updateSettings validates and merges', async () => {
   }
 });
 
+test('Round 3 New-2: a null entry in pilots does not crash getPilot, recordRun, setEnabled, updatePilot, deletePilot or name-uniqueness checks, and is never silently dropped by a write', async () => {
+  const { dir, filePath, store } = await makeStore();
+  try {
+    const pilot = await store.createPilot(validInput({ name: 'Good' }));
+    const raw = JSON.parse(await readFile(filePath, 'utf-8'));
+    raw.pilots.unshift(null);
+    await writeFile(filePath, JSON.stringify(raw));
+
+    assert.equal((await store.getPilot(pilot.id)).id, pilot.id, 'getPilot skips the null entry rather than throwing on it');
+    assert.equal(await store.getPilot('no-such-id'), null);
+
+    const afterRecord = await store.recordRun(pilot.id, { lastRunAt: 123, lastOutcome: 'finished', consecutiveFailures: 0 });
+    assert.equal(afterRecord.lastRunAt, 123, 'recordRun still finds and stamps the well-formed pilot beside the null entry');
+
+    const afterEnable = await store.setEnabled(pilot.id, false);
+    assert.equal(afterEnable.enabled, false);
+
+    const afterUpdate = await store.updatePilot(pilot.id, { prompt: 'new prompt' });
+    assert.equal(afterUpdate.prompt, 'new prompt');
+
+    // assertNameFree is exercised through createPilot: must not throw
+    // reading the null entry's `.name` while checking uniqueness, and must
+    // not treat it as a name collision either.
+    const second = await store.createPilot(validInput({ name: 'Second' }));
+    assert.equal(second.name, 'Second');
+
+    assert.equal(await store.deletePilot(pilot.id), true);
+    const rawAfterDelete = JSON.parse(await readFile(filePath, 'utf-8'));
+    assert.ok(
+      rawAfterDelete.pilots.some((p) => p === null),
+      'deletePilot must not silently drop the malformed null row - only hydrate() is allowed to be lenient about READING it, never a write',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a corrupt autopilots.json is refused rather than silently replaced', async () => {
   const { dir, filePath, store } = await makeStore();
   try {

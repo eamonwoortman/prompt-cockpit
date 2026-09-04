@@ -79,6 +79,14 @@ export function createAutopilot({
   const inFlightGates = new Set();
   let timer = null;
   let ticking = null;
+  // Round 3 review (New-1): set at the top of stop(), before the in-flight
+  // gate kill loop. Killing a gate UNBLOCKS the evaluate() await that was
+  // stuck on it rather than stopping it, so without this latch the heartbeat
+  // would resume and carry on to the next pilot - creating an unattended
+  // session, or spawning a fresh detached gate, during shutdown. Reset by
+  // start() so a stop()/start() cycle (already covered by I6) fully resumes
+  // normal firing, not just the timer.
+  let stopping = false;
 
   function track(promise) {
     const p = promise
@@ -190,8 +198,16 @@ export function createAutopilot({
   // been spawned `detached` (see runGate) so it is its own group leader.
   function killGateProcess(pid) {
     if (platform === 'win32') return killProcessTree(pid, { platform, spawnSyncImpl, killImpl });
+    // Round 3 review (cheap item 1): killProcessTree's own POSIX branch
+    // guards against a non-positive pid (child-tracker.js:146-147);
+    // this one didn't. -0 === 0, and process.kill(0, sig) signals the
+    // CALLER's own process group, not a stray target. Unreachable from a
+    // real spawn() today, but this module's sibling refuses to guess about
+    // pids on principle, and the guard is one line.
+    const n = Number(pid);
+    if (!Number.isInteger(n) || n <= 0) return false;
     try {
-      killImpl(-pid, 'SIGKILL');
+      killImpl(-n, 'SIGKILL');
       return true;
     } catch {
       return false;
@@ -205,6 +221,15 @@ export function createAutopilot({
   // skip reason.
   function runGate(pilot) {
     return new Promise((resolve) => {
+      // Round 3 review (New-1): refuse to spawn once shutdown is draining.
+      // evaluate()'s own loop-level check is what stops it from reaching a
+      // later pilot in practice, but runNow() reaches blockingReason (and
+      // through it, runGate) directly, bypassing that loop entirely - so the
+      // guard has to live here too, not only at the call site.
+      if (stopping) {
+        resolve({ ok: false, reason: 'run gate skipped: autopilot is stopping' });
+        return;
+      }
       let proc;
       try {
         proc = spawnImpl(pilot.gate.command, {
@@ -326,6 +351,11 @@ export function createAutopilot({
   }
 
   async function fire(pilot, reason, settings) {
+    // Round 3 review (New-1): refuse to start new work once shutdown is
+    // draining - same reasoning as the guard in runGate() above. Checked
+    // before the reservation is claimed, so a fire() reached during shutdown
+    // costs nothing observable (no session, no lock).
+    if (stopping) return null;
     // Round 1 review (C1) - THE fix: claim the slot SYNCHRONOUSLY, with no
     // `await` between this check and the mutation that records it.
     // blockingReason's own checks of `runs` are necessarily stale by the
@@ -388,7 +418,13 @@ export function createAutopilot({
             reason: String(err?.message || err),
           });
         } catch (logErr) {
-          logImpl(`autopilot: failed to log an errored outcome for ${pilot.name}: ${String(logErr?.message || logErr)}`);
+          // Round 3 review (cheap item 3): logImpl itself must never be
+          // allowed to throw here either - track()'s own catch already
+          // wraps it for exactly this reason, and the back-off write above
+          // has already happened, so a throwing logImpl must not undo it.
+          try {
+            logImpl(`autopilot: failed to log an errored outcome for ${pilot.name}: ${String(logErr?.message || logErr)}`);
+          } catch { /* logging must never break the reservation release */ }
         }
         return null;
       }
@@ -418,7 +454,11 @@ export function createAutopilot({
         try {
           registry.closeSession(row.id);
         } catch { /* best effort - releasing the reservation is what matters */ }
-        logImpl(`autopilot: failed to attach ${pilot.name}'s process to the tracker, closing its untracked session: ${String(err?.message || err)}`);
+        // Round 3 review (cheap item 3): same reasoning as the errored-outcome
+        // logImpl above - the reservation is already released by this point.
+        try {
+          logImpl(`autopilot: failed to attach ${pilot.name}'s process to the tracker, closing its untracked session: ${String(err?.message || err)}`);
+        } catch { /* logging must never break the reservation release */ }
         return null;
       }
     }
@@ -441,7 +481,11 @@ export function createAutopilot({
     try {
       await log.append({ event: 'fired', pilotId: pilot.id, pilotName: pilot.name, sessionId: row.id, reason });
     } catch (err) {
-      logImpl(`autopilot: failed to log a 'fired' event for ${pilot.name}: ${String(err?.message || err)}`);
+      // Round 3 review (cheap item 3): same reasoning again - sendInput below
+      // must run regardless of whether this logImpl call itself throws.
+      try {
+        logImpl(`autopilot: failed to log a 'fired' event for ${pilot.name}: ${String(err?.message || err)}`);
+      } catch { /* logging must never break the prompt send below */ }
     }
     // One stored prompt, sent verbatim on every firing. It may itself be a
     // slash command.
@@ -474,6 +518,15 @@ export function createAutopilot({
     const at = now();
 
     for (const pilot of pilots) {
+      // Round 3 review (New-1): bail rather than continue once stop() is
+      // draining. Killing an in-flight gate from stop() UNBLOCKS whichever
+      // pilot's blockingReason() was awaiting it rather than stopping the
+      // heartbeat, so without this check the loop below would carry on to
+      // the NEXT pilot - creating an unattended session, or spawning a fresh
+      // detached gate, after stop()'s kill loop already ran. Checked at the
+      // top of every iteration so it also catches the pilot whose gate was
+      // just killed once it falls through to its own skip()+continue below.
+      if (stopping) return;
       try {
         // 1 - enabled, and 2 - due (including failure back-off). Neither is
         // logged: "not due" is the normal state of every pilot most of the
@@ -490,6 +543,10 @@ export function createAutopilot({
           await skip(pilot, reason);
           continue;
         }
+        // blockingReason's own probe/gate awaits are exactly where stop()
+        // can interleave and flip this pilot's OWN reason to null - recheck
+        // right before firing, not just at the top of the next iteration.
+        if (stopping) return;
         await fire(pilot, 'schedule', settings);
         // Startup stagger: at most ONE overdue pilot per heartbeat. Without
         // this, a cockpit restarted after an hour launches every pilot
@@ -568,10 +625,20 @@ export function createAutopilot({
 
   function start() {
     if (timer) return;
+    // Round 3 review (New-1): a stop()/start() cycle (already exercised by
+    // I6) must fully resume firing, not just re-arm the timer - otherwise a
+    // single stop() would permanently latch the supervisor into refusing all
+    // future work.
+    stopping = false;
     timer = setIntervalImpl(() => { tick(); }, HEARTBEAT_MS);
   }
 
   async function stop() {
+    // Round 3 review (New-1): set BEFORE the kill loop below, and before
+    // anything else - fire()/runGate() check this the moment they are
+    // reached, and evaluate()'s loop checks it every iteration, so shutdown
+    // drains whatever is already committed rather than picking up new work.
+    stopping = true;
     if (timer) {
       clearIntervalImpl(timer);
       timer = null;

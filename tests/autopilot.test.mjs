@@ -132,6 +132,20 @@ async function harness({
   };
 }
 
+// Round 3 review (cheap item 2): several tests below poll a fake spawn/timer
+// call count with `while (...) await new Promise((r) => setTimeout(r, 0))`.
+// Unbounded, a regression that stops the spawn/probe from ever arming makes
+// the test HANG instead of fail - a much worse debugging experience, and one
+// that can look exactly like the watchdog stall that killed an earlier agent
+// on this task. Bounded here with a clear failure message instead.
+async function pollUntil(predicate, { timeoutMs = 2000, message = 'condition was not met before the poll timeout' } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(message);
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
 function pilotInput(over = {}) {
   return {
     name: 'Nightly',
@@ -918,9 +932,7 @@ test('Important-2: the provider-probe timeout is driven by the injected timer, n
   try {
     await h.store.createPilot(pilotInput());
     const tickPromise = h.supervisor.tick();
-    while (pendingTimers.size === 0) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
+    await pollUntil(() => pendingTimers.size > 0, { message: 'the provider-probe timeout was never armed' });
     assert.equal(timeoutCalls.length, 1);
     assert.equal(timeoutCalls[0].ms, 5000, 'the injected timer was armed with providerProbeTimeoutMs, not a real setTimeout');
     // Fire it ourselves - no real delay was ever waited on.
@@ -969,9 +981,7 @@ test('Important-3: stop() kills an in-flight gate on POSIX via the injected kill
   try {
     await h.store.createPilot(pilotInput({ gate: { command: 'sleep forever', timeoutMs: 60_000 } }));
     const tickPromise = h.supervisor.tick();
-    while (spawnCalls.length === 0) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
+    await pollUntil(() => spawnCalls.length > 0, { message: 'the gate was never spawned' });
     await h.supervisor.stop();
     await tickPromise;
 
@@ -1007,9 +1017,7 @@ test('Important-3: stop() kills an in-flight gate on Windows via the injected ki
   try {
     await h.store.createPilot(pilotInput({ gate: { command: 'sleep forever', timeoutMs: 60_000 } }));
     const tickPromise = h.supervisor.tick();
-    while (spawnCalls.length === 0) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
+    await pollUntil(() => spawnCalls.length > 0, { message: 'the gate was never spawned' });
     await h.supervisor.stop();
     await tickPromise;
 
@@ -1114,6 +1122,113 @@ test('M12 label hoist: a pilot with an unknown provider that is also rate-limite
     assert.equal(h.registry.created.length, 0);
     const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
     assert.match(skips[0].reason, /unknown provider/i, 'the more actionable "unknown provider" message wins over the rate-limit one');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// --- Round 3 findings ---------------------------------------------------
+
+test("New-1: stop() during an in-flight heartbeat drains rather than continuing - a later due pilot is not fired once A's killed gate unblocks the loop", async () => {
+  const spawnCalls = [];
+  const spawnImpl = () => {
+    spawnCalls.push(true);
+    return {
+      pid: 777,
+      stdout: { on: () => {} },
+      stderr: { on: () => {} },
+      on: () => {}, // never emits exit/error - only stop()'s kill loop resolves it
+      kill: () => {},
+    };
+  };
+  const h = await harness({ spawnImpl, platform: 'linux', killImpl: () => {} });
+  try {
+    await h.store.createPilot(pilotInput({ name: 'A', gate: { command: 'sleep forever', timeoutMs: 60_000 } }));
+    await h.store.createPilot(pilotInput({ name: 'B' })); // no gate - would fire immediately once evaluate() reached it
+    const tickPromise = h.supervisor.tick();
+    await pollUntil(() => spawnCalls.length > 0, { message: "pilot A's gate was never spawned" });
+
+    await h.supervisor.stop();
+    await tickPromise;
+
+    assert.equal(h.registry.created.length, 0, 'B must not fire during a draining shutdown - before the fix, killing A\'s gate unblocked evaluate() and let it continue to B');
+    assert.equal(spawnCalls.length, 1, 'no further gates were spawned either');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('New-1: stop() does not let the heartbeat spawn a fresh detached gate for the next due pilot either', async () => {
+  const spawnCalls = [];
+  const spawnImpl = () => {
+    const pid = 700 + spawnCalls.length;
+    spawnCalls.push(pid);
+    return {
+      pid,
+      stdout: { on: () => {} },
+      stderr: { on: () => {} },
+      on: () => {},
+      kill: () => {},
+    };
+  };
+  const h = await harness({ spawnImpl, platform: 'linux', killImpl: () => {} });
+  try {
+    await h.store.createPilot(pilotInput({ name: 'A', gate: { command: 'sleep forever', timeoutMs: 60_000 } }));
+    await h.store.createPilot(pilotInput({ name: 'B', gate: { command: 'sleep forever', timeoutMs: 60_000 } }));
+    const tickPromise = h.supervisor.tick();
+    await pollUntil(() => spawnCalls.length > 0, { message: "pilot A's gate was never spawned" });
+
+    await h.supervisor.stop();
+    await tickPromise;
+
+    assert.equal(spawnCalls.length, 1, "B's own gate must not spawn once shutdown is draining - stop()'s kill loop already ran and nothing kills a gate spawned after it");
+    assert.equal(h.registry.created.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('New-1: fire() and runGate() both refuse new work directly once stopped, independent of the evaluate() loop check (runNow reaches them without going through that loop)', async () => {
+  const spawnCalls = [];
+  const spawnImpl = () => {
+    spawnCalls.push(true);
+    return { pid: 555, stdout: { on: () => {} }, stderr: { on: () => {} }, on: () => {}, kill: () => {} };
+  };
+  const h = await harness({ spawnImpl, platform: 'linux', killImpl: () => {} });
+  try {
+    const pilot = await h.store.createPilot(pilotInput({ gate: { command: 'sleep forever', timeoutMs: 60_000 } }));
+    await h.supervisor.stop(); // no heartbeat ever ran - stop() still latches `stopping` for next callers
+
+    const result = await h.supervisor.runNow(pilot.id);
+    assert.equal(result.fired, false, 'runNow must not fire once autopilot is stopped');
+    assert.equal(spawnCalls.length, 0, 'runGate must refuse to spawn once stopped, even reached directly through runNow rather than through evaluate()');
+    assert.equal(h.registry.created.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('Round 3 New-2 (end-to-end): the well-formed pilot beside a null store entry records its terminal outcome and does not re-fire on the next heartbeat', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput({ name: 'Good' }));
+    const raw = JSON.parse(await readFile(h.store.filePath, 'utf8'));
+    raw.pilots.unshift(null);
+    await writeFile(h.store.filePath, JSON.stringify(raw));
+
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 1, 'the well-formed pilot fires despite the null entry beside it');
+
+    h.registry.emitRemoved('s-1', 'closed');
+    await h.supervisor.drain();
+
+    const storedGood = JSON.parse(await readFile(h.store.filePath, 'utf8')).pilots.find((p) => p && p.name === 'Good');
+    assert.equal(storedGood.lastRunAt, h.now(), 'recordRun must stamp lastRunAt despite the null entry sharing the pilots array - the round-2 guard only covered the READ path, not this write path');
+    assert.equal(storedGood.lastOutcome, 'closed-externally');
+
+    h.advanceClock(HEARTBEAT_MS);
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 1, 'lastRunAt was recorded, so the pilot is not due again - before the store fix, the swallowed recordRun failure left lastRunAt null and this fired a fresh, billing session every heartbeat instead');
   } finally {
     await h.cleanup();
   }

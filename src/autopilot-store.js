@@ -174,12 +174,17 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
   }
 
   async function getPilot(id) {
-    return (await listPilots()).find((p) => p.id === id) || null;
+    // Round 3 review (New-2): null-safe - a literal `null` in `pilots` (the
+    // exact shape autopilot.js's own null-pilot guard defends against on the
+    // read path) must not throw here on the write/lookup path. hydrate()
+    // deliberately returns `pilots` verbatim, so a bare null is an
+    // anticipated state, not a corrupt one.
+    return (await listPilots()).find((p) => p?.id === id) || null;
   }
 
   function assertNameFree(pilots, name, exceptId) {
     const target = name.trim().toLowerCase();
-    if (pilots.some((p) => p.id !== exceptId && String(p.name || '').trim().toLowerCase() === target)) {
+    if (pilots.some((p) => p?.id !== exceptId && String(p?.name || '').trim().toLowerCase() === target)) {
       throw nameTaken(name);
     }
   }
@@ -213,7 +218,7 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
 
     updatePilot(id, patch) {
       return mutate((state) => {
-        const i = state.pilots.findIndex((p) => p.id === id);
+        const i = state.pilots.findIndex((p) => p?.id === id);
         if (i < 0) throw invalid(`unknown pilot: ${id}`);
         const name = str(patch?.name);
         if (name) assertNameFree(state.pilots, name, id);
@@ -226,17 +231,24 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
       });
     },
 
+    // Round 3 review (New-2, disclosed extension beyond the finding's own
+    // list): the filter predicate has the identical unguarded `p.id` shape
+    // as the five finders the finding named, and a raw null in `pilots`
+    // throws here too. Null-safe here also means the filter correctly KEEPS
+    // the null row (its `p?.id` is `undefined`, never equal to `id`), which
+    // is what the finding's "do not drop nulls" rule requires of every
+    // write path, not just the five it happened to trace.
     deletePilot(id) {
       return mutate((state) => {
         const before = state.pilots.length;
-        state.pilots = state.pilots.filter((p) => p.id !== id);
+        state.pilots = state.pilots.filter((p) => p?.id !== id);
         return state.pilots.length !== before;
       });
     },
 
     setEnabled(id, enabled) {
       return mutate((state) => {
-        const pilot = state.pilots.find((p) => p.id === id);
+        const pilot = state.pilots.find((p) => p?.id === id);
         if (!pilot) throw invalid(`unknown pilot: ${id}`);
         pilot.enabled = Boolean(enabled);
         return pilot;
@@ -249,7 +261,13 @@ export function createAutopilotStore({ filePath = defaultAutopilotsPath(), idImp
     // rather than throwing inside the heartbeat.
     recordRun(id, { lastRunAt, lastOutcome, consecutiveFailures, enabled } = {}) {
       return mutate((state) => {
-        const pilot = state.pilots.find((p) => p.id === id);
+        // Round 3 review (New-2): this was the load-bearing one - a null
+        // entry throwing here meant recordOutcome's own store.recordRun call
+        // (autopilot.js) threw, track() swallowed it, lastRunAt was never
+        // stamped, and dueAt() reads a null lastRunAt as "due immediately" -
+        // turning a killed heartbeat into a real, billing session firing
+        // every ~15 seconds forever.
+        const pilot = state.pilots.find((p) => p?.id === id);
         if (!pilot) return null;
         if (lastRunAt !== undefined) pilot.lastRunAt = lastRunAt;
         if (lastOutcome !== undefined) pilot.lastOutcome = lastOutcome;
