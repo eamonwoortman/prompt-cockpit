@@ -12,19 +12,13 @@
 //   2. A Grok or Codex pilot with "pick the recommended answer" -
 //      AskUserQuestion is Claude-only, so the field does nothing at all. The
 //      field is DISABLED for those providers rather than left to look active.
-import { PERMISSION_MODES } from '/permissions.js';
-import { WEEKDAY_LABELS } from '/autopilot-format.js';
-
-const UNATTENDED_WRITE_MODES = new Set(['acceptEdits', 'bypassPermissions', 'dontAsk', 'auto']);
+import { PERMISSION_MODES, AUTO_ALLOW_MODES } from '/permissions.js';
+import { WEEKDAY_LABELS, formatMinuteOfDay } from '/autopilot-format.js';
 
 function minuteOfDayFromTimeInput(value) {
   const [h, m] = String(value || '').split(':').map(Number);
   if (!Number.isInteger(h) || !Number.isInteger(m)) return null;
   return h * 60 + m;
-}
-
-function timeInputFromMinuteOfDay(minute) {
-  return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
 }
 
 export function initAutopilotForm({
@@ -119,7 +113,7 @@ export function initAutopilotForm({
       // Misconfiguration 1.
       warn('Heads up: "pick the recommended answer" only covers questions the agent asks you. In "default" mode this pilot will still stop and wait on ordinary tool-permission prompts, because the permission mode governs those.');
     }
-    if (UNATTENDED_WRITE_MODES.has(fields.mode.value)) {
+    if (AUTO_ALLOW_MODES.has(fields.mode.value)) {
       warn(`"${fields.mode.value}" writes to ${fields.cwd.value || 'the project folder'} without asking, unattended, on a timer. Make sure that folder is one you are happy for an agent to change while you are not watching.`);
     }
     if (fields.gateEnabled.checked) {
@@ -184,8 +178,8 @@ export function initAutopilotForm({
     const window = pilot?.schedule?.window ?? null;
     fields.windowEnabled.checked = Boolean(window);
     fields.windowRow.hidden = !window;
-    fields.windowFrom.value = window ? timeInputFromMinuteOfDay(window.fromMinute) : '09:00';
-    fields.windowTo.value = window ? timeInputFromMinuteOfDay(window.toMinute) : '17:00';
+    fields.windowFrom.value = window ? formatMinuteOfDay(window.fromMinute) : '09:00';
+    fields.windowTo.value = window ? formatMinuteOfDay(window.toMinute) : '17:00';
     const days = window ? new Set(window.weekdays) : new Set([0, 1, 2, 3, 4, 5, 6]);
     weekdayInputs.forEach((input, day) => { input.checked = days.has(day); });
 

@@ -23,7 +23,7 @@ export function initNotificationsPanel({ button, panel, headerEl, onOpenPilots }
 
   // Opens a NEW tab attached to a pilot's running session. The token stays out
   // of the URL: `?session=<id>&token=<t>` would put a credential somewhere it
-  // gets logged and referred (the leak backlog.md:27 flags for /ws). Instead
+  // gets logged and referred (the leak backlog.md:53 flags for /ws). Instead
   // the new tab fetches the token from GET /api/sessions/:id/attach-token.
   //
   // Safe for auth because the OPERATOR token lives in localStorage, not

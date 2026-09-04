@@ -10,18 +10,18 @@
 // Everything is built with createElement/textContent, never innerHTML: a pilot
 // name, a gate command's captured stdout and a log reason are all strings this
 // app did not author, and there is no CSP (backlog.md).
-// Root-absolute specifiers are correct here and nowhere else in this feature:
-// this module is only ever loaded by the browser, never imported by a test.
-// autopilot-format.js is the one that has to stay import-free, which is why it
-// takes the schedule functions as a parameter and this file supplies them.
+// Root-absolute specifiers are correct in every public/ module the browser
+// loads, this one included; autopilot-format.js is the only exception, since
+// it must stay import-free so Node can import it from tests/.
 import { initResizablePanel } from '/resizable-panel.js';
-import { nextRunAt, backoffMs } from '/autopilot-schedule.js';
+import { nextRunAt } from '/autopilot-schedule.js';
+import { AUTO_ALLOW_MODES } from '/permissions.js';
 import {
   describeSchedule, describeNextRun, describeOutcome, describeSpend,
   formatRelativeTime, formatDuration,
 } from '/autopilot-format.js';
 
-const SCHEDULE = { nextRunAt, backoffMs };
+const SCHEDULE = { nextRunAt };
 const POLL_MS = 10_000;
 
 export function initAutopilotPanel({
@@ -76,7 +76,13 @@ export function initAutopilotPanel({
     try {
       const res = await fetch('/api/autopilots');
       if (!res.ok) return lastSnapshot;
-      lastSnapshot = await res.json();
+      const snapshot = await res.json();
+      // A hand-edited autopilots.json can contain a null or malformed entry
+      // (the server tolerates this in three places of its own - see
+      // src/autopilot.js's pilots.filter((p) => p && p.id)); filter once here
+      // so applyBadge/renderPilots/renderPilotRow never have to guard it.
+      snapshot.pilots = (snapshot.pilots || []).filter((p) => p && p.id);
+      lastSnapshot = snapshot;
       return lastSnapshot;
     } catch {
       // Best-effort: a failed poll leaves the last-known value showing rather
@@ -123,7 +129,7 @@ export function initAutopilotPanel({
     const mode = el('span', 'autopilot-mode', pilot.mode);
     // Unattended writes to a real repository are the headline risk (spec
     // Risks #1) - the mode belongs on the row, not buried in the form.
-    if (pilot.mode === 'acceptEdits' || pilot.mode === 'bypassPermissions' || pilot.mode === 'dontAsk' || pilot.mode === 'auto') {
+    if (AUTO_ALLOW_MODES.has(pilot.mode)) {
       mode.classList.add('unattended');
       mode.title = 'This pilot writes to the working tree without asking.';
     }
@@ -233,6 +239,7 @@ export function initAutopilotPanel({
       lastLogEntries = (await res.json()).entries || [];
     } catch {
       if (lastLogEntries) return; // keep what's already rendered
+      if (tab !== 'logs' || !open) return;
       placeholder('Could not load the run log.');
       return;
     }

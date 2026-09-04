@@ -90,6 +90,21 @@ Ordered by user-facing value if fixed (2026-08-25) - active pain points and near
   (e) notifications covering non-pilot sessions - the natural base for the
   MVP7 phone-approvals page above.
 
+- [2026-09-04] [M] Final fix wave, item B1: clicking a stale `needs-input`
+  notification whose session has since closed drops the operator on the bare
+  launcher with no visible reason. `notifications-panel.js`'s `attach()` just
+  does `window.open('/?attach=<sessionId>', '_blank')`; the new tab's
+  `adoptAttachedSession()` (`public/app.js:523-539`) fetches
+  `/api/sessions/:id/attach-token`, and on a 403/404 (session gone) it only
+  does `console.warn(...)` and returns `false` - nothing surfaces to the UI,
+  so the new tab just renders the ordinary launcher screen with no clue why it
+  didn't attach. Notifications are polled on a 10s cadence, so a notification
+  that was valid when fetched but stale by the time it's clicked is the most
+  likely of the deferred minors to actually be hit. Filed rather than fixed:
+  surfacing this needs an error channel on the launcher screen, which would
+  put non-wiring logic in `public/app.js`, forbidden by this plan's Global
+  Constraints ("nothing in app.js beyond wiring").
+
 ## [L] Cosmetic
 
 - [2026-08-20, restated 2026-08-24] [L] Docs/metadata drift: CLAUDE.md still describes two providers and server.js as the whole HTTP surface (Codex exists; routing is `router.js` + `src/routes/*`; grok-*, global-stats, git-commit-guard, markdown, titles, permission-rules, settings-file exist). tests/README.md's opening file list still names ~10 files; reality is 34 unit files. package.json still describes a Claude-only cockpit (`claude-prompt-cockpit`). grok-session.js's ACP `clientInfo` is still `claude-prompt-cockpit` `0.1.0`; Codex is `prompt_cockpit` `0.1.3`; package is `0.1.4`. Just do it - a fresh session starts from a wrong mental model. (The 2026-08-20 note that branch `stats-tab` was unmerged is no longer true - it is on `main`, `45cfeec`.)

@@ -184,7 +184,7 @@ export function registerSessionRoutes(router, { isPilotOwned } = {}) {
   // A pilot's session is by definition one this tab is not attached to, so
   // the notification bell needs a way to hand a NEW tab that session's bearer
   // token. `window.open('/?session=<id>&token=<t>')` would put a credential in
-  // a URL - the leak backlog.md:27 already flags for /ws - so the bell opens
+  // a URL - the leak backlog.md:53 already flags for /ws - so the bell opens
   // `/?attach=<sessionId>` and the new tab fetches the token from here.
   //
   // REGISTRATION-ORDER DEPENDENT. This only ever matches because

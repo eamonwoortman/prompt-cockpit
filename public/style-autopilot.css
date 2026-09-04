@@ -9,7 +9,9 @@
   right: 0;
   bottom: 0;
   width: 480px;
-  z-index: 40;
+  z-index: var(--z-pane);
+  background: var(--bg);
+  box-shadow: -2px 0 12px rgba(0, 0, 0, 0.4);
 }
 
 .autopilot-spend {
@@ -80,13 +82,16 @@
   width: 340px;
   max-height: 60vh;
   overflow-y: auto;
-  z-index: 60; /* above #autopilotPane, which it can open on top of */
+  /* Only needs to sit above #autopilotPane (var(--z-pane): 40); reuses the
+     toast tier rather than inventing a new number, since the copy toast
+     (#copyToast, also var(--z-toast)) is transcript-triggered and never
+     shown while this panel is open. */
+  z-index: var(--z-toast);
   background: var(--panel-bg, #1a1a1a);
   border: 1px solid var(--border, #2a2a2a);
   border-radius: 6px;
   padding: 0.35rem;
 }
-#notificationsPanel[hidden] { display: none; }
 .notification-row {
   display: flex;
   flex-direction: column;
