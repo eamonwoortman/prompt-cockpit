@@ -47,6 +47,12 @@ export function createAutopilot({
   spawnSyncImpl = spawnSync,
   killImpl = (p, s) => process.kill(p, s),
   providerProbeTimeoutMs = PROVIDER_PROBE_TIMEOUT_MS,
+  // Round 2 review (Important-2): probeAvailability's timeout used the
+  // global setTimeout directly, with no clearTimeout on the winning path and
+  // no way for a test to drive it without a real delay. Threaded the same
+  // way setIntervalImpl/clearIntervalImpl already are.
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 }) {
   // pilotId -> live run state. This map IS the concurrency lock: `sessionId`
   // checked against registry.get(), because the registry row knows whether a
@@ -64,6 +70,13 @@ export function createAutopilot({
   // listener, so the async store/log writes are tracked here for tests and
   // for shutdown to await.
   const pending = new Set();
+  // Round 2 review (Important-3): the gates spawned by runGate() are
+  // recorded here for the DURATION of the run, so stop() can kill any still
+  // in flight. Needed because `detached: true` (round 1, I3) took the gate
+  // out of the cockpit's own process group so a terminal Ctrl-C no longer
+  // reaches it - closing that window without reverting detached means this
+  // module has to track and kill its own gates itself.
+  const inFlightGates = new Set();
   let timer = null;
   let ticking = null;
 
@@ -101,9 +114,16 @@ export function createAutopilot({
   }
 
   async function skip(pilot, reason, dedupeKey = dedupeKeyFor(reason)) {
-    if (lastSkipReason.get(pilot.id) === dedupeKey) return;
-    lastSkipReason.set(pilot.id, dedupeKey);
-    await log.append({ event: 'skipped', pilotId: pilot.id, pilotName: pilot.name, reason });
+    // pilot can be null here (round 2 review, cheap item 4): a hand-edited
+    // store can hold a bare `null` entry in `pilots`, and evaluate()'s catch
+    // calls skip(pilot, ...) with that same null to report it. `pilot?.`
+    // throughout is what keeps that report itself from throwing - which,
+    // before this, meant a null entry re-logged every 15 seconds forever,
+    // with no dedupe possible.
+    const pilotId = pilot?.id ?? null;
+    if (lastSkipReason.get(pilotId) === dedupeKey) return;
+    lastSkipReason.set(pilotId, dedupeKey);
+    await log.append({ event: 'skipped', pilotId, pilotName: pilot?.name ?? null, reason });
   }
 
   function clearSkip(pilotId) {
@@ -140,13 +160,22 @@ export function createAutopilot({
   // Bounds descriptor.isAvailable() (M11). Never rejects: a synchronous
   // throw, a rejected promise, and a probe that outlives the timeout all
   // resolve to `false`, which is already the safe (skip) direction.
+  //
+  // Round 2 review (Important-2): the timeout handle is now captured and
+  // ALWAYS cleared, on both the winning and losing path - the previous
+  // version left a live, ref'd global setTimeout behind on every probe that
+  // resolved before the timeout, which is every probe in every test that
+  // reaches this line, and it also used the real setTimeout rather than the
+  // injected setTimeoutImpl, so no test could drive the timeout itself
+  // without a real delay.
   function probeAvailability(descriptor) {
     const attempt = Promise.resolve().then(() => descriptor.isAvailable()).catch(() => false);
     if (!providerProbeTimeoutMs) return attempt;
-    return Promise.race([
-      attempt,
-      new Promise((resolve) => setTimeout(() => resolve(false), providerProbeTimeoutMs)),
-    ]);
+    let timeoutHandle;
+    const timedOut = new Promise((resolve) => {
+      timeoutHandle = setTimeoutImpl(() => resolve(false), providerProbeTimeoutMs);
+    });
+    return Promise.race([attempt, timedOut]).finally(() => clearTimeoutImpl(timeoutHandle));
   }
 
   // On Windows, defers to killProcessTree's own taskkill /t walk (it already
@@ -200,13 +229,19 @@ export function createAutopilot({
       proc.stdout?.on('data', collect);
       proc.stderr?.on('data', collect);
 
+      // Tracked from spawn to settle so stop() can reach it (Important-3).
+      const inFlight = { pid: proc.pid, finish: null };
+      inFlightGates.add(inFlight);
+
       let settled = false;
       const finish = (result) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutHandle);
+        inFlightGates.delete(inFlight);
         resolve(result);
       };
+      inFlight.finish = finish;
       const timeoutHandle = setTimeout(() => {
         killGateProcess(proc.pid);
         finish({ ok: false, reason: `run gate timed out after ${pilot.gate.timeoutMs}ms` });
@@ -233,6 +268,17 @@ export function createAutopilot({
   // codex. A due-but-rate-limited-or-capped pilot was probing the CLI's
   // version every 15 seconds to learn something it did not need. Same set,
   // now actually cheapest-first.
+  //
+  // Round 2 review (M12 label hoist): resolving the provider DESCRIPTOR
+  // (as opposed to probing its availability) is synchronous and free, so it
+  // moved back above 7/8b - only the actually-expensive
+  // `await probeAvailability()` call, and the effort check that depends on
+  // its result, stay below. This keeps descriptor.label available for the
+  // rate-limit message (every other skip message in this chain already uses
+  // it) without reintroducing the every-15-seconds version probe that M12
+  // eliminated. Two accepted side effects: an unknown-provider pilot that is
+  // also rate-limited reports the unknown provider first (more actionable),
+  // and the free `efforts.includes` check effectively moved up alongside it.
   async function blockingReason(pilot, settings, { dailySpend, rateLimited }) {
     // 4 - lock free, and no unreaped orphan for this pilot.
     if (runs.has(pilot.id)) return 'already running';
@@ -243,9 +289,18 @@ export function createAutopilot({
     if (runs.size >= settings.maxConcurrentRuns) {
       return `at the concurrent-run limit (${settings.maxConcurrentRuns})`;
     }
+    // Provider descriptor resolution is synchronous (unlike isAvailable()),
+    // so it costs nothing to do here, ahead of the rate-limit/spend-cap
+    // checks - see the M12 label hoist comment above.
+    let descriptor;
+    try {
+      descriptor = providers.getProvider(pilot.provider);
+    } catch (err) {
+      return `unknown provider "${pilot.provider}"`;
+    }
     // 7 - rate limit, keyed by provider. Free (in-memory), so it runs before
     // the provider probe.
-    if (rateLimited.has(pilot.provider)) return `${pilot.provider} is rate limited`;
+    if (rateLimited.has(pilot.provider)) return `${descriptor.label} is rate limited`;
     // 8b - global daily spend cap. A precondition ONLY: it never kills a run
     // in flight, because killing an agent mid-edit to save a few cents trades
     // a small cost for a broken working tree. Also free - dailySpend is
@@ -256,12 +311,6 @@ export function createAutopilot({
     // 5 - provider available and effort valid for it. Without this a Grok
     // pilot on a machine with no Grok CLI fires straight into an error. Last
     // of the free checks to run, since it is the actually-expensive one.
-    let descriptor;
-    try {
-      descriptor = providers.getProvider(pilot.provider);
-    } catch (err) {
-      return `unknown provider "${pilot.provider}"`;
-    }
     const available = await probeAvailability(descriptor);
     if (!available) return `${descriptor.label} is not available on this machine`;
     if (pilot.effort && !descriptor.efforts.includes(pilot.effort)) {
@@ -352,7 +401,27 @@ export function createAutopilot({
     // passing explicit defaults (src/routes/sessions.js:21-27).
 
     const pid = row.handle?.trackedPid ?? null;
-    if (pid != null) await tracker.attachPilot(pid, pilot.id);
+    if (pid != null) {
+      try {
+        await tracker.attachPilot(pid, pilot.id);
+      } catch (err) {
+        // Round 2 review (Important-1): the entry at :294 is still the
+        // PLACEHOLDER here (sessionId: null) - letting this throw propagate
+        // would leave exactly that placeholder in `runs` forever, wedging
+        // this pilot behind a lock nothing can release while a real,
+        // never-prompted session sits live and untracked. Release the
+        // reservation and close the session we just created rather than
+        // leak either one - the invariant this module now holds is that
+        // every exit from fire() either records a real run or releases the
+        // reservation, with no third state.
+        runs.delete(pilot.id);
+        try {
+          registry.closeSession(row.id);
+        } catch { /* best effort - releasing the reservation is what matters */ }
+        logImpl(`autopilot: failed to attach ${pilot.name}'s process to the tracker, closing its untracked session: ${String(err?.message || err)}`);
+        return null;
+      }
+    }
 
     runs.set(pilot.id, {
       pilotId: pilot.id,
@@ -392,7 +461,12 @@ export function createAutopilot({
 
   async function evaluate() {
     const { settings, pilots } = await store.read();
-    const pilotsById = new Map(pilots.map((p) => [p.id, p]));
+    // Round 2 review (cheap item 4): a bare `null` in `pilots` (hand-edited
+    // store) must not crash HERE - this line runs before the per-pilot
+    // try/catch in the loop below even exists, so an unguarded `p.id` threw
+    // out of evaluate() entirely, on every heartbeat, for every pilot, not
+    // just the null one.
+    const pilotsById = new Map(pilots.filter((p) => p && p.id).map((p) => [p.id, p]));
     await reviewRuns(pilotsById);
 
     const { costUsd: dailySpend } = await log.dailyCostUsd(now());
@@ -501,6 +575,18 @@ export function createAutopilot({
     if (timer) {
       clearIntervalImpl(timer);
       timer = null;
+    }
+    // Round 2 review (Important-3): a gate spawned `detached` (round 1, I3)
+    // is its own process-group leader, invisible to a terminal Ctrl-C - the
+    // only thing that used to kill it was its own timeoutMs, which a Ctrl-C
+    // mid-gate pre-empts. Kill every gate still running through the same
+    // path the timeout uses, and resolve its promise directly rather than
+    // waiting on the OS to deliver 'exit' - `ticking` below can be awaiting
+    // exactly this gate, inside blockingReason(), so this must not depend on
+    // an event that a killed/fake process is not guaranteed to emit.
+    for (const inFlight of [...inFlightGates]) {
+      killGateProcess(inFlight.pid);
+      inFlight.finish({ ok: false, reason: 'run gate killed: autopilot is stopping' });
     }
     // Round 1 review (I6): deliberately does NOT unregister the removal
     // listener. The comment above registers it in the constructor precisely
