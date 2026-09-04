@@ -90,3 +90,23 @@ test('an unusable input shape returns null so the question falls through to a hu
   assert.equal(buildAutoAnswer({ questions: [{ question: '', options: [{ label: 'a' }] }] }), null);
   assert.equal(buildAutoAnswer({ questions: [{ question: 'q?', options: [{ label: '' }] }] }), null);
 });
+
+test('fix round 1, M-4a: two questions with identical text are refused rather than silently collapsed to one answer', () => {
+  const qs = [
+    question({ question: 'Dup?', options: [{ label: 'one' }] }),
+    question({ question: 'Dup?', options: [{ label: 'two (Recommended)' }] }),
+  ];
+  assert.equal(buildAutoAnswer({ questions: qs }), null);
+});
+
+test('fix round 1, M-4b: a question literally named "__proto__" is answered as a real key, not silently dropped by the prototype setter', () => {
+  const result = buildAutoAnswer({
+    questions: [question({ question: '__proto__', options: [{ label: 'yes (Recommended)' }] })],
+  });
+  assert.notEqual(result, null);
+  const { answers } = result.decision.updatedInput;
+  assert.equal(Object.prototype.hasOwnProperty.call(answers, '__proto__'), true);
+  assert.equal(answers.__proto__, 'yes (Recommended)');
+  assert.equal(Object.getPrototypeOf(answers), Object.prototype, 'the answers object itself is still an ordinary object');
+  assert.deepEqual(result.chosen, [{ question: '__proto__', chosenLabel: 'yes (Recommended)' }]);
+});

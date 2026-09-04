@@ -63,7 +63,12 @@ function fakeRegistry() {
     },
     async sendInput(id, text) { api.inputs.push({ id, text }); },
     setSessionRemovedListener(fn) { api.removedListener = fn; },
-    setApprovalInterceptor() {},
+    // Recorded, not a no-op: fix round 1 (I-1) - every test that cared what
+    // the interceptor DOES overwrote this with its own capture function, so
+    // nothing asserted that start()/stop() actually call it. This default
+    // lets a test assert the install/teardown calls themselves.
+    approvalInterceptorCalls: [],
+    setApprovalInterceptor(fn) { api.approvalInterceptorCalls.push(fn); },
     // Test-side helpers.
     emitRemoved(id, reason) {
       rows.delete(id);
@@ -1748,6 +1753,25 @@ test('a non-Claude pilot never auto-answers, whatever its inputPolicy says', asy
     assert.equal(decision, null);
   } finally {
     await h.supervisor.stop();
+    await h.cleanup();
+  }
+});
+
+test('fix round 1, I-1: start() installs the interceptor and stop() tears it down', async () => {
+  // Every test above overwrites registry.setApprovalInterceptor with its own
+  // capture function, so none of them actually asserted that start()/stop()
+  // call it at all - the fake's own default used to be a no-op. This test
+  // uses the fake's recording default (approvalInterceptorCalls) instead of
+  // overwriting it, to lock down the install/teardown calls themselves.
+  const h = await harness();
+  try {
+    assert.deepEqual(h.registry.approvalInterceptorCalls, []);
+    h.supervisor.start();
+    assert.equal(h.registry.approvalInterceptorCalls.length, 1);
+    assert.equal(typeof h.registry.approvalInterceptorCalls[0], 'function');
+    await h.supervisor.stop();
+    assert.deepEqual(h.registry.approvalInterceptorCalls, [h.registry.approvalInterceptorCalls[0], null]);
+  } finally {
     await h.cleanup();
   }
 });

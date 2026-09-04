@@ -930,6 +930,11 @@ export function createAutopilot({
     stopping = true;
     // See start()'s own comment: torn down here, unlike the removal listener.
     registry.setApprovalInterceptor(null);
+    // The cache is the interceptor's own state - tearing down one without
+    // the other leaves a stale pilot record (up to 15s old within a running
+    // supervisor, unbounded across a stop()) able to answer a question under
+    // a policy an operator may have just revoked by hand while stopped.
+    pilotCache.clear();
     if (timer) {
       clearIntervalImpl(timer);
       timer = null;

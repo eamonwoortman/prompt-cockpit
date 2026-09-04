@@ -18,12 +18,30 @@ export function buildAutoAnswer(input) {
   const questions = Array.isArray(input?.questions) ? input.questions : null;
   if (!questions || questions.length === 0) return null;
 
-  const answers = {};
+  // Collected as [text, label] pairs, not assigned onto a plain object as
+  // we go - `answers[text] = label` has two failure modes for a question
+  // text this module cannot actually answer: a literal `'__proto__'` hits
+  // Object.prototype's own setter (silently discarded, no own property
+  // created - a real key just vanishes with no error), and a duplicate
+  // `text` across two questions silently overwrites the first, understating
+  // what was actually asked in the resulting `chosen`/'answered' log entry.
+  // Object.fromEntries below defines real own properties for every pair
+  // (including one literally named "__proto__"), so it isn't vulnerable to
+  // the same setter - collecting entries here just lets duplicates be
+  // detected first and refused, rather than silently losing information.
+  const entries = [];
+  const seen = new Set();
   const chosen = [];
   for (const q of questions) {
     const text = typeof q?.question === 'string' ? q.question : '';
     const options = Array.isArray(q?.options) ? q.options : [];
     if (!text || options.length === 0) return null;
+    // Two questions with the same exact text can't be told apart in the
+    // `answers` map the client itself uses (keyed by question text) - not a
+    // shape this module can answer, so it falls through to a human rather
+    // than silently answering only one of them.
+    if (seen.has(text)) return null;
+    seen.add(text);
     // The option the model itself flagged, else the first - which is the
     // convention the tool's own guidance establishes ("make that the first
     // option in the list and add '(Recommended)'").
@@ -34,12 +52,12 @@ export function buildAutoAnswer(input) {
     // them. The client joins multiple selections with ', ' (approval-panel.js
     // :188); a single selection needs no join, and "recommended" never means
     // "everything".
-    answers[text] = label;
+    entries.push([text, label]);
     chosen.push({ question: text, chosenLabel: label });
   }
 
   return {
-    decision: { behavior: 'allow', updatedInput: { questions, answers } },
+    decision: { behavior: 'allow', updatedInput: { questions, answers: Object.fromEntries(entries) } },
     chosen,
   };
 }

@@ -400,9 +400,10 @@ export function closeSession(id) {
 }
 
 // Test-only: drop all rows so test files don't leak state into each other
-// via this module's singleton map. Also drops the process-global listener,
-// for the same reason - a listener registered by one test file would
-// otherwise keep firing for every other file's sessions.
+// via this module's singleton map. Also drops both process-global hooks
+// (the removal listener and the approval interceptor), for the same reason -
+// either one registered by one test file would otherwise keep firing for
+// every other file's sessions.
 export function _reset() {
   sessions.clear();
   sessionRemovedListener = null;
@@ -1469,7 +1470,16 @@ function handleApprovalRequest(id, request) {
       // double-resolve - session.js's resolveApproval deletes before
       // resolving (src/session.js:650-652), so a human click racing this is a
       // no-op returning false.
-      row.handle.resolveApproval(request.requestId, decision);
+      //
+      // `row.handle` is null for the brief instant between sessions.set()
+      // and startSessionImpl() returning (createSession above) - unreachable
+      // today (no provider invokes onApprovalRequest synchronously from
+      // inside its own startSession, and the interceptor's own `runs` lookup
+      // can't match a row that young either), but this is an exported,
+      // generic, process-global hook, so the optional-chain (rather than a
+      // bare call inside the try) keeps a future caller from throwing past
+      // this function's own fall-through-to-human guarantee.
+      row.handle?.resolveApproval(request.requestId, decision);
       return;
     }
   }
