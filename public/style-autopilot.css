@@ -1,0 +1,119 @@
+/* Auto-pilot pane, form modal and notifications bell.
+   LOADED LAST in index.html's ordered stylesheet list, deliberately: the CSS
+   split is cascade-ordered, so a later file's rule wins an equal-specificity
+   tie against an earlier one. These rules extend .detail-pane / .btn from
+   style-base.css and style-panels.css, so they must come after both. */
+
+#autopilotPane {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  z-index: 40;
+}
+
+.autopilot-spend {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  font-size: 0.85em;
+}
+
+.autopilot-row {
+  border-bottom: 1px solid var(--border, #2a2a2a);
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.autopilot-row.disabled { opacity: 0.55; }
+.autopilot-row.running { border-left: 3px solid var(--accent, #4a9eff); }
+
+.autopilot-row-top { display: flex; align-items: baseline; gap: 0.5rem; }
+.autopilot-name { font-weight: 600; }
+.autopilot-state { margin-left: auto; font-size: 0.85em; opacity: 0.8; }
+.autopilot-state.live { color: var(--accent, #4a9eff); opacity: 1; }
+.autopilot-state.blocked { color: var(--warn, #e0a030); opacity: 1; }
+
+.autopilot-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.82em; opacity: 0.8; }
+.autopilot-mode.unattended { color: var(--warn, #e0a030); opacity: 1; }
+
+.autopilot-cwd {
+  font-size: 0.78em;
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the leaf folder visible when the path is long */
+  text-align: left;
+}
+.autopilot-outcome { font-size: 0.8em; opacity: 0.7; }
+
+.autopilot-actions { display: flex; gap: 0.35rem; margin-top: 0.25rem; flex-wrap: wrap; }
+.autopilot-row-error { margin-top: 0.35rem; }
+
+.autopilot-log-row { border-bottom: 1px solid var(--border, #2a2a2a); padding: 0.45rem 0.75rem; }
+.autopilot-log-head { display: flex; gap: 0.5rem; align-items: baseline; }
+.autopilot-log-event {
+  font-size: 0.72em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  background: var(--chip-bg, #2a2a2a);
+}
+.autopilot-log-finished .autopilot-log-event { background: #1e4620; }
+.autopilot-log-errored .autopilot-log-event,
+.autopilot-log-timed-out .autopilot-log-event { background: #4a1e1e; }
+.autopilot-log-blocked .autopilot-log-event { background: #4a3a1e; }
+.autopilot-log-pilot { font-weight: 600; font-size: 0.85em; }
+.autopilot-log-when { margin-left: auto; font-size: 0.78em; opacity: 0.6; }
+.autopilot-log-detail, .autopilot-log-answer { font-size: 0.8em; opacity: 0.75; margin-top: 0.15rem; }
+
+/* --- notifications bell (see notifications-panel.js) --- */
+
+#notificationsBtn.has-entries { color: var(--warn, #e0a030); }
+
+#notificationsPanel {
+  position: fixed;
+  right: 0.5rem;
+  width: 340px;
+  max-height: 60vh;
+  overflow-y: auto;
+  z-index: 60; /* above #autopilotPane, which it can open on top of */
+  background: var(--panel-bg, #1a1a1a);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 6px;
+  padding: 0.35rem;
+}
+#notificationsPanel[hidden] { display: none; }
+.notification-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+}
+.notification-row:last-child { border-bottom: none; }
+.notification-row.clickable { cursor: pointer; }
+.notification-row.clickable:hover { background: var(--hover-bg, #232323); }
+.notification-message { font-size: 0.88em; }
+.notification-hint { font-size: 0.76em; opacity: 0.6; }
+
+/* --- create/edit form modal --- */
+
+#autopilotFormModal .modal-box { width: min(640px, 92vw); }
+.autopilot-form-warning {
+  border-left: 3px solid var(--warn, #e0a030);
+  padding: 0.4rem 0.6rem;
+  margin: 0.4rem 0;
+  font-size: 0.85em;
+}
+.autopilot-window-row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.autopilot-weekdays { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+.autopilot-weekdays label { display: flex; align-items: center; gap: 0.15rem; font-size: 0.82em; }
+
+@media (max-width: 900px) {
+  #autopilotPane { width: 100%; }
+  #notificationsPanel { width: calc(100% - 1rem); }
+}

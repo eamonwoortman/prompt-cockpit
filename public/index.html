@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="/style-panels.css" />
 <link rel="stylesheet" href="/style-compose.css" />
 <link rel="stylesheet" href="/style-overlays.css" />
+<link rel="stylesheet" href="/style-autopilot.css" />
 </head>
 <body data-screen="launcher">
   <header class="app-header">
@@ -33,6 +34,8 @@
     <button type="button" id="diffBtn" class="btn session-chrome" title="View uncommitted changes in the workspace">Diff</button>
     <button type="button" id="sessionCountBtn" class="btn" title="All sessions on this server">… sessions</button>
     <button type="button" id="newSessionTabBtn" class="btn" title="Open a new tab to start another session">+ New tab</button>
+    <button type="button" id="autopilotBtn" class="btn" title="Auto-pilot: scheduled unattended sessions">🛫 Auto-pilot</button>
+    <button type="button" id="notificationsBtn" class="btn" title="Auto-pilot notifications needing your attention" hidden>🔔</button>
     <button type="button" id="settingsBtn" class="btn session-chrome" title="Settings" aria-label="Settings">⚙</button>
   </header>
   <form id="operatorGate" hidden>
@@ -119,6 +122,24 @@
       <button type="button" id="handshakeRegenBtn" class="btn" title="Rotate the secret - every session not re-synced afterward loses delegation trust" aria-label="Regenerate handshake">↻</button>
     </div>
     <div id="sessionListBody" class="detail-pane-body"></div>
+  </div>
+  <!-- Fixed overlay, same reasoning as #sessionListPane above: the launcher's
+       display:none must not hide it, and `top` is measured from the header in
+       autopilot-panel.js rather than being a CSS constant, because the header
+       height changes when the rate-limit banner wraps it onto two lines. -->
+  <div id="autopilotPane" class="detail-pane">
+    <div id="autopilotResizeHandle" class="detail-pane-resize-handle" title="Drag to resize"></div>
+    <div class="detail-pane-header">
+      <span class="detail-pane-header-label">Auto-pilot</span>
+      <span id="autopilotSpend" class="autopilot-spend" title="Total spend across every pilot today. The cap is a precondition only - it never kills a run already in flight."></span>
+      <button type="button" id="autopilotNewBtn" class="btn" title="Create a new pilot">+ New</button>
+      <button type="button" id="autopilotCloseBtn" class="btn" title="Close" aria-label="Close auto-pilot panel">✕</button>
+    </div>
+    <div class="detail-pane-tabs" role="tablist" id="autopilotTabs">
+      <button type="button" class="detail-tab active" data-autopilot-tab="pilots" role="tab" aria-selected="true" title="Configured pilots">Pilots</button>
+      <button type="button" class="detail-tab" data-autopilot-tab="logs" role="tab" aria-selected="false" title="Run history across every pilot">Logs</button>
+    </div>
+    <div id="autopilotBody" class="detail-pane-body"></div>
   </div>
   <div id="copyToast">Copied</div>
   <div id="approvalBanner" class="session-chrome" hidden>

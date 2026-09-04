@@ -43,6 +43,12 @@ const DEFAULTS = {
   // Same drag-resized/patchSettings-only persistence as detailPaneWidth
   // above - session-list-pane.js's own resize handle.
   sessionListPaneWidth: 380,
+  // Same drag-resized/patchSettings-only persistence as the two widths above
+  // - autopilot-panel.js's own resize handle. Declared here for consistency
+  // with its two siblings and to document the key; initResizablePanel
+  // (resizable-panel.js:13) already guards a missing/undefined width, so this
+  // default isn't load-bearing for the round-trip itself.
+  autopilotPaneWidth: 480,
 };
 
 function makeFolderId() {

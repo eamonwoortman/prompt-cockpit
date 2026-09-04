@@ -23,6 +23,7 @@ import { initSettings, loadSettings, patchSettings } from '/settings.js';
 import { initTurnChart } from '/turn-chart.js';
 import { initDetailPane } from '/detail-pane.js';
 import { initSessionListPane } from '/session-list-pane.js';
+import { initAutopilotPanel } from '/autopilot-panel.js';
 import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
@@ -158,6 +159,25 @@ const sessionListPane = initSessionListPane({
   resizeHandle: document.getElementById('sessionListResizeHandle'),
   initialWidth: persistedTurnChartPrefs.sessionListPaneWidth,
   onWidthChange: (width) => patchSettings({ sessionListPaneWidth: width }),
+});
+
+// Pilots/Logs pane for the auto-pilot supervisor - same fixed-overlay/measured-
+// top/resizable pattern as sessionListPane above.
+const autopilotPanel = initAutopilotPanel({
+  panel: document.getElementById('autopilotPane'),
+  body: document.getElementById('autopilotBody'),
+  tabsEl: document.getElementById('autopilotTabs'),
+  headerEl: document.querySelector('.app-header'),
+  toggleBtn: document.getElementById('autopilotBtn'),
+  closeBtn: document.getElementById('autopilotCloseBtn'),
+  newBtn: document.getElementById('autopilotNewBtn'),
+  spendEl: document.getElementById('autopilotSpend'),
+  resizeHandle: document.getElementById('autopilotResizeHandle'),
+  // Same persistence pair sessionListPane above uses.
+  initialWidth: persistedTurnChartPrefs.autopilotPaneWidth,
+  onWidthChange: (width) => patchSettings({ autopilotPaneWidth: width }),
+  onEdit: null,   // wired to autopilot-form.js below
+  onCreate: null,
 });
 
 const operatorGate = initOperatorGate({
