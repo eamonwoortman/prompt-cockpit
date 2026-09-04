@@ -33,6 +33,11 @@ export function initAutopilotPanel({
   let tab = 'pilots';
   let pollTimer = null;
   let lastSnapshot = null;
+  // Logs' own last-known cache, same reasoning as lastSnapshot above (the
+  // best-effort-poll constraint): a failed or still-in-flight poll must
+  // leave whatever entries are already on screen alone rather than wiping
+  // them or flickering "Loading…" every 10s.
+  let lastLogEntries = null;
 
   initResizablePanel({
     panel,
@@ -218,15 +223,20 @@ export function initAutopilotPanel({
   }
 
   async function renderLogs() {
-    placeholder('Loading…');
-    let entries = [];
+    // Only the very first load shows "Loading…" - once lastLogEntries holds
+    // something, a poll that fails or is just slow must leave it on screen
+    // rather than flickering the body blank every 10s.
+    if (lastLogEntries === null) placeholder('Loading…');
     try {
       const res = await fetch('/api/autopilot-logs?limit=200');
-      entries = (await res.json()).entries || [];
+      if (!res.ok) throw new Error(`${res.status}`);
+      lastLogEntries = (await res.json()).entries || [];
     } catch {
+      if (lastLogEntries) return; // keep what's already rendered
       placeholder('Could not load the run log.');
       return;
     }
+    const entries = lastLogEntries;
     if (tab !== 'logs' || !open) return;
     body.textContent = '';
     if (!entries.length) {
