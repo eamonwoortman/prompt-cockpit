@@ -44,9 +44,10 @@ All from the Codex review (`03-codex-spec-review.raw.md`, finding numbers in bra
 From the Plan 1 spikes (`docs/superpowers/spikes/2026-11-03-superagent-spikes.md`):
 
 1. Router isolation: `settingSources: []` alone is no longer the specified option set. It dropped the user's `apiKeyHelper` (`apiKeySource: "none"`) and the isolated call failed with "Not logged in". An auth route for the router is now an explicit requirement (see "Isolation"), and the 6000-token `routerMaxInputTokens` default is marked unvalidated.
-2. Permissions: `auto` is no longer assumed to deny or to never ask. It asks via `canUseTool` for `AskUserQuestion`, so the interceptor denial is mandatory, and workers' `canUseTool` calls are denied regardless of outcome. The classifier deny path stays unobserved, so `auto` is not relied on to block risky Bash.
+2. Permissions: `auto` is no longer assumed to deny or to never ask. It asks via `canUseTool` for `AskUserQuestion`, so the interceptor denial is mandatory, and every worker except the brainstormer (whose `AskUserQuestion` follows "Questions from unattended workers") has its `canUseTool` calls denied regardless of classifier outcome. The classifier deny path stays unobserved, so `auto` is not relied on to block risky Bash.
 3. Usage ledger: the ledger field is `result.modelUsage` as a per-model delta from the session's previous result, not a separately captured stream of subagent messages. The `subagent` source tag cannot be derived from it, and permission-classifier and token-count calls are not counted.
-4. Context drift: `PreCompact` is an observation point (log `trigger` and attempt id), not a control point; the post-turn `handoff.md` backstop is kept unchanged.
+4. Router isolation option set and its test: the `query()` call now also passes `mcpServers: {}` and `strictMcpConfig: true`, and the Testing section's isolation assertion covers them plus the chosen auth route.
+5. Context drift: `PreCompact` is an observation point (log `trigger` and attempt id), not a control point; the post-turn `handoff.md` backstop is kept unchanged.
 
 ## Goals
 
@@ -279,7 +280,7 @@ Within these limits the router may only choose *how* to retry (see "The router")
 
 ### Permissions
 
-Default `auto` (Decision 12). **Spike outcome (revision 3):** `auto` asks through `canUseTool` for `AskUserQuestion`, so a worker would park unless the interceptor handler denies with the "unattended" message, so the worker can publish `blocked`. What the classifier does with a risky action is **inconclusive**: the model refused a force push itself, and a `curl` writing outside the cwd was silently allowed. Do not rely on `auto` to block risky Bash. The runner denies every `canUseTool` call from a worker regardless (Plan 2 adds a test asserting this).
+Default `auto` (Decision 12). **Spike outcome (revision 3):** `auto` asks through `canUseTool` for `AskUserQuestion`, so a worker would park unless the interceptor handler denies with the "unattended" message, so the worker can publish `blocked`. What the classifier does with a risky action is **inconclusive**: the model refused a force push itself, and a `curl` writing outside the cwd was silently allowed. Do not rely on `auto` to block risky Bash. The runner denies every `canUseTool` call from a worker regardless of classifier outcome, except the brainstormer, whose `AskUserQuestion` follows "Questions from unattended workers" (Plan 2 adds a test asserting this).
 
 ## Automatic-mode brainstorm (default) [Decided: agents brainstorm; Author's call: mechanism]
 
@@ -326,7 +327,7 @@ Built by code for each call:
 - The triggering event: attempt reason, the result's `status`/`summary`/`question` fields, attempt count and remaining attempts, and the failure signature.
 - The closed set of allowed actions and the output schema.
 
-**Whole-request limit:** the full request (system prompt + card) is measured before sending and must fit `routerMaxInputTokens` (default 6k); output is limited by `routerMaxOutputTokens` (default 300). **Deterministic truncation order** when over the limit: drop completed-phase lines oldest first → shorten decision notes → truncate the event summary with a path pointer. If still over, no call is made and the event escalates as `stuck`.
+**Whole-request limit:** the full request (system prompt + card) is measured before sending and must fit `routerMaxInputTokens` (default 6k, unvalidated until the router baseline is re-measured; see "Isolation"); output is limited by `routerMaxOutputTokens` (default 300). **Deterministic truncation order** when over the limit: drop completed-phase lines oldest first → shorten decision notes → truncate the event summary with a path pointer. If still over, no call is made and the event escalates as `stuck`.
 
 Output: `{ "action": "<enum>", "note": "≤ 30 words" }` (plus `text` for notification calls). Code validates; invalid, over-length or timed-out (default 30 s) output escalates as `stuck` — never silently proceeds.
 
@@ -364,7 +365,7 @@ Triage uses the reserved interactive slot.
 
 ## Budget and usage ledger [Author's call]
 
-**Ledger.** Every model call is recorded in `events.jsonl` as a usage entry tied to an attempt (or router call): model, input/output/cache tokens, `costUsd` (or `null` if unpriced), and source (`worker`, `subagent`, `router`, `standin`, `verifier`, `triage`). Entries are written per completed turn as deltas, so a crash loses at most one turn. Cockpit's accumulator is session-local (`src/session-registry.js:259-275`) and subagent messages are filtered before normal accounting (`src/session.js:373-383`); the runner must capture subagent usage explicitly. **Spike outcome (revision 3):** the ledger reads `result.modelUsage` as the per-model delta from the previous result of the same session (cumulative across turns, observed; subtract only numeric spend fields, since `contextWindow` and `maxOutputTokens` are 0 in the delta; treat a decrease as a reset). It does not read `result.usage` or per-message usage (unreliable). That `modelUsage` includes subagent spend rests on the SDK doc comment and was not independently isolated, so the `subagent` source cannot be derived from it and is dropped for worker rows. It excludes the permission classifier and token-count calls, so spend for `auto`-mode workers is undercounted.
+**Ledger.** Every model call is recorded in `events.jsonl` as a usage entry tied to an attempt (or router call): model, input/output/cache tokens, `costUsd` (or `null` if unpriced), and source (`worker`, `router`, `standin`, `verifier`, `triage`). Entries are written per completed turn as deltas, so a crash loses at most one turn. Cockpit's accumulator is session-local (`src/session-registry.js:259-275`) and subagent messages are filtered before normal accounting (`src/session.js:373-383`); the runner therefore reads usage from the result message rather than capturing subagent messages. **Spike outcome (revision 3):** the ledger reads `result.modelUsage` as the per-model delta from the previous result of the same session (cumulative across turns, observed; subtract only numeric spend fields, since `contextWindow` and `maxOutputTokens` are 0 in the delta; treat a decrease as a reset). It does not read `result.usage` or per-message usage (unreliable). That `modelUsage` includes subagent spend rests on the SDK doc comment and was not independently isolated, so there is no separate `subagent` source: subagent spend is folded into the worker's entry. It excludes the permission classifier and token-count calls, so spend for `auto`-mode workers is undercounted.
 
 **Pricing.** `src/pricing.json` has no entries for the 5.5 models (it lists `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5` and older) — **Confirmed**. Adding Opus 5.5, Sonnet 5.5 and Haiku 5.5 rates from Anthropic's published pricing is a prerequisite. Config validation warns on any unpriced model; budgets for unpriced usage fall back to tokens.
 
@@ -440,7 +441,7 @@ Superagent entries join the derived notification projection (computed from state
 }
 ```
 
-`alternate` is the model the router may pick for "retry with alternate model". `provider` must be `claude` in v1 (Decision 13).
+`alternate` is the model the router may pick for "retry with alternate model". `provider` must be `claude` in v1 (Decision 13). `routerMaxInputTokens: 6000` is unvalidated (see "Isolation").
 
 ## Testing [Author's call]
 
@@ -469,7 +470,7 @@ Superagent entries join the derived notification projection (computed from state
 
 Outcomes are recorded in [the spikes findings](../spikes/2026-11-03-superagent-spikes.md) (run once each, 2026-11-03).
 
-1. `auto` permission mode through the SDK: what happens when it blocks an action. **Outcome:** `auto` asks via `canUseTool` for `AskUserQuestion`, so the interceptor must deny it; the classifier deny path is inconclusive. Plan 2 adds a runner test denying worker `canUseTool` calls regardless. ([S1](../spikes/2026-11-03-superagent-spikes.md#s1-auto-mode))
+1. `auto` permission mode through the SDK: what happens when it blocks an action. **Outcome:** `auto` asks via `canUseTool` for `AskUserQuestion`, so the interceptor must deny it; the classifier deny path is inconclusive. Plan 2 adds a runner test denying `canUseTool` calls from every worker except the brainstormer (whose `AskUserQuestion` follows the Questions section) regardless of classifier outcome. ([S1](../spikes/2026-11-03-superagent-spikes.md#s1-auto-mode))
 2. A mid-turn hook before auto-compaction (e.g. `PreCompact`) for worker checkpoints. **Outcome:** fires on manual `/compact` with `trigger` and `custom_instructions`; `{ continue: true }` did not block compaction; veto (`continue: false` / `decision: 'block'`) untested; auto mid-turn firing unresolved. Plan 2's runner logs every firing; post-turn handoff backstop kept. ([S2](../spikes/2026-11-03-superagent-spikes.md#s2-precompact))
 3. Capturing subagent usage from SDK messages that Cockpit currently filters (`src/session.js:373-383`). **Outcome:** read `result.modelUsage` as a per-model delta from the session's previous result; subagent inclusion rests on the SDK doc comment, not an isolated measurement; classifier and token-count calls are not counted; per-message usage is unreliable. ([S3](../spikes/2026-11-03-superagent-spikes.md#s3-subagent-usage))
 4. Router one-shot `query()` with full isolation: confirm no settings, CLAUDE.md, tools or MCP leak in, and measure the actual request size. **Outcome: inconclusive.** The isolated option set showed no tools, MCP servers or plugins, but the call failed with "Not logged in" (`settingSources: []` drops `apiKeyHelper`), so the empty-card `totalInput` is unmeasured and the 6000 default unvalidated. Plan 2 must find an auth route (credentials via `env`, or a source carrying the helper) and re-measure. ([S4](../spikes/2026-11-03-superagent-spikes.md#s4-router-isolation))
