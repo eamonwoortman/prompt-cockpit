@@ -75,10 +75,10 @@ Remaining in the isolated `init`: `skills` and `slash_commands` still list the b
 **Conclusion.**
 - Structural isolation: **observed in the isolated `init`, with a caveat** (zero tools, zero MCP servers, zero plugins, no user skills or agents). That `init` came from a call that then failed authentication, so it shows what was configured, not that a working call is isolated. The control did show a leak (`probe-mcp`), so the fixtures were loaded and the comparison is valid.
 - Text isolation (PINEAPPLE): **inconclusive.** The control never emitted PINEAPPLE even with CLAUDE.md in scope, so that signal cannot discriminate.
-- Authentication: `settingSources: []` dropped the user's `apiKeyHelper` (`apiKeySource: "none"`), so the isolated call returned "Not logged in". An extra option or credential route is required; this probe did not test one (run-once rule). Candidates to test in Plan 2: pass credentials through `env`, or keep a source that carries the helper while still excluding project sources.
+- Authentication: `settingSources: []` dropped the user's `apiKeyHelper` (`apiKeySource: "none"`), so the isolated call returned "Not logged in". An extra option or credential route is required; this probe did not test one (run-once rule). Candidates to test in the router plan (milestone 2): pass credentials through `env`, or keep a source that carries the helper while still excluding project sources.
 - Baseline `totalInput` for an empty card: **inconclusive**, no isolated usage was measured. The only number is the control's 50,191, which is the unisolated ceiling, not the router baseline. Built-in skills and agents still appear in `init` and may add prompt size; that is unmeasured.
 
-**Impact on design.** Do not ship `settingSources: []` as-is for the router: it breaks auth under an `apiKeyHelper` setup. Plan 2 must resolve the auth route and then re-measure `totalInput` against the 6000 `routerMaxInputTokens` default before that default is trusted.
+**Impact on design.** Do not ship `settingSources: []` as-is for the router: it breaks auth under an `apiKeyHelper` setup. The router plan (milestone 2) must resolve the auth route and then re-measure `totalInput` against the 6000 `routerMaxInputTokens` default before that default is trusted.
 
 ## S2 PreCompact
 
