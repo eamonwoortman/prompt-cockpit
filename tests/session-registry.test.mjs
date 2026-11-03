@@ -1417,3 +1417,47 @@ test('unsubscribe is idempotent and safe during dispatch', () => {
     assert.deepEqual(seen, [1, 2, 1]);
   } finally { registry._reset(); }
 });
+
+test('addRateLimitListener fires on a rejected rate_limit_event and on its clear', () => {
+  registry._reset();
+  try {
+    const seen = [];
+    registry.addRateLimitListener((e) => seen.push(e));
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    impl.emitMessage({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1900000000, rateLimitType: 'five_hour' } });
+    impl.emitMessage({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } });
+    impl.emitMessage({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed' } });
+    assert.deepEqual(seen, [
+      { id: row.id, provider: row.provider, cwd: '/tmp', rateLimitHit: { resetsAt: 1900000000 * 1000, rateLimitType: 'five_hour' } },
+      { id: row.id, provider: row.provider, cwd: '/tmp', rateLimitHit: null },
+    ]);
+  } finally { registry._reset(); }
+});
+
+test('addRateLimitListener fires on the session-limit text path', () => {
+  registry._reset();
+  try {
+    const seen = [];
+    registry.addRateLimitListener((e) => seen.push(e));
+    const impl = fakeStartSession();
+    registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    impl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: "You've hit your session limit · resets 2:10am (Europe/Paris)" }] } });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].rateLimitHit.rateLimitType, 'session_limit_text');
+    assert.equal(typeof seen[0].rateLimitHit.resetsAt, 'number');
+  } finally { registry._reset(); }
+});
+
+test('a throwing rate-limit listener does not break message handling', () => {
+  registry._reset();
+  try {
+    registry.addRateLimitListener(() => { throw new Error('boom'); });
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    const ws = fakeWs(); registry.attachClient(row.id, ws); ws.sent.length = 0;
+    impl.emitMessage({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1900000000, rateLimitType: 'five_hour' } });
+    assert.equal(row.rateLimitHit.rateLimitType, 'five_hour');
+    assert.ok(ws.sent.length > 0, 'summary and message broadcasts still happen');
+  } finally { registry._reset(); }
+});

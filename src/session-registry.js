@@ -114,6 +114,29 @@ export function setApprovalInterceptor(fn) {
   }
 }
 
+// Rate-limit transition listeners: fired after row.rateLimitHit is set (by a
+// rejected rate_limit_event or the session-limit text) or cleared back to
+// null by a non-rejected rate_limit_event. Same `{ fn }` registration records
+// and throw isolation as the removed-listeners above.
+const rateLimitRegistrations = new Set();
+
+export function addRateLimitListener(fn) {
+  const record = { fn };
+  rateLimitRegistrations.add(record);
+  return () => { rateLimitRegistrations.delete(record); };
+}
+
+function notifyRateLimit(id, row) {
+  const event = { id, provider: row.provider, cwd: row.cwd, rateLimitHit: row.rateLimitHit ? { ...row.rateLimitHit } : null };
+  for (const { fn } of [...rateLimitRegistrations]) {
+    try {
+      fn(event);
+    } catch (err) {
+      console.error(`rate-limit listener failed for ${id}:`, err);
+    }
+  }
+}
+
 // The single place a row is dropped. `reason` is 'closed' or 'error'.
 function removeSession(id, reason) {
   if (!sessions.delete(id)) return false;
@@ -442,8 +465,8 @@ export function closeSession(id) {
 
 // Test-only: drop all rows so test files don't leak state into each other
 // via this module's singleton map. Also drops every process-global hook
-// registration (removal listeners and approval interceptors, legacy slots
-// included), for the same reason - one registered by one test file would
+// registration (removal listeners, approval interceptors and rate-limit
+// listeners, legacy slots included), for the same reason - one registered by one test file would
 // otherwise keep firing for every other file's sessions.
 export function _reset() {
   sessions.clear();
@@ -451,6 +474,7 @@ export function _reset() {
   legacyRemoved = null;
   interceptorRegistrations.length = 0;
   legacyInterceptor = null;
+  rateLimitRegistrations.clear();
 }
 
 export function list() {
@@ -943,9 +967,11 @@ function handleMessage(id, message) {
       // in app.js, instead of every reader having to remember the *1000.
       row.rateLimitHit = { resetsAt: info.resetsAt ? info.resetsAt * 1000 : null, rateLimitType: info.rateLimitType || null };
       if (row.autoContinue) scheduleAutoContinue(id);
+      notifyRateLimit(id, row);
     } else if (row.rateLimitHit) {
       row.rateLimitHit = null;
       clearAutoContinueTimer(row);
+      notifyRateLimit(id, row);
     }
     broadcastSummary(id);
   }
@@ -965,6 +991,7 @@ function handleMessage(id, message) {
       if (resetsAt != null) {
         row.rateLimitHit = { resetsAt: resetsAt + AUTO_CONTINUE_BUFFER_MS, rateLimitType: 'session_limit_text' };
         if (row.autoContinue) scheduleAutoContinue(id);
+        notifyRateLimit(id, row);
         broadcastSummary(id);
       }
     }
