@@ -1,6 +1,6 @@
 # Superagent spikes (Plan 1)
 
-Probe scripts: `tests/superagent-auto-mode-probe.manual.mjs`, `tests/superagent-router-isolation-probe.manual.mjs`. Both run by hand, not part of `npm test`. SDK: claude_code_version 2.1.231 (per `init`), run 2026-11-03 on Windows.
+Probe scripts: `tests/superagent-auto-mode-probe.manual.mjs`, `tests/superagent-router-isolation-probe.manual.mjs`, `tests/superagent-precompact-probe.manual.mjs`, `tests/superagent-subagent-usage-probe.manual.mjs`. All run by hand, not part of `npm test`. SDK: claude_code_version 2.1.231 (per `init`), run 2026-11-03 on Windows.
 
 ## S1 auto mode
 
