@@ -1,7 +1,7 @@
 # Superagent — design
 
 **Date:** 2026-11-03
-**Revision:** 2 (see "What changed in revision 2")
+**Revision:** 3 (see "What changed in revision 2" and "What changed in revision 3")
 **Status:** design approved, not implemented
 **Branch:** `feature/superagent`, cut from `feature/auto-pilot`
 **Research folder:** `C:\workspace\claude\research\super-agent\docs\` (outside this repo)
@@ -38,6 +38,15 @@ All from the Codex review (`03-codex-spec-review.raw.md`, finding numbers in bra
 12. Claude-only in v1 everywhere, including the router; provider fallback is entirely in the last milestone. [12]
 13. Review files are committed; the ledger is archived before worktree removal; notification exceptions are named. [13]
 14. No shared heartbeat with auto-pilot; separate timers, shared ownership hooks, notifications and cooldown store. [14]
+
+## What changed in revision 3
+
+From the Plan 1 spikes (`docs/superpowers/spikes/2026-11-03-superagent-spikes.md`):
+
+1. Router isolation: `settingSources: []` alone is no longer the specified option set. It dropped the user's `apiKeyHelper` (`apiKeySource: "none"`) and the isolated call failed with "Not logged in". An auth route for the router is now an explicit requirement (see "Isolation"), and the 6000-token `routerMaxInputTokens` default is marked unvalidated.
+2. Permissions: `auto` is no longer assumed to deny or to never ask. It asks via `canUseTool` for `AskUserQuestion`, so the interceptor denial is mandatory, and workers' `canUseTool` calls are denied regardless of outcome. The classifier deny path stays unobserved, so `auto` is not relied on to block risky Bash.
+3. Usage ledger: the ledger field is `result.modelUsage` as a per-model delta from the session's previous result, not a separately captured stream of subagent messages. The `subagent` source tag cannot be derived from it, and permission-classifier and token-count calls are not counted.
+4. Context drift: `PreCompact` is an observation point (log `trigger` and attempt id), not a control point; the post-turn `handoff.md` backstop is kept unchanged.
 
 ## Goals
 
@@ -250,7 +259,7 @@ Cockpit parks every `AskUserQuestion` regardless of permission mode (`src/sessio
 
 ### Context drift for workers [Author's call]
 
-Primary defence is bounded work units: fresh session per attempt, one task per implementer, `maxTurns` per role, inputs as paths. Cockpit only measures context usage after a turn completes (`src/session-registry.js:948`, `:1421-1431`), and input sent mid-turn is queued (`src/session.js:1-3`), so a mid-turn checkpoint cannot be promised. As a weaker backstop: if a worker's turn ends without a result and its measured context is above a threshold (default 70%), the nudge asks for `handoff.md` instead, and the next attempt starts fresh from it. **Spike:** the SDK exposes a `PreCompact` hook event (`sdk.d.ts:816`, **Confirmed**); check whether it can trigger a reliable mid-turn checkpoint (whether the worker can still write `handoff.md` at that point is **not verified**); adopt only if it proves reliable.
+Primary defence is bounded work units: fresh session per attempt, one task per implementer, `maxTurns` per role, inputs as paths. Cockpit only measures context usage after a turn completes (`src/session-registry.js:948`, `:1421-1431`), and input sent mid-turn is queued (`src/session.js:1-3`), so a mid-turn checkpoint cannot be promised. As a weaker backstop: if a worker's turn ends without a result and its measured context is above a threshold (default 70%), the nudge asks for `handoff.md` instead, and the next attempt starts fresh from it. **Spike:** the SDK exposes a `PreCompact` hook event (`sdk.d.ts:816`, **Confirmed**); check whether it can trigger a reliable mid-turn checkpoint (whether the worker can still write `handoff.md` at that point is **not verified**); adopt only if it proves reliable. **Spike outcome (revision 3):** `PreCompact` fires on manual `/compact` with `trigger` and `custom_instructions`, but a generic `{ continue: true }` return did not affect compaction and no veto was tested, and auto mid-turn firing is unobserved. Treat it as an observation point: the runner logs every firing (`trigger`, attempt id), and nothing depends on it writing `handoff.md` before compaction.
 
 ### Retry, stall and repetition limits [Author's call]
 
@@ -270,7 +279,7 @@ Within these limits the router may only choose *how* to retry (see "The router")
 
 ### Permissions
 
-Default `auto` (Decision 12). **Spike:** verify through the SDK what `auto` does when it blocks an action — deny and let the worker continue, or surface a prompt? A surfaced prompt would park the worker; the interceptor handler must convert it to a denial with the "unattended" message, so the worker can publish `blocked`.
+Default `auto` (Decision 12). **Spike outcome (revision 3):** `auto` asks through `canUseTool` for `AskUserQuestion`, so a worker would park unless the interceptor handler denies with the "unattended" message, so the worker can publish `blocked`. What the classifier does with a risky action is **inconclusive**: the model refused a force push itself, and a `curl` writing outside the cwd was silently allowed. Do not rely on `auto` to block risky Bash. The runner denies every `canUseTool` call from a worker regardless (Plan 2 adds a test asserting this).
 
 ## Automatic-mode brainstorm (default) [Decided: agents brainstorm; Author's call: mechanism]
 
@@ -323,7 +332,9 @@ Output: `{ "action": "<enum>", "note": "≤ 30 words" }` (plus `text` for notifi
 
 ### Isolation [Author's call]
 
-SDK `query()` with: `settingSources: []` (no user/project/local settings and no CLAUDE.md; `sdk.d.ts:1978-1987`), `tools: []` (`sdk.d.ts:1447-1455`), no MCP servers, no plugins/skills, a custom system prompt (not the `claude_code` preset Cockpit uses for sessions, `src/session.js:248`), `maxTurns: 1`, and the router model. The model must be on `routerModelAllowlist` (default: Claude Haiku 5.5). The stable part (instructions + schema) comes first so prompt caching applies. Each call's request size, latency, usage and decision are appended to `events.jsonl` and shown in the router log. It is not a Cockpit session row and does not appear in the session list.
+SDK `query()` with: `settingSources: []` (no user/project/local settings and no CLAUDE.md; `sdk.d.ts:1978-1987`), `tools: []` (`sdk.d.ts:1447-1455`), `mcpServers: {}` with `strictMcpConfig: true`, no plugins/skills, a custom system prompt (not the `claude_code` preset Cockpit uses for sessions, `src/session.js:248`), `maxTurns: 1`, and the router model. The model must be on `routerModelAllowlist` (default: Claude Haiku 5.5). The stable part (instructions + schema) comes first so prompt caching applies. Each call's request size, latency, usage and decision are appended to `events.jsonl` and shown in the router log. It is not a Cockpit session row and does not appear in the session list.
+
+**Authentication caveat (revision 3).** The spike showed `settingSources: []` removes the user's `apiKeyHelper` (`apiKeySource: "none"`), so the isolated call failed with "Not logged in". The router therefore needs an auth route that keeps isolation: credentials passed through `env`, or a setting source that carries the helper while excluding project sources. Neither is tested yet; Plan 2 picks one and re-measures. Built-in skills and agents still appear in the isolated `init`; their prompt cost is unmeasured. The empty-card baseline `totalInput` is **inconclusive** (no isolated usage was measured; the unisolated control used about 50,191 input tokens), so the 6000 `routerMaxInputTokens` default is unvalidated until re-measured.
 
 ## Feedback and sub-plans [Decided: three routes; Author's call: mechanics]
 
@@ -353,7 +364,7 @@ Triage uses the reserved interactive slot.
 
 ## Budget and usage ledger [Author's call]
 
-**Ledger.** Every model call is recorded in `events.jsonl` as a usage entry tied to an attempt (or router call): model, input/output/cache tokens, `costUsd` (or `null` if unpriced), and source (`worker`, `subagent`, `router`, `standin`, `verifier`, `triage`). Entries are written per completed turn as deltas, so a crash loses at most one turn. Cockpit's accumulator is session-local (`src/session-registry.js:259-275`) and subagent messages are filtered before normal accounting (`src/session.js:373-383`); the runner must capture subagent usage explicitly.
+**Ledger.** Every model call is recorded in `events.jsonl` as a usage entry tied to an attempt (or router call): model, input/output/cache tokens, `costUsd` (or `null` if unpriced), and source (`worker`, `subagent`, `router`, `standin`, `verifier`, `triage`). Entries are written per completed turn as deltas, so a crash loses at most one turn. Cockpit's accumulator is session-local (`src/session-registry.js:259-275`) and subagent messages are filtered before normal accounting (`src/session.js:373-383`); the runner must capture subagent usage explicitly. **Spike outcome (revision 3):** the ledger reads `result.modelUsage` as the per-model delta from the previous result of the same session (cumulative across turns, observed; subtract only numeric spend fields, since `contextWindow` and `maxOutputTokens` are 0 in the delta; treat a decrease as a reset). It does not read `result.usage` or per-message usage (unreliable). That `modelUsage` includes subagent spend rests on the SDK doc comment and was not independently isolated, so the `subagent` source cannot be derived from it and is dropped for worker rows. It excludes the permission classifier and token-count calls, so spend for `auto`-mode workers is undercounted.
 
 **Pricing.** `src/pricing.json` has no entries for the 5.5 models (it lists `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5` and older) — **Confirmed**. Adding Opus 5.5, Sonnet 5.5 and Haiku 5.5 rates from Anthropic's published pricing is a prerequisite. Config validation warns on any unpriced model; budgets for unpriced usage fall back to tokens.
 
@@ -437,7 +448,7 @@ Superagent entries join the derived notification projection (computed from state
 - **Results:** stale attempt id rejected; non-atomic partial file ignored; `done` missing a required artifact → `invalid-result`; listed commit absent → `invalid-result`.
 - **Recovery:** replay recorded `events.jsonl` fixtures — truncated last line; attempt started with valid result (reconciled, not re-run); attempt started without result (new attempt, not counted).
 - **Usage cap:** missed `rateLimitHit` poll still classified via cooldown store; capped attempt does not consume an attempt or call the router; restart while paused resumes as a new attempt.
-- **Router:** request size limit and truncation order against worst-case jobs; over-limit → no call, `stuck`; schema validation of good/bad outputs; isolation options asserted on the `query()` call (`settingSources: []`, `tools: []`, custom system prompt, allowlisted model).
+- **Router:** request size limit and truncation order against worst-case jobs; over-limit → no call, `stuck`; schema validation of good/bad outputs; isolation options asserted on the `query()` call (`settingSources: []`, `tools: []`, `mcpServers: {}`, `strictMcpConfig: true`, custom system prompt, allowlisted model, plus the chosen auth route).
 - **Questions:** `AskUserQuestion` from a non-brainstorm worker is denied with the unattended message; manual-mode brainstorm questions reach the user.
 - **Config:** contract validation rejects broken compositions (e.g. `per-task` without `tasks`, review without target, non-Claude provider).
 - **Prompt surface (DSH §6.9):** every role template states the result contract, atomic publish, phase-boundary stop and recovery-note handling; the stand-in template states tagging and escalation rules.
@@ -456,10 +467,12 @@ Superagent entries join the derived notification projection (computed from state
 
 ## Spikes before or during milestone 1
 
-1. `auto` permission mode through the SDK: what happens when it blocks an action.
-2. A mid-turn hook before auto-compaction (e.g. `PreCompact`) for worker checkpoints.
-3. Capturing subagent usage from SDK messages that Cockpit currently filters (`src/session.js:373-383`).
-4. Router one-shot `query()` with full isolation: confirm no settings, CLAUDE.md, tools or MCP leak in, and measure the actual request size.
+Outcomes are recorded in [the spikes findings](../spikes/2026-11-03-superagent-spikes.md) (run once each, 2026-11-03).
+
+1. `auto` permission mode through the SDK: what happens when it blocks an action. **Outcome:** `auto` asks via `canUseTool` for `AskUserQuestion`, so the interceptor must deny it; the classifier deny path is inconclusive. Plan 2 adds a runner test denying worker `canUseTool` calls regardless. ([S1](../spikes/2026-11-03-superagent-spikes.md#s1-auto-mode))
+2. A mid-turn hook before auto-compaction (e.g. `PreCompact`) for worker checkpoints. **Outcome:** fires on manual `/compact` with `trigger` and `custom_instructions`; `{ continue: true }` did not block compaction; veto (`continue: false` / `decision: 'block'`) untested; auto mid-turn firing unresolved. Plan 2's runner logs every firing; post-turn handoff backstop kept. ([S2](../spikes/2026-11-03-superagent-spikes.md#s2-precompact))
+3. Capturing subagent usage from SDK messages that Cockpit currently filters (`src/session.js:373-383`). **Outcome:** read `result.modelUsage` as a per-model delta from the session's previous result; subagent inclusion rests on the SDK doc comment, not an isolated measurement; classifier and token-count calls are not counted; per-message usage is unreliable. ([S3](../spikes/2026-11-03-superagent-spikes.md#s3-subagent-usage))
+4. Router one-shot `query()` with full isolation: confirm no settings, CLAUDE.md, tools or MCP leak in, and measure the actual request size. **Outcome: inconclusive.** The isolated option set showed no tools, MCP servers or plugins, but the call failed with "Not logged in" (`settingSources: []` drops `apiKeyHelper`), so the empty-card `totalInput` is unmeasured and the 6000 default unvalidated. Plan 2 must find an auth route (credentials via `env`, or a source carrying the helper) and re-measure. ([S4](../spikes/2026-11-03-superagent-spikes.md#s4-router-isolation))
 
 ## Risks and limitations
 
