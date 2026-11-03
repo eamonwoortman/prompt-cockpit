@@ -79,3 +79,51 @@ Remaining in the isolated `init`: `skills` and `slash_commands` still list the b
 - Baseline `totalInput` for an empty card: **inconclusive**, no isolated usage was measured. The only number is the control's 50,191, which is the unisolated ceiling, not the router baseline. Built-in skills and agents still appear in `init` and may add prompt size; that is unmeasured.
 
 **Impact on design.** Do not ship `settingSources: []` as-is for the router: it breaks auth under an `apiKeyHelper` setup. Plan 2 must resolve the auth route and then re-measure `totalInput` against the 6000 `routerMaxInputTokens` default before that default is trusted.
+
+## S2 PreCompact
+
+**Question.** Does a `PreCompact` hook fire on a manual `/compact` between turns, what does its input carry, and can its return value change or delay compaction?
+
+**Probe.** `tests/superagent-precompact-probe.manual.mjs`: temp dir with a small `package.json`, one streaming-input `query()`, `model: 'claude-sonnet-5-5'`, `permissionMode: 'acceptEdits'`, `maxTurns: 4`, 120 s deadline per turn, hook `PreCompact` logging its input and returning `{ continue: true }`. Turns: read `package.json`; `/compact Keep a note that the project is called probe.`; ask for the project name and the file read. Run once. Observed cost: **$0.311** (cumulative `total_cost_usd`; turn 1 alone was $0.205). The probe's cleanup hit `EPERM` removing its temp dir (cwd still held on Windows); harmless.
+
+**Observed (verbatim excerpts).**
+
+The hook fired on the manual trigger, after the `status: compacting` message:
+```
+[turn 2] msg type=system subtype=status {"type":"system","subtype":"status","status":"compacting", ...
+HOOK PreCompact input: {"session_id":"85f0d3ec-...","transcript_path":"C:\Users\EamonWoortman\.claude\projects\...\85f0d3ec-....jsonl","cwd":"C:\Users\EAMONW~1\AppData\Local\Temp\superagent-precompact-probe-k4yhh6","prompt_id":"880abec6-...","hook_event_name":"PreCompact","trigger":"manual","custom_instructions":"Keep a note that the project is called probe."}
+```
+Compaction then completed despite our hook returning `{ continue: true }`:
+```
+[turn 2] msg type=system subtype=status {"type":"system","subtype":"status","status":null,"compact_result":"success", ...
+[turn 2] msg type=system subtype=compact_boundary {... "compact_metadata":{"trigger":"manual","pre_tokens":42472,"post_tokens":7500,"cumulative_dropped_tokens":34972,"duration_ms":9703,"preserved_segment":{...}, ...
+```
+Turn 3 (after the compaction) answered correctly:
+```
+[turn 3] assistant text: "The project is called **probe** (`package.json:1`, `"name":"probe"`). ... The file I read was `package.json`, at `C:\Users\EAMONW~1\...\package.json`.
+```
+Compaction also triggered `SessionStart` hooks with matcher `compact` (the user's own plugins), and a fresh `init` message appeared in turn 2.
+
+From `sdk.d.ts`: `PreCompactHookInput = BaseHookInput & { hook_event_name: 'PreCompact'; trigger: 'manual' | 'auto'; custom_instructions: string | null }` (line 2319). There is no `PreCompactHookSpecificOutput` in the `hookSpecificOutput` union (`sdk.d.ts:7248`); `SyncHookJSONOutput` (line 7235) offers only the generic fields (`continue`, `suppressOutput`, `stopReason`, `decision`, `systemMessage`, `reason`, ...).
+
+**Conclusion.**
+- The hook **fires on the manual trigger** with `trigger: 'manual'` and `custom_instructions` equal to the text after `/compact`, plus the base fields (`session_id`, `transcript_path`, `cwd`, `prompt_id`). Observed.
+- Return value: the types define no compaction-specific output. That a generic `{ continue: true }` return neither delayed nor changed compaction is observed; whether `continue: false` or `decision: 'block'` can veto or delay it was **not tested** and is **unresolved**.
+- Post-compaction recall of "probe" and `package.json` is **inconclusive** as evidence that `custom_instructions` were honoured: `compact_boundary.preserved_segment` shows part of the pre-compaction messages was kept verbatim, so the facts may have survived without the instruction.
+- **Unresolved (scope limit).** This probe exercises only the manual trigger between turns. It cannot show whether a worker can act (for example write `handoff.md`) during an automatic mid-turn compaction, or whether `auto` firings carry the same input. Follow-up: Plan 2's runner logs every PreCompact firing (`trigger`, attempt id) so real `auto` firings are observed in use before any checkpoint feature relies on them.
+
+**Impact on design.** Treat PreCompact as an observation point (log `trigger` and attempt id), not a control point. Keep the post-turn `handoff.md` backstop from spec §Context drift; do not depend on a hook to write it before compaction.
+
+## S3 subagent usage
+
+**Question.** Which result field carries subagent spend, and is it cumulative across turns, so the usage ledger can read one field?
+
+**Probe.** `tests/superagent-subagent-usage-probe.manual.mjs` (written, syntax-checked, **NOT RUN**): two `query()` configs in the repo cwd, (A) defaults and (B) `forwardSubagentText: true`, two turns each spawning an Agent subagent, `claude-sonnet-5-5`, `maxTurns: 12`, 180 s deadline per turn.
+
+**Why not run.** The brief's stop rule: the S2 probe, with no subagent and a temp-dir cwd, cost $0.311 (about 10x its header estimate), and the first turn of any `query()` pays about $0.2 for the preset and tool context. This probe makes four turns that each also spawn a subagent in a repo with a large CLAUDE.md, so I expect $0.7-1.0, over the $0.50 per-probe limit and over what is left of the ~$1 budget. That is an estimate, not a measurement.
+
+**Observed.** Nothing from a run. Only the SDK's own doc comments, which are claims, not observations: `result.usage` is "MAIN AGENT LOOP ONLY — excludes Task subagent, sidechain, and auxiliary model calls, and is per-turn" (`sdk.d.ts:4495`); `result.modelUsage` covers "main loop, Task subagents, sidechains, and internal calls such as compaction" and is "cumulative across turns in streaming-input sessions" (`sdk.d.ts:4499`); `total_cost_usd` is cumulative likewise (`sdk.d.ts:4491`); `forwardSubagentText` forwards subagent text blocks, while by default only `tool_use`/`tool_result` blocks are emitted (`sdk.d.ts:1657`).
+
+**Conclusion.** **Inconclusive**: no evidence from a run. Missing evidence: for each config, `result.usage` vs `result.modelUsage` after a subagent turn, the turn-2 `modelUsage` delta, and per-message usage on `parent_tool_use_id` messages under (A) vs (B). Working hypothesis to confirm, **speculative until run**: the ledger reads `result.modelUsage` as the per-model delta from the previous result of the same session.
+
+**Impact on design.** Do not hard-code the ledger field yet. Run this probe (at the user's approval of roughly $1, or cut to config A with one turn) before the usage ledger task depends on it.
