@@ -44,44 +44,85 @@ const sessions = new Map();
 // the pilot is due and lock-free on the very next heartbeat, and a session
 // dying at startup becomes a 15-second spawn loop.
 //
-// Like the approval interceptor below, the registry learns only that a
-// listener MAY exist here - never what a pilot is. Both hooks are documented
+// Like the approval interceptors below, the registry learns only that
+// listeners MAY exist here - never what a pilot is. Both hooks are documented
 // symmetrically for that reason.
-let sessionRemovedListener = null;
+//
+// Any number of listeners may register via addSessionRemovedListener; each
+// registration is its own `{ fn }` record with its own unsubscribe, and every
+// one fires on every removal. setSessionRemovedListener is the legacy single
+// slot auto-pilot still uses: it replaces only its own previous record and
+// never touches add* registrations.
+const removedRegistrations = new Set();
+let legacyRemoved = null;
 
-export function setSessionRemovedListener(fn) {
-  sessionRemovedListener = typeof fn === 'function' ? fn : null;
+export function addSessionRemovedListener(fn) {
+  const record = { fn };
+  removedRegistrations.add(record);
+  return () => { removedRegistrations.delete(record); };
 }
 
-// Auto-pilot's AskUserQuestion auto-answer hook (src/autopilot.js +
-// src/autopilot-answer.js). Consulted in handleApprovalRequest BEFORE the row
-// push and the broadcast, so the bell never flickers for a question that is
-// about to be auto-answered. Returns a PermissionResult, or null to fall
-// through to today's behavior unchanged.
+export function setSessionRemovedListener(fn) {
+  if (legacyRemoved) removedRegistrations.delete(legacyRemoved);
+  legacyRemoved = null;
+  if (typeof fn === 'function') {
+    legacyRemoved = { fn };
+    removedRegistrations.add(legacyRemoved);
+  }
+}
+
+// Approval interceptors, e.g. auto-pilot's AskUserQuestion auto-answer hook
+// (src/autopilot.js + src/autopilot-answer.js). Consulted in
+// handleApprovalRequest BEFORE the row push and the broadcast, so the bell
+// never flickers for a question that is about to be auto-answered. Each
+// returns a PermissionResult, or null to pass. They run in registration
+// order and the first non-null decision wins; only when every one passes (or
+// throws) does the request fall through to today's behavior unchanged.
 //
-// MUST be synchronous: handleApprovalRequest is called from session.js's
+// Each MUST be synchronous: handleApprovalRequest is called from session.js's
 // canUseTool callback and pushes/broadcasts immediately afterwards. That is
 // safe - session.js registers the requestId in its own map (src/session.js:288)
 // BEFORE invoking this callback (:289), so an interceptor resolving
 // synchronously always finds its entry.
 //
-// Like the removed-listener above, the registry learns only that a hook may
-// exist - never what a pilot is. Scoping to pilot-owned rows is the
-// interceptor's own job; it is one process-global hook, and an unscoped one
-// would silently auto-answer questions in hand-driven sessions.
-let approvalInterceptor = null;
+// Like the removed-listeners above, the registry learns only that hooks may
+// exist - never what a pilot is. Scoping to its own rows is each
+// interceptor's own job; they are process-global, and an unscoped one would
+// silently auto-answer questions in hand-driven sessions. Registration works
+// the same way too: addApprovalInterceptor for any number of `{ fn }`
+// records, setApprovalInterceptor as auto-pilot's legacy single slot.
+const interceptorRegistrations = [];
+let legacyInterceptor = null;
+
+function removeInterceptorRecord(record) {
+  const index = interceptorRegistrations.indexOf(record);
+  if (index !== -1) interceptorRegistrations.splice(index, 1);
+}
+
+export function addApprovalInterceptor(fn) {
+  const record = { fn };
+  interceptorRegistrations.push(record);
+  return () => removeInterceptorRecord(record);
+}
 
 export function setApprovalInterceptor(fn) {
-  approvalInterceptor = typeof fn === 'function' ? fn : null;
+  if (legacyInterceptor) removeInterceptorRecord(legacyInterceptor);
+  legacyInterceptor = null;
+  if (typeof fn === 'function') {
+    legacyInterceptor = { fn };
+    interceptorRegistrations.push(legacyInterceptor);
+  }
 }
 
 // The single place a row is dropped. `reason` is 'closed' or 'error'.
 function removeSession(id, reason) {
   if (!sessions.delete(id)) return false;
-  try {
-    sessionRemovedListener?.({ id, reason });
-  } catch (err) {
-    console.error(`session-removed listener failed for ${id}:`, err);
+  for (const { fn } of [...removedRegistrations]) {
+    try {
+      fn({ id, reason });
+    } catch (err) {
+      console.error(`session-removed listener failed for ${id}:`, err);
+    }
   }
   return true;
 }
@@ -400,14 +441,16 @@ export function closeSession(id) {
 }
 
 // Test-only: drop all rows so test files don't leak state into each other
-// via this module's singleton map. Also drops both process-global hooks
-// (the removal listener and the approval interceptor), for the same reason -
-// either one registered by one test file would otherwise keep firing for
-// every other file's sessions.
+// via this module's singleton map. Also drops every process-global hook
+// registration (removal listeners and approval interceptors, legacy slots
+// included), for the same reason - one registered by one test file would
+// otherwise keep firing for every other file's sessions.
 export function _reset() {
   sessions.clear();
-  sessionRemovedListener = null;
-  approvalInterceptor = null;
+  removedRegistrations.clear();
+  legacyRemoved = null;
+  interceptorRegistrations.length = 0;
+  legacyInterceptor = null;
 }
 
 export function list() {
@@ -1454,14 +1497,17 @@ function broadcastUsage(id) {
 
 function handleApprovalRequest(id, request) {
   const row = sessions.get(id);
-  if (row && approvalInterceptor) {
+  if (row && interceptorRegistrations.length) {
     let decision = null;
-    try {
-      decision = approvalInterceptor({ row, request });
-    } catch (err) {
-      // Falling through to a human beats stranding the tool call.
-      console.error(`approval interceptor failed for ${id}:`, err);
-      decision = null;
+    for (const { fn } of [...interceptorRegistrations]) {
+      try {
+        decision = fn({ row, request });
+      } catch (err) {
+        // Falling through to a human beats stranding the tool call.
+        console.error(`approval interceptor failed for ${id}:`, err);
+        decision = null;
+      }
+      if (decision) break;
     }
     if (decision) {
       // Straight to the handle, not the exported resolveApproval() above:

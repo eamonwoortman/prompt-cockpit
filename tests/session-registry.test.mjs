@@ -1291,3 +1291,129 @@ test('final fix wave, item 4: an interceptor decision arriving before row.handle
     registry._reset();
   }
 });
+
+test('addApprovalInterceptor: first non-null decision wins, in registration order', async () => {
+  registry._reset();
+  try {
+    const calls = [];
+    registry.addApprovalInterceptor(() => { calls.push('a'); return null; });
+    registry.addApprovalInterceptor(() => { calls.push('b'); return { behavior: 'deny', message: 'from b' }; });
+    registry.addApprovalInterceptor(() => { calls.push('c'); return { behavior: 'allow' }; });
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    const ws = fakeWs(); registry.attachClient(row.id, ws); ws.sent.length = 0;
+    const decision = impl.emitApprovalRequest({});
+    assert.deepEqual(calls, ['a', 'b']);
+    assert.equal(row.pendingApprovals.length, 0);
+    assert.equal(ws.sent.some((m) => m.type === 'cockpit:approval-request'), false);
+    assert.deepEqual(await decision, { behavior: 'deny', message: 'from b' });
+  } finally { registry._reset(); }
+});
+
+test('approval falls through when every interceptor returns null', () => {
+  registry._reset();
+  try {
+    registry.addApprovalInterceptor(() => null);
+    registry.setApprovalInterceptor(() => null);
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    const ws = fakeWs(); registry.attachClient(row.id, ws); ws.sent.length = 0;
+    impl.emitApprovalRequest({});
+    assert.equal(row.pendingApprovals.length, 1);
+    assert.equal(ws.sent.filter((m) => m.type === 'cockpit:approval-request').length, 1);
+  } finally { registry._reset(); }
+});
+
+test('a throwing interceptor does not block later interceptors', async () => {
+  registry._reset();
+  try {
+    registry.addApprovalInterceptor(() => { throw new Error('boom'); });
+    registry.addApprovalInterceptor(() => ({ behavior: 'deny', message: 'second' }));
+    const impl = fakeStartSession();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    const decision = impl.emitApprovalRequest({});
+    assert.equal(row.pendingApprovals.length, 0);
+    assert.deepEqual(await decision, { behavior: 'deny', message: 'second' });
+  } finally { registry._reset(); }
+});
+
+test('setApprovalInterceptor replaces only the legacy slot', () => {
+  registry._reset();
+  try {
+    const seen = [];
+    registry.addApprovalInterceptor(() => { seen.push('added'); return null; });
+    registry.setApprovalInterceptor(() => { seen.push('legacy-1'); return null; });
+    registry.setApprovalInterceptor(() => { seen.push('legacy-2'); return null; });
+    const impl = fakeStartSession();
+    registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    impl.emitApprovalRequest({});
+    assert.deepEqual(seen, ['added', 'legacy-2']);
+    registry.setApprovalInterceptor(null);
+    seen.length = 0;
+    impl.emitApprovalRequest({});
+    assert.deepEqual(seen, ['added']);
+  } finally { registry._reset(); }
+});
+
+test('the same function via add and set is two independent registrations', () => {
+  registry._reset();
+  try {
+    let count = 0;
+    const fn = () => { count += 1; return null; };
+    const off = registry.addApprovalInterceptor(fn);
+    registry.setApprovalInterceptor(fn);
+    const impl = fakeStartSession();
+    registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+    impl.emitApprovalRequest({});
+    assert.equal(count, 2);
+    registry.setApprovalInterceptor(null);
+    impl.emitApprovalRequest({});
+    assert.equal(count, 3);
+    off();
+    impl.emitApprovalRequest({});
+    assert.equal(count, 3);
+  } finally { registry._reset(); }
+});
+
+test('duplicate add registrations unsubscribe independently', () => {
+  registry._reset();
+  try {
+    const seen = [];
+    const fn = (e) => seen.push(e.reason);
+    const off1 = registry.addSessionRemovedListener(fn);
+    registry.addSessionRemovedListener(fn);
+    off1();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+    registry.closeSession(row.id);
+    assert.deepEqual(seen, ['closed']);
+  } finally { registry._reset(); }
+});
+
+test('removed listeners: every listener fires; a throwing one does not block later ones', () => {
+  registry._reset();
+  try {
+    const seen = [];
+    registry.addSessionRemovedListener(() => { throw new Error('boom'); });
+    registry.addSessionRemovedListener((e) => seen.push(['added', e.reason]));
+    registry.setSessionRemovedListener((e) => seen.push(['legacy', e.reason]));
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+    registry.closeSession(row.id);
+    assert.deepEqual(seen, [['added', 'closed'], ['legacy', 'closed']]);
+  } finally { registry._reset(); }
+});
+
+test('unsubscribe is idempotent and safe during dispatch', () => {
+  registry._reset();
+  try {
+    const seen = [];
+    let off2;
+    registry.addSessionRemovedListener(() => { seen.push(1); off2(); });
+    off2 = registry.addSessionRemovedListener(() => seen.push(2));
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+    registry.closeSession(row.id);
+    off2();
+    const row2 = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+    registry.closeSession(row2.id);
+    assert.deepEqual(seen, [1, 2, 1]);
+  } finally { registry._reset(); }
+});
