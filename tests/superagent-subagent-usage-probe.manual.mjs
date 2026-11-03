@@ -47,6 +47,7 @@ async function runConfig(name, extra) {
   const q = query({ prompt: input, options: { cwd: REPO, model: MODEL, permissionMode: 'acceptEdits', maxTurns: 12, ...extra } });
   let turn = 0;
   let turnResolve = null;
+  let turnInFlight = false;
   let top = {};
   let sub = {};
   let prevModelUsage = {};
@@ -72,12 +73,12 @@ async function runConfig(name, extra) {
           console.log(`[${name}${turn}] modelUsage delta vs previous result=${JSON.stringify(delta)}`);
           prevModelUsage = m.modelUsage ?? {};
           top = {}; sub = {};
-          if (turnResolve) { turnResolve(); turnResolve = null; }
+          if (turnResolve) { turnInFlight = false; turnResolve(); turnResolve = null; }
         }
       }
     } catch (err) {
       console.log('pump error:', err?.message ?? err);
-      if (turnResolve) { turnResolve(); turnResolve = null; }
+      if (turnResolve) { turnInFlight = false; turnResolve(); turnResolve = null; }
     }
   })();
   try {
@@ -88,16 +89,18 @@ async function runConfig(name, extra) {
       let timedOut = false;
       const done = new Promise((r) => { turnResolve = r; });
       const deadline = new Promise((r) => { timer = setTimeout(() => { timedOut = true; r(); }, DEADLINE_MS); });
+      turnInFlight = true;
       input.push(text);
       await Promise.race([done, deadline]);
       clearTimeout(timer);
       if (timedOut) { console.log('DEADLINE hit'); break; }
+      turnInFlight = false;
     }
   } catch (e) {
     console.log(`${name} error:`, e?.message ?? e);
   } finally {
     input.end();
-    try { await q.interrupt(); } catch (e) { console.log('interrupt error:', e?.message ?? e); }
+    try { if (turnInFlight) await q.interrupt(); } catch (e) { console.log('interrupt error:', e?.message ?? e); }
     try { q.close(); } catch (e) { console.log('close error:', e?.message ?? e); }
   }
   console.log(`${name} final total_cost_usd:`, lastResult?.total_cost_usd);
