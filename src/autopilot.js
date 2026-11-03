@@ -72,6 +72,7 @@ export function createAutopilot({
   // Fix round 1 (I3): threaded the same way providerProbeTimeoutMs is, so a
   // test can prove stop() returns within the deadline without a real delay.
   stopTickDeadlineMs = STOP_TICK_DEADLINE_MS,
+  cooldowns = null,
 }) {
   // pilotId -> live run state. This map IS the concurrency lock: `sessionId`
   // checked against registry.get(), because the registry row knows whether a
@@ -182,6 +183,11 @@ export function createAutopilot({
   // timestamp, and refusing to fire is the safe direction. A human's idle tab
   // holding such a flag will silently stop every pilot on that provider until
   // that tab's session ends or errors - known, not an oversight.
+  //
+  // The durable cooldown store (src/provider-cooldowns.js), when given, adds
+  // every provider it still holds as capped, so a hit outlives the session
+  // that saw it and a cockpit restart. Unlike a row, its unknown-reset entries
+  // expire 6 h after they were last seen rather than blocking indefinitely.
   function rateLimitedProviders() {
     const blocked = new Set();
     const at = now();
@@ -192,6 +198,7 @@ export function createAutopilot({
       if (hit.resetsAt != null && hit.resetsAt <= at) continue;
       blocked.add(summary.provider);
     }
+    for (const provider of cooldowns?.activeProviders(at) ?? []) blocked.add(provider);
     return blocked;
   }
 

@@ -105,7 +105,7 @@ const availableProviders = {
 async function harness({
   nowMs = 1_000_000, providers = availableProviders, spawnImpl,
   providerProbeTimeoutMs, platform, spawnSyncImpl, killImpl,
-  setTimeoutImpl, clearTimeoutImpl, stopTickDeadlineMs,
+  setTimeoutImpl, clearTimeoutImpl, stopTickDeadlineMs, cooldowns,
 } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'cockpit-autopilot-'));
   let clock = nowMs;
@@ -128,6 +128,7 @@ async function harness({
     ...(setTimeoutImpl !== undefined ? { setTimeoutImpl } : {}),
     ...(clearTimeoutImpl !== undefined ? { clearTimeoutImpl } : {}),
     ...(stopTickDeadlineMs !== undefined ? { stopTickDeadlineMs } : {}),
+    ...(cooldowns !== undefined ? { cooldowns } : {}),
   });
   return {
     dir, store, log, registry, tracker, supervisor,
@@ -2094,6 +2095,54 @@ test("Task 8 I5: runNow on a NEVER-STARTED supervisor refuses rather than spawni
     assert.equal(result.fired, false);
     assert.match(result.reason, /not running/i);
     assert.equal(h.registry.created.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// --- Durable provider-cooldown store (src/provider-cooldowns.js) ----------
+
+test('cooldown store blocks a due pilot on that provider even when no row is rate-limited', async () => {
+  const h = await harness({ cooldowns: { activeProviders: () => new Set(['claude']) } });
+  try {
+    await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    assert.equal(h.registry.created.length, 0);
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
+    assert.equal(skips.length, 1);
+    assert.equal(skips[0].reason, 'claude is rate limited');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('cooldown store for another provider does not block', async () => {
+  const h = await harness({ cooldowns: { activeProviders: () => new Set(['grok']) } });
+  try {
+    await h.store.createPilot(pilotInput());
+    await h.supervisor.tick();
+    assert.deepEqual(h.registry.created.map((c) => c.provider), ['claude']);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('no cooldowns dependency keeps row-based back-off unchanged', async () => {
+  const h = await harness();
+  try {
+    await h.store.createPilot(pilotInput({ name: 'ClaudePilot', provider: 'claude' }));
+    await h.store.createPilot(pilotInput({ name: 'GrokPilot', provider: 'grok', effort: 'low' }));
+    h.registry.rows.set('other', {
+      id: 'other', provider: 'claude',
+      rateLimitHit: { resetsAt: h.now() + 60 * MIN, rateLimitType: 'five_hour' },
+    });
+
+    await h.supervisor.tick();
+    await h.supervisor.tick();
+
+    assert.deepEqual(h.registry.created.map((c) => c.provider), ['grok']);
+    const skips = (await h.log.tail({})).filter((e) => e.event === 'skipped');
+    assert.deepEqual(skips.filter((e) => e.pilotName === 'ClaudePilot').map((e) => e.reason), ['claude is rate limited']);
   } finally {
     await h.cleanup();
   }

@@ -29,6 +29,7 @@ import { createAutopilotStore } from './autopilot-store.js';
 import { createAutopilotLog } from './autopilot-log.js';
 import { createAutopilot } from './autopilot.js';
 import { wireAutopilot } from './autopilot-wiring.js';
+import { createProviderCooldowns } from './provider-cooldowns.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
@@ -43,7 +44,14 @@ const shutdown = createShutdown({ registry, tracker });
 
 const autopilotStore = createAutopilotStore();
 const autopilotLog = createAutopilotLog();
-const autopilot = createAutopilot({ registry, store: autopilotStore, log: autopilotLog, tracker });
+// One store per process; wireAutopilot owns load(). Writes queued before it
+// runs wait for it (provider-cooldowns.js's enqueue).
+const cooldowns = createProviderCooldowns();
+registry.addRateLimitListener(({ provider, rateLimitHit }) => {
+  (rateLimitHit ? cooldowns.record(provider, rateLimitHit) : cooldowns.clear(provider))
+    .catch((err) => console.error('provider cooldown write failed:', err));
+});
+const autopilot = createAutopilot({ registry, store: autopilotStore, log: autopilotLog, tracker, cooldowns });
 const isPilotOwned = (sessionId) => autopilot.status().some((run) => run.sessionId === sessionId);
 
 const router = createRouter();
@@ -211,7 +219,7 @@ wss.on('connection', (ws, req, id, since) => {
   });
 });
 
-export { server, PORT, HOST, seedSessionDefaults, shutdown, tracker, autopilot };
+export { server, PORT, HOST, seedSessionDefaults, shutdown, tracker, autopilot, cooldowns };
 
 // Only auto-listen when run directly (`node src/server.js`), not when
 // imported by tests - lets tests bind an ephemeral port and drive the same
@@ -323,7 +331,7 @@ if (isMain) {
     // rather than at module load, so importing this file never starts a real
     // heartbeat or touches ~/.prompt-cockpit on its own (a 15-second interval
     // would also keep a test runner's event loop alive).
-    wireAutopilot({ shutdown, autopilot, tracker });
+    wireAutopilot({ shutdown, autopilot, tracker, cooldowns });
 
     const op = getOperatorToken();
     const url = `http://${HOST}:${PORT}/?op=${op}`;

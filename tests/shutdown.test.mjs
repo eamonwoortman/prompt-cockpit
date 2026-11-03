@@ -224,3 +224,78 @@ test('wireAutopilot: start() still runs after the orphan reap rejects, and the e
   assert.deepEqual(autopilot.calls, ['start'], 'a rejected reap must not skip start()');
   assert.match(logged.join('\n'), /reap failed/);
 });
+
+test('wireAutopilot: start waits for cooldowns.load', async () => {
+  const shutdown = fakeShutdownHooks();
+  const autopilot = fakeAutopilotLifecycle();
+  let resolveReap;
+  let resolveLoad;
+  const tracker = { reapOrphans: () => new Promise((resolve) => { resolveReap = resolve; }) };
+  const cooldowns = { load: () => new Promise((resolve) => { resolveLoad = resolve; }), flush: async () => {} };
+
+  const pending = wireAutopilot({ shutdown, autopilot, tracker, cooldowns });
+  resolveReap();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(autopilot.calls, [], 'start() must not run before cooldowns.load settles');
+  resolveLoad();
+  await pending;
+  assert.deepEqual(autopilot.calls, ['start']);
+
+  const shutdown2 = fakeShutdownHooks();
+  const autopilot2 = fakeAutopilotLifecycle();
+  let resolveReap2;
+  const tracker2 = { reapOrphans: () => new Promise((resolve) => { resolveReap2 = resolve; }) };
+  const cooldowns2 = { load: async () => {}, flush: async () => {} };
+  const pending2 = wireAutopilot({ shutdown: shutdown2, autopilot: autopilot2, tracker: tracker2, cooldowns: cooldowns2 });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(autopilot2.calls, [], 'start() must not run before the reap settles either');
+  resolveReap2();
+  await pending2;
+  assert.deepEqual(autopilot2.calls, ['start']);
+
+  const logged = [];
+  const autopilot3 = fakeAutopilotLifecycle();
+  await wireAutopilot({
+    shutdown: fakeShutdownHooks(),
+    autopilot: autopilot3,
+    tracker: { reapOrphans: async () => { throw new Error('reap failed'); } },
+    cooldowns: { load: async () => { throw new Error('cooldown load failed'); }, flush: async () => {} },
+    logImpl: (m) => logged.push(String(m)),
+  });
+  assert.deepEqual(autopilot3.calls, ['start'], 'a rejected load must not skip start()');
+  assert.match(logged.join('\n'), /cooldown load failed/);
+  assert.match(logged.join('\n'), /reap failed/);
+});
+
+test('wireAutopilot: the after-close hook flushes cooldowns', async () => {
+  const shutdown = fakeShutdownHooks();
+  const calls = [];
+  let resolveDrain;
+  let resolveFlush;
+  const autopilot = {
+    stop: () => {},
+    start: () => {},
+    drain: () => { calls.push('drain:start'); return new Promise((resolve) => { resolveDrain = () => { calls.push('drain:end'); resolve(); }; }); },
+  };
+  const cooldowns = {
+    load: async () => {},
+    flush: () => { calls.push('flush:start'); return new Promise((resolve) => { resolveFlush = () => { calls.push('flush:end'); resolve(); }; }); },
+  };
+  await wireAutopilot({ shutdown, autopilot, tracker: { reapOrphans: async () => {} }, cooldowns });
+
+  assert.equal(shutdown.after.length, 2, 'drain and flush are separate after-close hooks');
+  // Mirrors shutdown.js's perform(): every after-close hook awaited, in order.
+  const run = (async () => { for (const fn of shutdown.after) await fn(); })();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(calls, ['drain:start'], 'flush must not start before drain settles');
+  resolveDrain();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(calls, ['drain:start', 'drain:end', 'flush:start']);
+  let finished = false;
+  run.then(() => { finished = true; });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(finished, false, 'the hook chain must await flush()');
+  resolveFlush();
+  await run;
+  assert.deepEqual(calls, ['drain:start', 'drain:end', 'flush:start', 'flush:end']);
+});
