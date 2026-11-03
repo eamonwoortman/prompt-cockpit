@@ -118,12 +118,36 @@ From `sdk.d.ts`: `PreCompactHookInput = BaseHookInput & { hook_event_name: 'PreC
 
 **Question.** Which result field carries subagent spend, and is it cumulative across turns, so the usage ledger can read one field?
 
-**Probe.** `tests/superagent-subagent-usage-probe.manual.mjs` (written, syntax-checked, **NOT RUN**): two `query()` configs in the repo cwd, (A) defaults and (B) `forwardSubagentText: true`, two turns each spawning an Agent subagent, `claude-sonnet-5-5`, `maxTurns: 12`, 180 s deadline per turn.
+**Probe.** `tests/superagent-subagent-usage-probe.manual.mjs`: two `query()` configs in the repo cwd, (A) defaults and (B) `forwardSubagentText: true`, two streaming-input turns each ("Use the Agent tool to spawn one general-purpose subagent that counts the .js files in src/ ... " then `tests/`), `claude-sonnet-5-5`, `maxTurns: 12`, 180 s deadline per turn. Run once, no errors, no deadline hit. Observed cost: **$0.805** (A final `total_cost_usd` 0.489 plus B 0.316; the first run was authorised past the $0.50 stop rule by the user).
 
-**Why not run.** The brief's stop rule: the S2 probe, with no subagent and a temp-dir cwd, cost $0.311 (about 10x its header estimate), and the first turn of any `query()` pays about $0.2 for the preset and tool context. This probe makes four turns that each also spawn a subagent in a repo with a large CLAUDE.md, so I expect $0.7-1.0, over the $0.50 per-probe limit and over what is left of the ~$1 budget. That is an estimate, not a measurement.
+**Observed (verbatim excerpts).**
 
-**Observed.** Nothing from a run. Only the SDK's own doc comments, which are claims, not observations: `result.usage` is "MAIN AGENT LOOP ONLY — excludes Task subagent, sidechain, and auxiliary model calls, and is per-turn" (`sdk.d.ts:4495`); `result.modelUsage` covers "main loop, Task subagents, sidechains, and internal calls such as compaction" and is "cumulative across turns in streaming-input sessions" (`sdk.d.ts:4499`); `total_cost_usd` is cumulative likewise (`sdk.d.ts:4491`); `forwardSubagentText` forwards subagent text blocks, while by default only `tool_use`/`tool_result` blocks are emitted (`sdk.d.ts:1657`).
+`result.usage` vs `result.modelUsage` after the same turn. `usage` is the main loop only; `modelUsage` is larger:
+```
+[A1] result.usage={"input_tokens":4,"cache_creation_input_tokens":45884,"cache_read_input_tokens":45160,"output_tokens":534, ...
+[A1] result.modelUsage={"claude-sonnet-5-5":{"inputTokens":8,"outputTokens":1185,"cacheReadInputTokens":75000,"cacheCreationInputTokens":83639,... "costUSD":0.35394524999999993, ...
+```
+The same gap in turn 2 of config B (usage `cache_read_input_tokens` 92098 vs a `modelUsage` delta of 139727):
+```
+[B2] result.usage={"input_tokens":6,"cache_creation_input_tokens":645,"cache_read_input_tokens":92098,"output_tokens":405, ...
+[B2] modelUsage delta vs previous result={"claude-sonnet-5-5":{"inputTokens":10,"outputTokens":800,"cacheReadInputTokens":139727,"cacheCreationInputTokens":21373,... "costUSD":0.13409684999999996, ...
+```
+Cumulative across turns (`modelUsage` grows, `total_cost_usd` is the running total; the A turn-2 `costUSD` delta 0.13511565 equals 0.48906090 - 0.35394525):
+```
+[A2] result.modelUsage={"claude-sonnet-5-5":{"inputTokens":18,"outputTokens":2045,"cacheReadInputTokens":214623,"cacheCreationInputTokens":105052, ... "costUSD":0.48906089999999997, ...
+[A2] total_cost_usd=0.48906089999999997
+[A2] modelUsage delta vs previous result={"claude-sonnet-5-5":{"inputTokens":10,"outputTokens":860,"cacheReadInputTokens":139623,"cacheCreationInputTokens":21413, ... "costUSD":0.13511565000000003, ...
+```
+Per-message usage on subagent messages. Both configs emitted `parent_tool_use_id` messages carrying `message.usage` (A: 1 and 2 assistant messages in turns 1 and 2; B: 3 and 4), for example:
+```
+[A1] type=assistant subtype= parent_tool_use_id=toolu_011phLeaLwMa3pGVtdbUuZZH message.usage={"input_tokens":2,"cache_creation_input_tokens":29840, ... "output_tokens":16, ...
+```
+The probe's own per-message sums are unreliable: top-level assistant messages with identical `message.usage` are logged twice (two lines with `cache_creation_input_tokens":45160`, A1), so the sums double-count and the top-level sum for A1 (`cache_creation_input_tokens` 91044) exceeds `result.usage` (45884).
 
-**Conclusion.** **Inconclusive**: no evidence from a run. Missing evidence: for each config, `result.usage` vs `result.modelUsage` after a subagent turn, the turn-2 `modelUsage` delta, and per-message usage on `parent_tool_use_id` messages under (A) vs (B). Working hypothesis to confirm, **speculative until run**: the ledger reads `result.modelUsage` as the per-model delta from the previous result of the same session.
+**Conclusion.**
+- `result.usage` excludes subagent spend: **observed** in all four results (it is smaller than `modelUsage` for every turn, matching `sdk.d.ts:4495`). Its `iterations` array also shows only the last call of the turn, so it is not a turn total either.
+- `result.modelUsage` is cumulative across turns and its per-model delta gives per-turn spend: **observed** (A: `outputTokens` 1185 to 2045, delta 860; `costUSD` delta equals the `total_cost_usd` difference). Whether it fully includes subagent spend is **not proven** by this log (no independent ground truth); it is consistent with the SDK doc comment (`sdk.d.ts:4499`) and strictly larger than `usage`, which is what subagent spend would produce.
+- Per-message usage on `parent_tool_use_id` messages: present under both A and B, B emitting more of them (forwarded subagent text). **Completeness under A vs B is inconclusive**: the sums double-count duplicate messages and have no clean comparison to `modelUsage`. Do not use per-message usage for the ledger.
+- Ledger field: **`result.modelUsage`**, recorded as the per-model delta (`costUSD`, token fields) from the previous result of the same session; `total_cost_usd` is a usable cross-check. Note that `contextWindow` and `maxOutputTokens` are 0 in the delta, so subtract only the numeric spend fields. Resumed sessions and `/clear` reset the running total per the SDK comment (not tested).
 
-**Impact on design.** Do not hard-code the ledger field yet. Run this probe (at the user's approval of roughly $1, or cut to config A with one turn) before the usage ledger task depends on it.
+**Impact on design.** The usage ledger reads `result.modelUsage` as a per-session, per-model delta, never `result.usage` and never per-message sums. Plan 2 should keep the previous `modelUsage` per session row and treat a decrease as a reset.

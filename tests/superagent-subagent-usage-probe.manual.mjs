@@ -2,9 +2,8 @@
 // Compares default options (A) with forwardSubagentText: true (B) in the repo cwd.
 //
 // NOT run by npm test. Run by hand: `node tests/superagent-subagent-usage-probe.manual.mjs`
-// Limits: 2 configs x 2 turns x maxTurns 12 x 180 s deadline per turn. Estimated cost: under $0.50 by the brief,
-// but Task 1/2 probes ran 10x over their header estimates (a single read turn in a temp dir cost $0.205), so
-// expect roughly $0.7-1.0. NOT YET RUN: see S3 in docs/superpowers/spikes/2026-11-03-superagent-spikes.md.
+// Limits: 2 configs x 2 turns x maxTurns 12 x 180 s deadline per turn. Measured cost: $0.805 (config A $0.489, config B $0.316);
+// the brief's under-$0.50 estimate was about 1.6x low.
 import { fileURLToPath } from 'node:url';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
