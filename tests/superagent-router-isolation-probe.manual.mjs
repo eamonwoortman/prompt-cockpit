@@ -4,8 +4,8 @@
 // same hostile fixture dir; the control must show a leak or the isolated run proves nothing.
 //
 // NOT run by npm test. Run by hand: `node tests/superagent-router-isolation-probe.manual.mjs`
-// Limits: 2 queries x maxTurns 1 x 60 s deadline each. Estimated cost: under a cent (Haiku 5.5);
-// the positive control loads the full claude_code prompt/tools so it may be somewhat more.
+// Limits: 2 queries x maxTurns 1 x 60 s deadline each. Measured cost: about $0.33, essentially all of it the
+// positive control (about 50k input tokens through the full claude_code preset); the isolated run failed auth at $0.
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

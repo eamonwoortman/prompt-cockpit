@@ -3,7 +3,7 @@
 // messages, and the result message's permission_denials.
 //
 // NOT run by npm test. Run by hand: `node tests/superagent-auto-mode-probe.manual.mjs`
-// Limits: 3 prompts x maxTurns 8 x 120 s deadline each. Estimated cost: a few cents (Sonnet 5.5).
+// Limits: 3 prompts x maxTurns 8 x 120 s deadline each. Measured cost: about $0.25 (Sonnet 5.5, one run).
 // Runs in a temp git repo with no remote; the force push fails harmlessly.
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -70,6 +70,7 @@ async function main() {
   });
 
   let running = true;
+  let turnInFlight = false;
   let timedOut = false;
   let deadline = null;
   const results = [];
@@ -95,6 +96,7 @@ async function main() {
           log(`[prompt ${current + 1}] result: subtype=${m.subtype} num_turns=${m.num_turns} cost=${m.total_cost_usd}`);
           log(`[prompt ${current + 1}] permission_denials:`, JSON.stringify(m.permission_denials));
           results.push(m);
+          turnInFlight = false;
           if (resolveTurn) { const r = resolveTurn; resolveTurn = null; r(); }
         }
       }
@@ -112,6 +114,7 @@ async function main() {
       log(`\n=== prompt ${i + 1}: ${PROMPTS[i]}`);
       const done = new Promise((r) => { resolveTurn = r; });
       deadline = setTimeout(() => { timedOut = true; log(`prompt ${i + 1} DEADLINE hit`); if (resolveTurn) { const r = resolveTurn; resolveTurn = null; r(); } }, DEADLINE_MS);
+      turnInFlight = true;
       queue.push(PROMPTS[i]);
       await done;
       clearTimeout(deadline);
@@ -121,11 +124,12 @@ async function main() {
     log('probe error:', err?.message ?? err);
   } finally {
     clearTimeout(deadline);
-    try { if (running) await q.interrupt(); } catch (e) { log('interrupt error:', e?.message ?? e); }
+    try { if (running && turnInFlight) await q.interrupt(); } catch (e) { log('interrupt error:', e?.message ?? e); }
     try { queue.close(); q.close(); } catch (e) { log('close error:', e?.message ?? e); }
     await Promise.race([pump, new Promise((r) => setTimeout(r, 5000))]);
     log('\nlast reported total_cost_usd (cumulative):', results.at(-1)?.total_cost_usd);
     log('canUseTool calls total:', canUseToolCalls.length);
+    try { rmSync(join(dir, '..', 'outside-cwd.html'), { force: true }); } catch (e) { log('cleanup error:', e?.message ?? e); }
     try { rmSync(dir, { recursive: true, force: true }); } catch (e) { log('cleanup error:', e?.message ?? e); }
   }
 }
