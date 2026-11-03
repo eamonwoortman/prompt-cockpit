@@ -172,6 +172,8 @@ function createInputQueue() {
   };
 }
 
+export const SDK_PASSTHROUGH_KEYS = ['additionalDirectories', 'maxTurns', 'allowedTools', 'disallowedTools', 'tools', 'settingSources', 'strictMcpConfig'];
+
 /**
  * Start a session. Returns a handle with `pushInput(text)`, `close()`,
  * `interrupt()`, `setMode(mode)`, `resolveApproval(requestId, decision)`,
@@ -183,7 +185,7 @@ function createInputQueue() {
  * CLI doesn't resolve itself - not just ExitPlanMode), `onQueueChange` with
  * the current queue snapshot whenever it changes.
  */
-export function startSession({ cwd, resume, model, effort, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query }) {
+export function startSession({ cwd, resume, model, effort, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, sdkOptions, queryImpl = query }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const resultEpoch = createResultEpochTracker();
@@ -232,6 +234,11 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
   // result as the real turn's and flipping to 'idle' mid-turn.
   let sentinelResolved = false;
 
+  const passthrough = {};
+  for (const key of SDK_PASSTHROUGH_KEYS) {
+    if (sdkOptions?.[key] !== undefined) passthrough[key] = sdkOptions[key];
+  }
+
   const handle = queryImpl({
     prompt: inputQueue,
     options: {
@@ -245,7 +252,9 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
       // Undefined (not sent) leaves the SDK/model default in place.
       effort: effort || undefined,
       permissionMode: currentMode,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: ASK_SYSTEM_PROMPT_APPEND },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: sdkOptions?.appendSystemPrompt ? `${ASK_SYSTEM_PROMPT_APPEND}
+
+${sdkOptions.appendSystemPrompt}` : ASK_SYSTEM_PROMPT_APPEND },
       enableFileCheckpointing: true,
       // 'bypassPermissions' rejects at setPermissionMode() time without
       // this - confirmed live: cycling into it otherwise throws "Cannot
@@ -346,6 +355,7 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
           },
         ],
       },
+      ...passthrough,
     },
   });
 

@@ -164,7 +164,7 @@ export const setSessionHandshake = delegation.setSessionHandshake;
 export const isSessionTrusted = delegation.isSessionTrusted;
 export const delegateTask = delegation.delegateTask;
 
-export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, startSessionImpl }) {
+export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, sdkOptions, startSessionImpl }) {
   // Authoritative uniqueness check for delegation names - this function has no `await`
   // before it and none until sessions.set() further down, so this closes
   // the TOCTOU window server.js's own pre-check has on its own (that check
@@ -349,6 +349,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     model,
     effort: row.effort,
     permissionMode: row.mode,
+    sdkOptions,
     // Live turnIndex (session.js's turnCounter) must continue where the
     // resumed transcript's real user turns leave off, not restart at 0 -
     // otherwise rewind.js's resolveTurnUuid (which indexes into the whole

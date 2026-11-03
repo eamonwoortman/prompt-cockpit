@@ -648,3 +648,28 @@ test('an elicitation_complete system message clears the matching pending auth an
   assert.deepEqual(session.getMcpAuthPending(), []);
   assert.deepEqual(mcpAuthResolved, ['github']);
 });
+
+const BASELINE_OPTION_KEYS = ['allowDangerouslySkipPermissions', 'canUseTool', 'cwd', 'effort', 'enableFileCheckpointing', 'hooks', 'model', 'onElicitation', 'permissionMode', 'resume', 'systemPrompt'];
+
+test('sdkOptions passes whitelisted keys through to query options', () => {
+  const { getOptions } = startFakeSession({
+    sdkOptions: { additionalDirectories: ['/x', '/y'], maxTurns: 40, disallowedTools: ['Write'], settingSources: ['project'], strictMcpConfig: true, bogus: 1 },
+  });
+  assert.deepEqual(getOptions().additionalDirectories, ['/x', '/y']);
+  assert.equal(getOptions().maxTurns, 40);
+  assert.deepEqual(getOptions().disallowedTools, ['Write']);
+  assert.deepEqual(getOptions().settingSources, ['project']);
+  assert.equal(getOptions().strictMcpConfig, true);
+  assert.equal('bogus' in getOptions(), false);
+});
+
+test('sdkOptions.appendSystemPrompt is appended after the cockpit append', () => {
+  const { getOptions } = startFakeSession({ sdkOptions: { appendSystemPrompt: 'ROLE: planner' } });
+  assert.ok(getOptions().systemPrompt.append.endsWith('\n\nROLE: planner'));
+  assert.equal(getOptions().systemPrompt.preset, 'claude_code');
+});
+
+test('no sdkOptions leaves the query option keys exactly as before', () => {
+  const { getOptions } = startFakeSession();
+  assert.deepEqual(Object.keys(getOptions()).sort(), BASELINE_OPTION_KEYS);
+});

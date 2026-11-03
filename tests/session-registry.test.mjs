@@ -1461,3 +1461,12 @@ test('a throwing rate-limit listener does not break message handling', () => {
     assert.ok(ws.sent.length > 0, 'summary and message broadcasts still happen');
   } finally { registry._reset(); }
 });
+
+test('createSession forwards sdkOptions to the provider start function', () => {
+  registry._reset();
+  try {
+    const impl = fakeStartSession();
+    registry.createSession({ cwd: '/tmp', startSessionImpl: impl, sdkOptions: { maxTurns: 5 } });
+    assert.deepEqual(impl.lastOpts.sdkOptions, { maxTurns: 5 });
+  } finally { registry._reset(); }
+});
