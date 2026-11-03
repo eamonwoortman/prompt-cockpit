@@ -111,3 +111,13 @@ test('createUsageAccumulator buckets cost per tool, split evenly across a turn\'
     assert.ok(snap.perTool[i - 1].costUsd >= snap.perTool[i].costUsd);
   }
 });
+
+test('5.5 models are priced, including cache tokens', () => {
+  const M = 1_000_000;
+  const usage = { input_tokens: M, output_tokens: M, cache_read_input_tokens: M,
+    cache_creation: { ephemeral_5m_input_tokens: M, ephemeral_1h_input_tokens: M } };
+  const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} vs ${b}`);
+  close(costForUsage('claude-opus-5-5', usage).cost, 4 + 20 + 0.20 + 5 + 8);
+  close(costForUsage('claude-sonnet-5-5', usage).cost, 2 + 10 + 0.10 + 2.5 + 4);
+  close(costForUsage('claude-haiku-5-5', usage).cost, 0.10 + 0.50 + 0.01 + 0.125 + 0.20);
+});
