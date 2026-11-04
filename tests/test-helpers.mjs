@@ -158,12 +158,13 @@ export function fakeStartSession({ rejectModes = new Set(), usageExperimental, m
   };
   impl.emitState = (state) => callbacks.onStateChange(state);
   impl.emitError = (err) => callbacks.onError(err);
-  // Mirrors session.js's canUseTool routing for ExitPlanMode: registers a
-  // pending resolver and fires onApprovalRequest, same as the real thing.
-  impl.emitApprovalRequest = (input) => {
+  // Mirrors session.js's canUseTool routing (ExitPlanMode by default):
+  // registers a pending resolver and fires onApprovalRequest, same as the
+  // real thing.
+  impl.emitApprovalRequest = (input, toolName = 'ExitPlanMode') => {
     const requestId = `req-${resolvers.size}`;
     const decision = new Promise((resolve) => resolvers.set(requestId, resolve));
-    callbacks.onApprovalRequest({ requestId, toolName: 'ExitPlanMode', input, title: 'Exit plan mode?' });
+    callbacks.onApprovalRequest({ requestId, toolName, input, title: 'Exit plan mode?' });
     return decision;
   };
   // Mirrors session.js's onElicitation/elicitation_complete handling

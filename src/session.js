@@ -174,6 +174,15 @@ function createInputQueue() {
 
 export const SDK_PASSTHROUGH_KEYS = ['additionalDirectories', 'maxTurns', 'allowedTools', 'disallowedTools', 'tools', 'settingSources', 'strictMcpConfig'];
 
+function mergeHooks(base, extra) {
+  if (!extra) return base;
+  const merged = { ...base };
+  for (const [event, matchers] of Object.entries(extra)) {
+    merged[event] = [...(base[event] || []), ...matchers];
+  }
+  return merged;
+}
+
 /**
  * Start a session. Returns a handle with `pushInput(text)`, `close()`,
  * `interrupt()`, `setMode(mode)`, `resolveApproval(requestId, decision)`,
@@ -184,6 +193,11 @@ export const SDK_PASSTHROUGH_KEYS = ['additionalDirectories', 'maxTurns', 'allow
  * needs a one-off client-side decision (default/plan mode, any tool the
  * CLI doesn't resolve itself - not just ExitPlanMode), `onQueueChange` with
  * the current queue snapshot whenever it changes.
+ * `sdkOptions.hooks` appends extra hook matchers per event after cockpit's
+ * own (the git commit guard stays first); only the superagent runner passes it.
+ * `sdkOptions.interceptEveryPermission` skips the auto-allow shortcut in
+ * canUseTool so every call reaches onApprovalRequest; only the superagent
+ * runner passes it.
  */
 export function startSession({ cwd, resume, model, effort, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, sdkOptions, queryImpl = query }) {
   const inputQueue = createInputQueue();
@@ -239,6 +253,42 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
     if (sdkOptions?.[key] !== undefined) passthrough[key] = sdkOptions[key];
   }
 
+  // Deliberately a PreToolUse hook, not another canUseTool check: the
+  // SDK skips canUseTool entirely in acceptEdits/bypassPermissions/
+  // dontAsk/auto modes (see AUTO_ALLOW_MODES in canUseTool below), so a
+  // guard living there would silently stop applying the moment someone
+  // cycles modes. Hooks run on every tool call regardless of permission
+  // mode - the actual auto-deny surface for this. Reads gitCommitGuard fresh from
+  // settings.local.json on every Bash call (cheap - it's a small JSON
+  // file) rather than once at session start, so a mode change in the
+  // settings panel takes effect on this session's very next Bash call
+  // instead of requiring a restart (unlike plugin-settings.js's
+  // enabledPlugins, which the SDK only reads at session start).
+  const cockpitHooks = {
+    PreToolUse: [
+      {
+        matcher: 'Bash',
+        hooks: [
+          async (hookInput) => {
+            const mode = await readGitGuardMode(cwd).catch(() => 'all');
+            const command = hookInput.tool_input?.command;
+            if (!commandTripsGuard(command, mode)) return { continue: true };
+            return {
+              continue: true,
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'deny',
+                permissionDecisionReason: mode === 'all'
+                  ? 'Blocked by this project\'s git commit guard: this command contains a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.'
+                  : 'Blocked by this project\'s git commit guard: this commit/PR includes a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.',
+              },
+            };
+          },
+        ],
+      },
+    ],
+  };
+
   const handle = queryImpl({
     prompt: inputQueue,
     options: {
@@ -289,7 +339,7 @@ ${sdkOptions.appendSystemPrompt}` : ASK_SYSTEM_PROMPT_APPEND },
         // anything for the human to answer, so calls either parked forever
         // (no click ever came) or resolved to an empty answer (a click on
         // the old generic allow/deny banner, which set no updatedInput).
-        if (toolName !== 'AskUserQuestion' && (AUTO_ALLOW_MODES.has(currentMode) || alwaysAllowTools.has(toolName))) {
+        if (!sdkOptions?.interceptEveryPermission && toolName !== 'AskUserQuestion' && (AUTO_ALLOW_MODES.has(currentMode) || alwaysAllowTools.has(toolName))) {
           return { behavior: 'allow', updatedInput: input };
         }
         return new Promise((resolve) => {
@@ -320,41 +370,7 @@ ${sdkOptions.appendSystemPrompt}` : ASK_SYSTEM_PROMPT_APPEND },
         onMcpAuthRequest?.({ serverName: request.serverName, url: request.url, message: request.message });
         return { action: 'accept' };
       },
-      // Deliberately a PreToolUse hook, not another canUseTool check: the
-      // SDK skips canUseTool entirely in acceptEdits/bypassPermissions/
-      // dontAsk/auto modes (see AUTO_ALLOW_MODES above), so a guard living
-      // there would silently stop applying the moment someone cycles modes.
-      // Hooks run on every tool call regardless of permission mode - the
-      // actual auto-deny surface for this. Reads gitCommitGuard fresh from
-      // settings.local.json on every Bash call (cheap - it's a small JSON
-      // file) rather than once at session start, so a mode change in the
-      // settings panel takes effect on this session's very next Bash call
-      // instead of requiring a restart (unlike plugin-settings.js's
-      // enabledPlugins, which the SDK only reads at session start).
-      hooks: {
-        PreToolUse: [
-          {
-            matcher: 'Bash',
-            hooks: [
-              async (hookInput) => {
-                const mode = await readGitGuardMode(cwd).catch(() => 'all');
-                const command = hookInput.tool_input?.command;
-                if (!commandTripsGuard(command, mode)) return { continue: true };
-                return {
-                  continue: true,
-                  hookSpecificOutput: {
-                    hookEventName: 'PreToolUse',
-                    permissionDecision: 'deny',
-                    permissionDecisionReason: mode === 'all'
-                      ? 'Blocked by this project\'s git commit guard: this command contains a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.'
-                      : 'Blocked by this project\'s git commit guard: this commit/PR includes a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.',
-                  },
-                };
-              },
-            ],
-          },
-        ],
-      },
+      hooks: mergeHooks(cockpitHooks, sdkOptions?.hooks),
       ...passthrough,
     },
   });

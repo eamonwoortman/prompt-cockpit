@@ -1470,3 +1470,14 @@ test('createSession forwards sdkOptions to the provider start function', () => {
     assert.deepEqual(impl.lastOpts.sdkOptions, { maxTurns: 5 });
   } finally { registry._reset(); }
 });
+
+test('createSession leaves no row behind when the start function throws', () => {
+  registry._reset();
+  try {
+    const removed = [];
+    registry.addSessionRemovedListener((e) => removed.push(e));
+    assert.throws(() => registry.createSession({ cwd: '/tmp', startSessionImpl: () => { throw new Error('spawn failed'); } }), /spawn failed/);
+    assert.equal(registry.list().length, 0);
+    assert.deepEqual(removed, []);
+  } finally { registry._reset(); }
+});

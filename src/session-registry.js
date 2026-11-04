@@ -343,37 +343,43 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
   for (const message of tail) appendEvent(row.eventLog, message);
   sessions.set(id, row);
 
-  row.handle = startSessionImpl({
-    cwd,
-    resume,
-    model,
-    effort: row.effort,
-    permissionMode: row.mode,
-    sdkOptions,
-    // Live turnIndex (session.js's turnCounter) must continue where the
-    // resumed transcript's real user turns leave off, not restart at 0 -
-    // otherwise rewind.js's resolveTurnUuid (which indexes into the whole
-    // transcript) targets the wrong message. `history` here is already the
-    // full fetched transcript (server.js), not the display-budget tail.
-    turnIndexOffset: history ? countRealUserTurns(history) : 0,
-    onMessage: (msg) => handleMessage(id, msg),
-    onStateChange: (state) => setState(id, state),
-    onError: (err) => handleError(id, err),
-    onApprovalRequest: (request) => handleApprovalRequest(id, request),
-    onQueueChange: (queue) => {
-      row.queue = queue;
-      broadcastQueue(id);
-    },
-    // MCP "needs-auth" badge - no row field to keep in sync,
-    // same as toggleMcpServer/reconnectMcpServer below: session.js's
-    // getMcpAuthPending() is the only source of truth, this just tells any
-    // open MCP panel to re-fetch it (mcp-panel.js is poll-on-open/refresh-
-    // button only otherwise - see its own module comment - so without this
-    // push a panel left open through an auth flow would sit on a stale
-    // "needs-auth" badge with no link until the user thought to hit refresh).
-    onMcpAuthRequest: () => broadcastMcpAuth(id),
-    onMcpAuthResolved: () => broadcastMcpAuth(id),
-  });
+  // A synchronous start failure must not leave a handle-less row behind.
+  try {
+    row.handle = startSessionImpl({
+      cwd,
+      resume,
+      model,
+      effort: row.effort,
+      permissionMode: row.mode,
+      sdkOptions,
+      // Live turnIndex (session.js's turnCounter) must continue where the
+      // resumed transcript's real user turns leave off, not restart at 0 -
+      // otherwise rewind.js's resolveTurnUuid (which indexes into the whole
+      // transcript) targets the wrong message. `history` here is already the
+      // full fetched transcript (server.js), not the display-budget tail.
+      turnIndexOffset: history ? countRealUserTurns(history) : 0,
+      onMessage: (msg) => handleMessage(id, msg),
+      onStateChange: (state) => setState(id, state),
+      onError: (err) => handleError(id, err),
+      onApprovalRequest: (request) => handleApprovalRequest(id, request),
+      onQueueChange: (queue) => {
+        row.queue = queue;
+        broadcastQueue(id);
+      },
+      // MCP "needs-auth" badge - no row field to keep in sync,
+      // same as toggleMcpServer/reconnectMcpServer below: session.js's
+      // getMcpAuthPending() is the only source of truth, this just tells any
+      // open MCP panel to re-fetch it (mcp-panel.js is poll-on-open/refresh-
+      // button only otherwise - see its own module comment - so without this
+      // push a panel left open through an auth flow would sit on a stale
+      // "needs-auth" badge with no link until the user thought to hit refresh).
+      onMcpAuthRequest: () => broadcastMcpAuth(id),
+      onMcpAuthResolved: () => broadcastMcpAuth(id),
+    });
+  } catch (err) {
+    sessions.delete(id);
+    throw err;
+  }
 
   return row;
 }

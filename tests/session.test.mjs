@@ -673,3 +673,32 @@ test('no sdkOptions leaves the query option keys exactly as before', () => {
   const { getOptions } = startFakeSession();
   assert.deepEqual(Object.keys(getOptions()).sort(), BASELINE_OPTION_KEYS);
 });
+
+test('sdkOptions.hooks adds events after the cockpit hooks without replacing the git guard', () => {
+  const preCompact = async () => ({ continue: true });
+  const extraBash = async () => ({ continue: true });
+  const { getOptions } = startFakeSession({ sdkOptions: { hooks: { PreCompact: [{ hooks: [preCompact] }], PreToolUse: [{ matcher: 'Bash', hooks: [extraBash] }] } } });
+  const { hooks } = getOptions();
+  assert.equal(hooks.PreCompact[0].hooks[0], preCompact);
+  assert.equal(hooks.PreToolUse.length, 2);
+  assert.equal(hooks.PreToolUse[0].matcher, 'Bash');
+  assert.notEqual(hooks.PreToolUse[0].hooks[0], extraBash, 'cockpit git guard stays first');
+  assert.equal(hooks.PreToolUse[1].hooks[0], extraBash);
+  assert.equal('interceptEveryPermission' in getOptions(), false);
+});
+
+test('sdkOptions.interceptEveryPermission routes an auto-mode tool call to onApprovalRequest', () => {
+  const approvalRequests = [];
+  const { getOptions } = startFakeSession({ permissionMode: 'auto', sdkOptions: { interceptEveryPermission: true }, onApprovalRequest: (r) => approvalRequests.push(r) });
+  getOptions().canUseTool('Bash', { command: 'curl x' }, {}); // never resolved here - do not await
+  assert.equal(approvalRequests.length, 1);
+  assert.equal(approvalRequests[0].toolName, 'Bash');
+});
+
+// Regression guard: passes before and after this task.
+test('no sdkOptions keeps the cockpit hooks and auto-allow exactly as before', async () => {
+  const { getOptions } = startFakeSession({ permissionMode: 'auto' });
+  assert.deepEqual(Object.keys(getOptions().hooks), ['PreToolUse']);
+  assert.equal(getOptions().hooks.PreToolUse.length, 1);
+  assert.deepEqual(await getOptions().canUseTool('Bash', { command: 'ls' }, {}), { behavior: 'allow', updatedInput: { command: 'ls' } });
+});
