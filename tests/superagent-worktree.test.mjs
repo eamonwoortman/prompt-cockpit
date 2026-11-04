@@ -5,7 +5,7 @@ import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { tempDir, initRepo } from './superagent-helpers.mjs';
-import { slugify, repoIds, createWorktree, inspectWorktree, archiveLedger, listOrphanWorktrees } from '../src/superagent/worktree.js';
+import { slugify, repoIds, createWorktree, inspectWorktree, archiveLedger, listOrphanWorktrees, defaultGit } from '../src/superagent/worktree.js';
 
 const norm = (p) => realpathSync.native(path.resolve(p)).toLowerCase();
 const SETTINGS = '{"permissions":{"allow":["Bash(npm test)"]}}';
@@ -137,4 +137,12 @@ test('listOrphanWorktrees lists superagent worktrees no job knows and removes no
   assert.equal(norm(orphans[0].worktree), norm(wb));
   assert.equal(norm(orphans[0].repo), norm(origin));
   for (const d of [wa, wb, wo]) await fs.access(d);
+});
+
+test('defaultGit runs git with core.fsmonitor forced off, whatever the repo config says', async () => {
+  const { origin } = await setup();
+  execFileSync('git', ['config', 'core.fsmonitor', 'true'], { cwd: origin });
+  const res = await defaultGit(['config', '--get', 'core.fsmonitor'], { cwd: origin });
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stdout.trim(), 'false');
 });

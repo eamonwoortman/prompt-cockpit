@@ -21,9 +21,12 @@ export function slugify(title, jobId, maxBase = 40) {
   return `${base || 'job'}-${String(jobId).slice(0, 8)}`;
 }
 
+// A system-level core.fsmonitor=true would start a never-exiting
+// `git fsmonitor--daemon` per job worktree. This covers superagent's own git
+// calls only; the workers' git commands are not covered.
 export function defaultGit(args, { cwd }) {
   return new Promise((resolve) => {
-    execFile('git', args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    execFile('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       let code = 0;
       if (err) code = typeof err.code === 'number' ? err.code : 1;
       resolve({ code, stdout: stdout ?? '', stderr: stderr || (err && typeof err.code !== 'number' ? err.message : '') });

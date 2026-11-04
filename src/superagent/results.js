@@ -339,13 +339,20 @@ function verifyErrors(value, attempt) {
   return errors;
 }
 
+// Findings are checked whatever the status: a blocked tester's findings are
+// stored on its attempt just the same.
 function testErrors(value, job) {
-  if (value.status !== 'failed') return [];
-  if (!Array.isArray(value.findings) || value.findings.length === 0) return ['a failed test result must list at least one finding'];
+  if (value.status === 'failed' && (!Array.isArray(value.findings) || value.findings.length === 0)) {
+    return ['a failed test result must list at least one finding'];
+  }
+  if (value.findings === undefined || value.findings === null) return [];
   return findingErrors(value.findings, { job, disposition: false });
 }
 
 function purposeErrors(value, { attempt, job }) {
+  if (attempt.purpose === 'test') return testErrors(value, job);
+  // A blocked worker publishes a question (or nothing) instead of its purpose fields.
+  if (value.status === 'blocked') return [];
   switch (attempt.purpose) {
     case 'review':
     case 'task-review':
@@ -354,8 +361,6 @@ function purposeErrors(value, { attempt, job }) {
       return fixErrors(value, attempt);
     case 'verify':
       return verifyErrors(value, attempt);
-    case 'test':
-      return testErrors(value, job);
     default:
       return [];
   }

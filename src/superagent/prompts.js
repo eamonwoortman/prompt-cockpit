@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { artifactPaths, reviewPaths, requiredOutputs } from './results.js';
+import { artifactPaths, reviewPaths, requiredOutputs, reviseOutputs as reviseSet } from './results.js';
 
 export const UNATTENDED_DENY_MESSAGE = 'You are running unattended. Put your question in `result.json` with `status: blocked`.';
 export const RECOVERY_NOTE = 'check every worktree\'s git status and log, and the ledger, before repeating work; continue from `handoff.md` if present';
@@ -9,6 +9,7 @@ export const RECOVERY_NOTE = 'check every worktree\'s git status and log, and th
 const CONTRACT_FILE = 'contract.md';
 const REVIEW_PURPOSES = new Set(['review', 'task-review']);
 const WORK_PURPOSES = new Set(['implement', 'fix']);
+const TARGET_PURPOSES = new Set(['review', 'fix', 'verify']);
 
 export function templatesDir() {
   return fileURLToPath(new URL('../../prompts/superagent/', import.meta.url));
@@ -69,8 +70,18 @@ function purposeFields(job, phase, attempt) {
   if (purpose === 'fix') previousFindings = reviewFile(round);
   else if (REVIEW_PURPOSES.has(purpose) && round > 1) previousFindings = reviewFile(round - 1);
 
+  let reviewFindings = null;
+  let reviseOutputs = null;
+  if (purpose === 'fix') {
+    reviewFindings = (attempt.reviewFindings ?? []).map((f) => (typeof f === 'string' ? { id: f } : { id: f.id, severity: f.severity, text: f.text }));
+    if (task == null) {
+      const paths = artifactPaths(job);
+      reviseOutputs = Object.fromEntries(reviseSet(job, phase).map((rel) => [Object.keys(paths).find((k) => paths[k] === rel), rel]));
+    }
+  }
+
   let taskCommits = null;
-  if (purpose === 'task-review') {
+  if (purpose === 'task-review' || (purpose === 'verify' && task != null)) {
     const seen = new Set();
     taskCommits = [];
     for (const a of done) {
@@ -92,16 +103,18 @@ function purposeFields(job, phase, attempt) {
     contested = (attempt.contested ?? []).map((id) => ({ id, text: findings.get(id)?.text ?? null, disposition: dispositions.get(id) ?? null }));
   }
 
-  const target = (purpose === 'review' || purpose === 'fix') && task == null && phase.target ? (artifactPaths(job)[phase.target] ?? null) : null;
+  const target = TARGET_PURPOSES.has(purpose) && task == null && phase.target ? (artifactPaths(job)[phase.target] ?? null) : null;
   return {
     purpose,
     round,
     final: attempt.final ?? false,
     target,
     outputs: keyedOutputs(job, phase, purpose, round, task),
+    reviseOutputs,
     task: attempt.taskDef ?? (task != null ? (job.tasks ?? []).find((t) => t.id === task) ?? null : null),
     taskCommits,
     previousFindings,
+    reviewFindings,
     contested,
   };
 }

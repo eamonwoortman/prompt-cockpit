@@ -12,7 +12,7 @@ const { reviewLoop, pickTask, taskStatus, routeTestFailure, buildFixTask } = seq
 const T0 = 1_000_000;
 const ctx = (over = {}) => ({ now: T0, liveSessions: 0, maxConcurrentSessions: 3, ...over });
 const limits = jobCreated().limits;
-const AUTHOR_EXTRAS = { purpose: 'author', round: null, final: false, taskDef: null, reviewFindings: null, contested: null, reviewTarget: null };
+const AUTHOR_EXTRAS = { purpose: 'author', round: null, final: false, taskDef: null, reviewFindings: null, contested: null };
 
 const started = (id, n, over = {}) => ({ type: 'attempt-started', attemptId: id, phase: 'spec', task: null, role: 'spec-writer', model: 'claude-opus-5-5', n, recovery: n > 1, previousAttemptId: n > 1 ? `a${n - 1}` : null, dir: '/d', ...over });
 const ended = (id, outcome, over = {}) => ({ type: 'attempt-ended', attemptId: id, outcome, ...over });
@@ -272,23 +272,23 @@ test('reviewLoop: injected failures - two failed reviewers before the first succ
 const atReview = (...specs) => m2(...upTo('spec-review'), ...specs.flatMap(attempt));
 const launchOf = (job, role, over) => ({
   type: 'launch', task: null, role, model: job.models[role].model, effort: job.models[role].effort ?? null, maxTurns: job.models[role].maxTurns,
-  n: 1, recovery: false, previousAttemptId: null, round: null, final: false, taskDef: null, reviewFindings: null, contested: null, reviewTarget: null, ...over,
+  n: 1, recovery: false, previousAttemptId: null, round: null, final: false, taskDef: null, reviewFindings: null, contested: null, ...over,
 });
 
 test('nextAction: with defaults (attemptsPerPhase 3) reviewer 1, fix 1, reviewer 2 is NOT stopped by the cap', () => {
   const job = atReview(rev(1, 'changes', [F('m1')]), fix(1, { m1: 'fixed' }), rev(2, 'changes', [F('m2')]));
   assert.equal(job.limits.attemptsPerPhase, 3);
-  assert.deepEqual(nextAction(job, ctx()), launchOf(job, 'spec-writer', { phase: 'spec-review', purpose: 'fix', round: 2, n: 4, reviewFindings: [F('m2')], reviewTarget: 'spec' }));
+  assert.deepEqual(nextAction(job, ctx()), launchOf(job, 'spec-writer', { phase: 'spec-review', purpose: 'fix', round: 2, n: 4, reviewFindings: [F('m2')] }));
 });
 
 test('nextAction: review phase launches reviewer with the reviewer role and model; fix uses the author role; verify uses verifier', () => {
   const fresh = atReview();
-  assert.deepEqual(nextAction(fresh, ctx()), launchOf(fresh, 'spec-reviewer', { phase: 'spec-review', purpose: 'review', round: 1, reviewTarget: 'spec' }));
+  assert.deepEqual(nextAction(fresh, ctx()), launchOf(fresh, 'spec-reviewer', { phase: 'spec-review', purpose: 'review', round: 1 }));
   const r1 = rev(1, 'changes', [F('b1', 'blocker')]);
   const fixing = atReview(r1);
-  assert.deepEqual(nextAction(fixing, ctx()), launchOf(fixing, 'spec-writer', { phase: 'spec-review', purpose: 'fix', round: 1, n: 2, reviewFindings: [F('b1', 'blocker')], reviewTarget: 'spec' }));
+  assert.deepEqual(nextAction(fixing, ctx()), launchOf(fixing, 'spec-writer', { phase: 'spec-review', purpose: 'fix', round: 1, n: 2, reviewFindings: [F('b1', 'blocker')] }));
   const capped = atReview(r1, fix(1, { b1: 'open' }), rev(2, 'changes', [F('b1', 'blocker')]), fix(2, { b1: 'open' }), rev(3, 'changes', [F('b1', 'blocker')]), fix(3, { b1: 'declined: no' }, true));
-  assert.deepEqual(nextAction(capped, ctx()), launchOf(capped, 'verifier', { phase: 'spec-review', purpose: 'verify', n: 7, contested: ['b1'], reviewTarget: 'spec' }));
+  assert.deepEqual(nextAction(capped, ctx()), launchOf(capped, 'verifier', { phase: 'spec-review', purpose: 'verify', n: 7, contested: ['b1'] }));
 });
 
 test('nextAction: a finished review loop returns complete-phase for the current visit; a verified blocker or a question needs you', () => {
@@ -333,7 +333,7 @@ test('nextAction: review phase guard order - loop state, failed cap, repeated er
   );
   const once = atReview({ ...fail('review', 1, 'a'), id: 'f1' });
   assert.deepEqual(nextAction(once, ctx({ now: T0 + 1 })), { type: 'wait', until: T0 + MIN, why: 'backoff' });
-  assert.deepEqual(nextAction(once, ctx({ now: T0 + MIN })), launchOf(once, 'spec-reviewer', { phase: 'spec-review', purpose: 'review', round: 1, n: 2, recovery: true, previousAttemptId: 'f1', reviewTarget: 'spec' }));
+  assert.deepEqual(nextAction(once, ctx({ now: T0 + MIN })), launchOf(once, 'spec-reviewer', { phase: 'spec-review', purpose: 'review', round: 1, n: 2, recovery: true, previousAttemptId: 'f1' }));
   assert.deepEqual(nextAction(atReview(), ctx({ liveSessions: 3 })), { type: 'wait', until: null, why: 'concurrency' });
 });
 
@@ -539,4 +539,21 @@ test('attemptContext rebuilds taskDef, contested and reviewFindings from the job
 
   const finalFix = atReview(rev(1, 'changes', [F('b1', 'blocker')]), { purpose: 'fix', round: 1, final: true, outcome: null, id: 'ff1' });
   assert.equal(contextOf(finalFix, 'ff1').final, true);
+});
+
+test('routeTestFailure and nextAction: a blocked tester with valid findings and no question is not routed', () => {
+  const blocked = atTest(...attempt({ id: 'tb', phase: 'test', purpose: 'test', outcome: 'failed', reason: 'blocked', signature: 'blocked|server down', findings: TF }));
+  assert.equal(routeTestFailure(blocked, testPhase), null);
+  const action = nextAction(blocked, ctx({ now: T0 + 60 * MIN }));
+  assert.notEqual(action.type, 'route-test-failure');
+  assert.equal(action.type, 'launch');
+  assert.equal(action.recovery, true);
+});
+
+test('buildFixTask tolerates malformed findings: a null entry or a string is ignored, never thrown on', () => {
+  const job = atTest();
+  const task = buildFixTask(job, 'abcdef1234', [null, 'npm test failed', { id: 'f1', severity: 'major', text: 'login fails' }]);
+  assert.equal(task.acceptance, 'login fails');
+  assert.deepEqual(task.repos, ['primary']);
+  assert.doesNotThrow(() => buildFixTask(job, 'abcdef1234', [null]));
 });

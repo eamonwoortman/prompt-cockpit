@@ -133,17 +133,22 @@ export function pickTask(job) {
 }
 
 // Decision 10: the last test attempt failed with findings and no task was
-// routed from it yet. Dedupe is by fromAttemptId, never by task id.
+// routed from it yet. Dedupe is by fromAttemptId, never by task id. A blocked
+// tester (reason 'blocked') ran no real test, so its findings are not routed.
 export function routeTestFailure(job, phase) {
   if (!job.pipeline.some((p) => p.phase === 'implement')) return null;
   const attempts = attemptsFor(job, phase.phase);
   const last = attempts[attempts.length - 1];
-  if (last?.outcome !== 'failed' || !Array.isArray(last.findings) || last.findings.length === 0) return null;
+  if (last?.outcome !== 'failed' || last.reason !== 'failed') return null;
+  if (!Array.isArray(last.findings) || last.findings.length === 0) return null;
   if ((job.tasks ?? []).some((t) => t.fromAttemptId === last.attemptId)) return null;
   return { attemptId: last.attemptId, findings: last.findings };
 }
 
-export function buildFixTask(job, attemptId, findings) {
+// Non-object findings are ignored, not thrown on: a throw here would repeat
+// on every tick for a bad stored event.
+export function buildFixTask(job, attemptId, rawFindings) {
+  const findings = rawFindings.filter((f) => f !== null && typeof f === 'object' && !Array.isArray(f));
   const known = new Set(job.repos.map((r) => r.id));
   const repos = [...new Set(findings.map((f) => f.repo).filter((repo) => known.has(repo)))];
   const short = attemptId.slice(0, 8);
@@ -152,14 +157,14 @@ export function buildFixTask(job, attemptId, findings) {
     title: `Fix test failures from attempt ${short}`,
     repos: repos.length > 0 ? repos : ['primary'],
     dependsOn: [],
-    acceptance: findings.map((f) => f.text).join('\n'),
+    acceptance: findings.map((f) => f.text).filter((text) => typeof text === 'string').join('\n'),
     verify: '',
     origin: 'test',
     fromAttemptId: attemptId,
   };
 }
 
-function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null, reviewTarget = null }) {
+function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null }) {
   const model = job.models[role];
   return {
     type: 'launch',
@@ -178,7 +183,6 @@ function launch(job, { phase, task = null, role, attempts, recovery, previousAtt
     taskDef,
     reviewFindings,
     contested,
-    reviewTarget,
   };
 }
 
@@ -283,7 +287,6 @@ function scopeAction(job, phase, { now, liveSessions, maxConcurrentSessions }, {
     taskDef: task ?? null,
     reviewFindings: loop.reviewFindings,
     contested: loop.contested,
-    reviewTarget: phase.target ?? null,
   });
 }
 

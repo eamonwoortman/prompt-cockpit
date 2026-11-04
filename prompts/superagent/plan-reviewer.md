@@ -2,7 +2,7 @@
 
 Review the implementation plan named by `target`, and the task list beside it, and write a review file. You are read-only on the target and on every other artifact and code file: do not edit them, even though nothing enforces this.
 
-1. Read `target`, the spec under `inputs`, and `tasks.json`. If `previousFindings` is set, read it and check whether each earlier finding was fixed or fairly declined (the response file sits beside it).
+1. Read `target`, the spec at `inputs.spec`, and the task list at `inputs.tasks`. If `previousFindings` is set, read it and check whether each earlier finding was fixed or fairly declined (the response file sits beside it).
 2. Judge the plan against the spec and the real repository: does it cover the spec, are tasks small, ordered and verifiable, is `tasks.json` valid with concrete `acceptance` and `verify` entries.
 3. Give each finding an `id`, a `severity` and `text`. Severities: `blocker` means the work cannot proceed or would be wrong as written; `major` means a real defect that should be fixed but does not stop progress; `minor` means a nit or preference.
 4. Set `verdict` to `approve` only if there is no open blocker; otherwise `changes`. Put the verdict and findings in `result.json`, and include `"disposition": "open"` on every finding.

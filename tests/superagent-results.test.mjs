@@ -735,3 +735,56 @@ test('fix: a missing disposition is still invalid', async () => {
   assert.equal(v.ok, false);
   assert.match(v.errors.join('\n'), /disposition/);
 });
+
+test('test: findings are validated whatever the status - a blocked tester with [null] and string findings are invalid-result', async () => {
+  const f = await testFixture();
+  const blockedNull = await f.check(f.failed({ status: 'blocked', question: null, findings: [null] }), f.as);
+  assert.equal(blockedNull.ok, false);
+  assert.match(blockedNull.errors.join('\n'), /findings\[0\] must be an object/);
+  const blockedStrings = await f.check(f.failed({ status: 'blocked', findings: ['npm test failed'] }), f.as);
+  assert.equal(blockedStrings.ok, false);
+  const failedStrings = await f.check(f.failed({ findings: ['npm test failed'] }), f.as);
+  assert.equal(failedStrings.ok, false);
+  assert.match(failedStrings.errors.join('\n'), /findings\[0\] must be an object/);
+  const badSeverity = await f.check(f.failed({ status: 'blocked', findings: [{ id: 'F1', severity: 'nit', text: 'x' }] }), f.as);
+  assert.equal(badSeverity.ok, false);
+});
+
+test('test: a blocked tester with valid findings and no question is accepted as failed/blocked', async () => {
+  const f = await testFixture();
+  const findings = [{ id: 'F1', severity: 'major', text: 'The dev server would not start.' }];
+  const v = await f.check(f.failed({ status: 'blocked', question: null, findings }), f.as);
+  assert.equal(v.ok, true, JSON.stringify(v.errors));
+  const outcome = outcomeForResult(v.result);
+  assert.equal(outcome.outcome, 'failed');
+  assert.equal(outcome.reason, 'blocked');
+  assert.deepEqual(outcome.findings, findings);
+  const bare = await f.check(f.failed({ status: 'blocked', question: 'Which port?' }), f.as);
+  assert.equal(bare.ok, true, JSON.stringify(bare.errors));
+  assert.equal(outcomeForResult(bare.result).outcome, 'question');
+});
+
+test('blocked: review, task-review, fix and verify workers can ask a question; without one they are failed/blocked; done still needs the purpose fields', async () => {
+  const f = await reviewFixture();
+  const verify = reviewPaths(f.job, { phase: 'spec-review' }).verify;
+  const purposes = {
+    review: { attempt: { purpose: 'review' }, output: f.paths.review },
+    'task-review': { attempt: { purpose: 'task-review' }, output: f.paths.review },
+    fix: { attempt: { purpose: 'fix', reviewFindings: [finding('F1', 'blocker', 'open')] }, output: f.paths.response },
+    verify: { attempt: { purpose: 'verify', round: null, contested: ['F1'] }, output: verify },
+  };
+  const blocked = (question) => f.result(null, null, { status: 'blocked', artifacts: [], question });
+  for (const [purpose, { attempt, output }] of Object.entries(purposes)) {
+    const asked = await f.check(blocked('Which database?'), f.as(attempt));
+    assert.equal(asked.ok, true, `${purpose}: ${JSON.stringify(asked.errors)}`);
+    assert.deepEqual([outcomeForResult(asked.result).outcome, outcomeForResult(asked.result).question], ['question', 'Which database?'], purpose);
+
+    const silent = await f.check(blocked(null), f.as(attempt));
+    assert.equal(silent.ok, true, `${purpose}: ${JSON.stringify(silent.errors)}`);
+    assert.deepEqual([outcomeForResult(silent.result).outcome, outcomeForResult(silent.result).reason], ['failed', 'blocked'], purpose);
+
+    const sha = await f.commit(output, `# ${purpose}\n`, purpose);
+    const done = await f.check(f.result(output, sha), f.as(attempt));
+    assert.equal(done.ok, false, purpose);
+  }
+});

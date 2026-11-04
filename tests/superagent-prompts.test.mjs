@@ -243,7 +243,11 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   await has('verifier.md', 'contested', 'verified', 'read-only');
   for (const f of ['planner', 'spec-reviewer', 'plan-reviewer', 'implementer', 'task-reviewer', 'tester', 'verifier', 'spec-writer']) await has(`${f}.md`, 'Do not edit files outside your listed outputs and the code your task owns');
   for (const f of ['spec-reviewer.md', 'plan-reviewer.md', 'task-reviewer.md']) await has(f, '"disposition": "open"');
-  for (const f of ['spec-writer.md', 'planner.md', 'implementer.md']) await has(f, 'copy each finding id, severity and text from the review file', 'list only findings from that file', 'A blocker may be `open` only when `final` is true');
+  for (const f of ['spec-writer.md', 'planner.md', 'implementer.md']) await has(f, 'copy id, severity and text from `reviewFindings` on your card', 'list only findings from `reviewFindings`', 'A blocker may be `open` only when `final` is true');
+  for (const f of ['spec-writer.md', 'planner.md']) await has(f, '`reviseOutputs`');
+  await has('tester.md', '`severity` (`blocker`, `major` or `minor`)');
+  await has('verifier.md', '`target`', '`taskCommits`');
+  await has('plan-reviewer.md', '`inputs.spec`', '`inputs.tasks`');
   await has('implementer.md', '{ "cmd": "...", "exit": 0 }', '`cmd` equals the task `verify` string');
   await has('verifier.md', '`evidence` must be a non-empty string');
   const contract = await read('contract.md');
@@ -252,4 +256,49 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   assert.ok(contract.includes('Purposes'));
   for (const p of ['author', 'review', 'fix', 'verify', 'implement', 'task-review', 'test']) assert.ok(contract.includes(`\`${p}\``), `contract: ${p}`);
   assert.ok(contract.includes('review, response, verify and report files are outputs'));
+  const purposeLine = (p) => contract.split(/\r?\n/).find((l) => l.startsWith(`- \`${p}\`:`));
+  for (const p of ['review', 'test']) assert.ok(purposeLine(p).includes('`severity` (`blocker`, `major` or `minor`)'), `contract ${p} line lists severities`);
+  assert.ok(purposeLine('fix').includes('`reviewFindings`'), 'contract fix line names reviewFindings');
+});
+
+const REVIEW_FINDINGS = [{ id: 'B1', severity: 'blocker', text: 'no rollback' }, { id: 'M1', severity: 'minor', text: 'nit' }];
+
+test('a fix card lists reviewFindings with the review ids, severities and texts; other cards carry null', async () => {
+  const { card } = await m2();
+  const c = await card('spec-writer', 'spec-review', { purpose: 'fix', round: 1, reviewFindings: REVIEW_FINDINGS.map((f) => ({ ...f, disposition: 'open' })) });
+  assert.deepEqual(c.reviewFindings, REVIEW_FINDINGS);
+  const t = await card('implementer', 'implement', { purpose: 'fix', round: 1, task: 'T1', taskDef: TASK_DEF, reviewFindings: REVIEW_FINDINGS });
+  assert.deepEqual(t.reviewFindings, REVIEW_FINDINGS);
+  const r = await card('spec-reviewer', 'spec-review', { purpose: 'review', round: 1 });
+  assert.equal(r.reviewFindings, null);
+});
+
+test('the plan-review card carries the spec and tasks.json as inputs; a fix card names the revise set as reviseOutputs', async () => {
+  const { job, card } = await m2();
+  const paths = artifactPaths(job);
+  const review = await card('plan-reviewer', 'plan-review', { purpose: 'review', round: 1 });
+  assert.deepEqual(review.inputs, { spec: paths.spec, tasks: paths.tasks });
+  assert.equal(review.reviseOutputs, null);
+  const planFix = await card('planner', 'plan-review', { purpose: 'fix', round: 1, reviewFindings: REVIEW_FINDINGS });
+  assert.deepEqual(planFix.reviseOutputs, { plan: paths.plan, tasks: paths.tasks });
+  const specFix = await card('spec-writer', 'spec-review', { purpose: 'fix', round: 1, reviewFindings: REVIEW_FINDINGS });
+  assert.deepEqual(specFix.reviseOutputs, { spec: paths.spec });
+  const taskFix = await card('implementer', 'implement', { purpose: 'fix', round: 1, task: 'T1', taskDef: TASK_DEF, reviewFindings: REVIEW_FINDINGS });
+  assert.equal(taskFix.reviseOutputs, null);
+});
+
+test('a phase verify card names the review target; a task verify card lists cumulative taskCommits', async () => {
+  const events = [
+    { type: 'tasks-loaded', tasks: [TASK_DEF] },
+    started('i1', 'implement', 'implement', { task: 'T1' }), ended('i1', { commits: [{ repo: 'primary', sha: 'aaaa111' }] }),
+    started('r1', 'implement', 'task-review', { task: 'T1', round: 1 }), ended('r1', { verdict: 'changes', findings: [{ id: 'B1', severity: 'blocker', text: 'bad' }] }),
+    started('x1', 'implement', 'fix', { task: 'T1', round: 1 }), ended('x1', { commits: [{ repo: 'primary', sha: 'bbbb222' }] }),
+  ];
+  const { job, card } = await m2(events);
+  const phaseVerify = await card('verifier', 'plan-review', { purpose: 'verify', contested: ['B1'] });
+  assert.equal(phaseVerify.target, artifactPaths(job).plan);
+  assert.equal(phaseVerify.taskCommits, null);
+  const taskVerify = await card('verifier', 'implement', { purpose: 'verify', task: 'T1', taskDef: TASK_DEF, contested: ['B1'] });
+  assert.deepEqual(taskVerify.taskCommits, [{ repo: 'primary', sha: 'aaaa111' }, { repo: 'primary', sha: 'bbbb222' }]);
+  assert.equal(taskVerify.target, null);
 });

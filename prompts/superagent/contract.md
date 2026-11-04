@@ -35,12 +35,14 @@ Note that review, response, verify and report files are outputs and must be comm
 If the job card has a `purpose`, it says which kind of attempt this is and which result fields it needs:
 
 - `author`: write the phase outputs; `evidence.commits`.
-- `review`: `verdict` (`approve` or `changes`) and `findings` (each with `id`, `severity`, `text` and `"disposition": "open"`).
+- `review`: `verdict` (`approve` or `changes`) and `findings` (each with `id`, `severity` (`blocker`, `major` or `minor`), `text` and `"disposition": "open"`).
 - `task-review`: the same `verdict` and `findings`, about one task's commits.
-- `fix`: `findings` copied from the review (`id`, `severity`, `text`) each with a `disposition` (`fixed`, `open` or `declined: <reason>`); a blocker may be `open` only in the final fix; a task `fix` also needs `evidence.commits` and `evidence.checks`.
+- `fix`: `findings` copied from `reviewFindings` on the card (`id`, `severity`, `text`) each with a `disposition` (`fixed`, `open` or `declined: <reason>`); a blocker may be `open` only in the final fix; a task `fix` also needs `evidence.commits` and `evidence.checks`.
 - `verify`: `verified`, a list of `{ id, verified, evidence }` covering exactly the contested ids.
 - `implement`: `evidence.commits` and `evidence.checks`.
-- `test`: on success `status: done`; on failure `status: failed` with `findings` (each `id`, `severity`, `text`, optional `repo`).
+- `test`: on success `status: done`; on failure `status: failed` with `findings` (each `id`, `severity` (`blocker`, `major` or `minor`), `text`, optional `repo`).
+
+A `blocked` result needs none of these purpose fields: publish your question instead. Tester `findings`, if you include them, must still be well-formed.
 
 ## Never ask the user
 

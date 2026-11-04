@@ -776,7 +776,7 @@ test('attempt-started records purpose and round; no purpose defaults to author',
   try {
     const g = await gitSetup();
     const runner = createRunner({ registry: sessionFactory(registry).registry, store: g.store, now: () => T0, idImpl: ids(), logImpl: quiet });
-    await runner.launch(g.job, launchAction({ phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 2, final: true, reviewFindings: [F('F1', 'major')], reviewTarget: 'spec' }));
+    await runner.launch(g.job, launchAction({ phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 2, final: true, reviewFindings: [F('F1', 'major')] }));
     const started = (await g.events()).find((e) => e.type === 'attempt-started');
     assert.equal(started.purpose, 'fix');
     assert.equal(started.round, 2);
@@ -802,7 +802,7 @@ test('a valid review result ends the attempt with verdict and findings stored on
     const rel = reviewPaths(g.job, { phase: 'spec-review', round: 1 }).review;
     const sha = await g.commit({ [rel]: '# review r1\n' });
     const findings = [F('F1', 'blocker'), F('F2', 'minor')];
-    const attempt = await runLive(g, launchAction({ phase: 'spec-review', role: 'spec-reviewer', purpose: 'review', round: 1, reviewTarget: 'spec' }),
+    const attempt = await runLive(g, launchAction({ phase: 'spec-review', role: 'spec-reviewer', purpose: 'review', round: 1 }),
       (a) => g.result(a, { artifacts: [rel], verdict: 'changes', findings, evidence: { commits: [sha] } }));
     assert.equal(attempt.outcome, 'done', JSON.stringify(await g.endOf(attempt.attemptId)));
     assert.equal(attempt.verdict, 'changes');
@@ -892,7 +892,7 @@ test('a non-final fix with an open blocker ends invalid-result live and in recon
     const response = reviewPaths(g.job, { phase: 'spec-review', round: 1 }).response;
     const sha = await g.commit({ [artifactPaths(g.job).spec]: '# Hello design\n', [response]: '# response r1\n' });
     const openBlocker = (a) => g.result(a, { artifacts: [response], findings: [F('F1', 'blocker', 'open')], evidence: { commits: [sha] } });
-    const fixAction = (final) => launchAction({ phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 1, final, reviewFindings: [F('F1', 'blocker')], reviewTarget: 'spec' });
+    const fixAction = (final) => launchAction({ phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 1, final, reviewFindings: [F('F1', 'blocker')] });
 
     const liveNonFinal = await runLive(g, fixAction(false), openBlocker);
     assert.equal(liveNonFinal.outcome, 'failed');

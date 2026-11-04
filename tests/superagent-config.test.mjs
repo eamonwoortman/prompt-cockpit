@@ -213,6 +213,9 @@ test('milestone-2 phase order and contracts', () => {
   assert.deepEqual(MILESTONE_2_PIPELINE.map((p) => p.phase), ['spec', 'spec-review', 'plan', 'plan-review', 'implement', 'test', 'accept']);
   assert.deepEqual(MILESTONE_2_PIPELINE[2].outputs, ['plan', 'tasks']);
   assert.equal(MILESTONE_2_PIPELINE[4].taskReview, 'task-reviewer');
+  assert.deepEqual(MILESTONE_2_PIPELINE[3].inputs, ['spec', 'tasks']);
+  assert.deepEqual(defaultConfig().pipeline.find((p) => p.phase === 'plan-review').inputs, ['spec', 'tasks']);
+  assert.deepEqual(validateDefaults(defaultConfig()).errors, []);
 });
 
 test('an unknown fixture name throws', () => {
