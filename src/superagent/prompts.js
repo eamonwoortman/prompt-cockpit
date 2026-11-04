@@ -50,8 +50,10 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
   if (template == null) throw Object.assign(new Error(`superagent: no prompt template for role ${JSON.stringify(role)}`), { code: 'ERR_NO_TEMPLATE' });
   const contract = await fs.readFile(path.join(templatesDir(), CONTRACT_FILE), 'utf8');
 
-  const { idea: _idea, ...inputs } = artifactPaths(job);
-  const { spec, plan, tasks, testReport } = inputs;
+  const paths = artifactPaths(job);
+  const resolve = (keys) => Object.fromEntries(keys.filter((k) => k in paths).map((k) => [k, paths[k]]));
+  const inputs = resolve((phase?.inputs ?? []).filter((k) => k !== 'idea'));
+  const outputs = resolve(phase?.outputs ?? []);
   const previous = attempt.previousAttemptId ? job.attempts.find((a) => a.attemptId === attempt.previousAttemptId) : null;
   const primaryFirst = [...job.repos].sort((a, b) => (a.id === 'primary' ? -1 : 0) - (b.id === 'primary' ? -1 : 0));
   const body = {
@@ -64,7 +66,7 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
     idea: job.idea,
     repos: primaryFirst.map((r) => ({ id: r.id, worktree: r.worktree, branch: job.branch })),
     inputs,
-    outputs: { spec, plan, tasks, testReport },
+    outputs,
     attemptDir: attempt.dir,
     round: null,
     previousFindings: null,

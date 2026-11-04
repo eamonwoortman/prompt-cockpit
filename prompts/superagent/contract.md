@@ -24,6 +24,10 @@ When you are finished (or blocked), publish exactly one result file in `attemptD
 - Copy `jobId`, `phaseId`, `taskId` and `attemptId` exactly from the job card. Do not invent or alter them.
 - Publish atomically: write the JSON to `result.json.tmp` in `attemptDir`, then `rename` it to `result.json`. This is the very last thing you do; take no further actions after the rename.
 
+## Committing outputs
+
+When the phase has required outputs, commit every output file in the primary worktree on the job branch and list the commit sha(s) in `evidence.commits` as plain strings (primary repo shas). After committing, leave each output unmodified so `git status` is clean for that path; an uncommitted, empty or later-modified output fails validation.
+
 ## Never ask the user
 
 Nobody is watching. `AskUserQuestion` is unavailable and any permission prompt is denied. If you cannot proceed without an answer, set `status` to `blocked`, put the question in `question`, and publish. Do not guess past a real ambiguity.

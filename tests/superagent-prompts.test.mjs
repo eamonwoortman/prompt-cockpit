@@ -44,7 +44,7 @@ test('prompt surface: every role template plus the contract states the worker co
   assert.ok(roles.includes('spec-writer'));
   for (const role of roles) {
     const { system } = await buildWorkerPrompt({ role, job, phase, attempt, projectDir: emptyDir });
-    for (const needle of ['result.json.tmp', 'rename', '"attemptId"', '"status"', 'blocked', 'Do not start the next phase', 'If the job card has a recovery note', 'AskUserQuestion']) {
+    for (const needle of ['result.json.tmp', 'rename', '"attemptId"', '"status"', 'blocked', 'Do not start the next phase', 'If the job card has a recovery note', 'AskUserQuestion', 'list the commit sha(s) in `evidence.commits`']) {
       assert.ok(system.includes(needle), `${role}: missing ${needle}`);
     }
   }
@@ -67,7 +67,8 @@ test('the job card carries every field and the recovery note only on retries', a
   assert.equal(c.repos[0].worktree, job.repos[0].worktree);
   assert.equal(c.outputs.spec, artifactPaths(job).spec);
   assert.ok(!('idea' in c.inputs));
-  assert.equal(c.inputs.brief, artifactPaths(job).brief);
+  assert.deepEqual(c.inputs, {});
+  assert.deepEqual(c.outputs, { spec: artifactPaths(job).spec });
   assert.equal(c.attemptDir, attempt.dir);
   assert.equal(c.round, null);
   assert.equal(c.previousFindings, null);
@@ -80,6 +81,19 @@ test('the job card carries every field and the recovery note only on retries', a
   const rc = parseCard((await buildWorkerPrompt({ role: 'spec-writer', job: retry.job, phase: retry.phase, attempt: retry.attempt, projectDir: retry.emptyDir })).card);
   assert.equal(rc.recoveryNote, RECOVERY_NOTE);
   assert.equal(rc.previousAttemptDir, a1Dir);
+});
+
+test('the job card inputs and outputs follow the current phase', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const paths = artifactPaths(job);
+  const first = parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir })).card);
+  assert.deepEqual(first.outputs, { spec: paths.spec });
+  assert.deepEqual(first.inputs, {});
+
+  const later = { ...phase, phase: 'plan', inputs: ['spec'], outputs: ['plan'] };
+  const card = parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase: later, attempt: { ...attempt, phase: 'plan' }, projectDir: emptyDir })).card);
+  assert.deepEqual(card.inputs, { spec: paths.spec });
+  assert.deepEqual(card.outputs, { plan: paths.plan });
 });
 
 test('a missing role template fails and a project override wins', async () => {

@@ -2,9 +2,9 @@
 //
 // NOT run by npm test and NOT run by implementers of Plan 2. Run by hand only with the user's approval:
 //   node tests/superagent-two-phase.manual.mjs
-// Limits: 1 job, 1 phase, <= 3 attempts x maxTurns 3, one nudge each, 10-minute wall-clock deadline. There is NO cost cap:
-// only the wall-clock deadline and the attempt/turn limits bound spend. maxTurns is deliberately small (3) so the
-// turn-cap path (error_max_turns and the nudge) is likely exercised; the cost floor below stays a floor.
+// Limits: 1 job, 1 phase, <= 3 attempts x maxTurns 15, one nudge each, 10-minute wall-clock deadline. There is NO cost cap:
+// only the wall-clock deadline and the attempt/turn limits bound spend. maxTurns is 15: enough for the worker (echo probe, write spec,
+// commit, write result .tmp, rename) to finish, yet low enough to show error_max_turns if it occurs; the cost floor below stays a floor.
 // Estimated cost: about $0.50 (Sonnet 5.5) - treat as a FLOOR; Plan 1's probes cost 10-30x their header estimates.
 // Observes what unit tests cannot:
 //   (a) whether the SDK calls canUseTool for an ordinary tool (Bash) in permissionMode `auto` with
@@ -14,9 +14,12 @@
 //         TOOL_USE Bash + APPROVAL INTERCEPT Bash = canUseTool IS called in auto;
 //         TOOL_USE Bash + no intercept line      = SDK skipped canUseTool (deny rule unenforced in auto);
 //         no TOOL_USE Bash                       = inconclusive (the worker never tried it);
-//   (b) whether maxTurns counts per prompt or per session in streaming input, and the real error_max_turns
-//       subtype - read the attempt-ended / attempt-nudged lines. Probe-only note: if the nudge turn is allowed to run
-//       after a cap, maxTurns is per prompt; if the nudge ends immediately with error_max_turns, it is per session;
+//       If canUseTool IS called for Bash in auto mode, the deny-all rule will also deny `git commit`, so the run is
+//       expected to end with the author phase failing on 'output not committed'; that outcome together with a Bash
+//       TOOL_USE plus an APPROVAL INTERCEPT line is the proof;
+//   (b) if the cap is hit: whether maxTurns counts per prompt or per session in streaming input, and the real
+//       error_max_turns subtype - read the attempt-ended / attempt-nudged lines. Probe-only note: if the nudge turn is
+//       allowed to run after a cap, maxTurns is per prompt; if it ends immediately with error_max_turns, per session;
 //   (c) whether a PreCompact firing reaches events.jsonl (precompact lines; may legitimately be absent).
 // Uses a temp COCKPIT_HOME, operator file and toy repo; nothing under the real home is touched. Temp dirs are
 // left behind on purpose (the SDK child can hold the cwd on Windows, S2).
@@ -93,7 +96,7 @@ async function main() {
 
   mkdirSync(path.dirname(configFile), { recursive: true });
   writeFileSync(configFile, JSON.stringify({
-    projects: { [repo]: { models: { 'spec-writer': { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 3 } } } },
+    projects: { [repo]: { models: { 'spec-writer': { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 15 } } } },
   }));
   const config = createSuperagentConfig({ filePath: configFile });
   await config.load();
