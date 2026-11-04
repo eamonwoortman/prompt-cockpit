@@ -711,3 +711,27 @@ test('implement: a task fix follows the same evidence rules; a blocked result ne
   assert.equal(blocked.ok, true, JSON.stringify(blocked.errors));
   await assert.rejects(f.check(f.result([f.primary(f.reportSha)]), f.as({}, { taskDef: undefined })), /taskDef/);
 });
+
+test('review: a missing disposition counts as open; a bad value is still invalid', async () => {
+  const f = await reviewFixture();
+  const sha = await f.commit(f.paths.review);
+  const bare = (severity) => ({ id: 'F1', severity, text: 'No disposition given.' });
+  const ok = await f.check(f.result(f.paths.review, sha, { verdict: 'changes', findings: [bare('major')] }), f.as({ purpose: 'review' }));
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  const okMinor = await f.check(f.result(f.paths.review, sha, { verdict: 'approve', findings: [bare('minor')] }), f.as({ purpose: 'review' }));
+  assert.equal(okMinor.ok, true, JSON.stringify(okMinor.errors));
+  const blocker = await f.check(f.result(f.paths.review, sha, { verdict: 'approve', findings: [bare('blocker')] }), f.as({ purpose: 'review' }));
+  assert.equal(blocker.ok, false);
+  assert.match(blocker.errors.join('\n'), /approve.*blocker/);
+  const bad = await f.check(f.result(f.paths.review, sha, { verdict: 'changes', findings: [{ ...bare('major'), disposition: 'maybe' }] }), f.as({ purpose: 'review' }));
+  assert.equal(bad.ok, false);
+  assert.match(bad.errors.join('\n'), /disposition/);
+});
+
+test('fix: a missing disposition is still invalid', async () => {
+  const f = await reviewFixture();
+  const sha = await f.commit(f.paths.response);
+  const v = await f.check(f.result(f.paths.response, sha, { findings: [{ id: 'F1', severity: 'major', text: 'x' }] }), f.as({ purpose: 'fix', reviewFindings: [{ id: 'F1', severity: 'major', text: 'x' }] }));
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join('\n'), /disposition/);
+});

@@ -232,7 +232,7 @@ test('a tester card carries effectiveTasks including a generated fix task accept
 
 test('prompt surface: pinned strings in the pipeline templates and the contract', async () => {
   const read = (f) => fs.readFile(path.join(templatesDir(), f), 'utf8');
-  const has = async (f, ...needles) => { const t = (await read(f)).replace(/Do not edit/g, "do not edit"); for (const n of needles) assert.ok(t.includes(n), `${f}: missing ${n}`); };
+  const has = async (f, ...needles) => { const t = await read(f); for (const n of needles) assert.ok(t.includes(n), `${f}: missing ${n}`); };
   const fixRule = ['when `purpose` is `fix`, read `previousFindings`, change the artifact for each finding or decline it with a one-sentence reason, and write the response file', 'when `final` is true, append every finding you did not fix under a heading `## Unresolved review findings`'];
   await has('spec-writer.md', ...fixRule, '## Unresolved review findings');
   await has('planner.md', ...fixRule, '## Unresolved review findings', '`id`', '`title`', '`repos`', '`dependsOn`', '`acceptance`', '`verify`', 'ids are at most 24 characters, letters, digits and hyphens', 'one task = one worker session');
@@ -241,8 +241,14 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   await has('task-reviewer.md', 'taskCommits', 'git show', 'read-only');
   await has('tester.md', 'effectiveTasks', 'How to try it', 'status: failed', '`repo`', 'never edit code');
   await has('verifier.md', 'contested', 'verified', 'read-only');
-  for (const f of ['planner', 'spec-reviewer', 'plan-reviewer', 'implementer', 'task-reviewer', 'tester', 'verifier', 'spec-writer']) await has(`${f}.md`, 'do not edit files outside your listed outputs and the code your task owns');
+  for (const f of ['planner', 'spec-reviewer', 'plan-reviewer', 'implementer', 'task-reviewer', 'tester', 'verifier', 'spec-writer']) await has(`${f}.md`, 'Do not edit files outside your listed outputs and the code your task owns');
+  for (const f of ['spec-reviewer.md', 'plan-reviewer.md', 'task-reviewer.md']) await has(f, '"disposition": "open"');
+  for (const f of ['spec-writer.md', 'planner.md', 'implementer.md']) await has(f, 'copy each finding id, severity and text from the review file', 'list only findings from that file', 'A blocker may be `open` only when `final` is true');
+  await has('implementer.md', '{ "cmd": "...", "exit": 0 }', '`cmd` equals the task `verify` string');
+  await has('verifier.md', '`evidence` must be a non-empty string');
   const contract = await read('contract.md');
+  assert.ok(contract.includes('`done`, `blocked` or `failed`'));
+  assert.ok(contract.includes('a plain sha for the primary repo, or `{ "repo": "<id>", "sha": "<sha>" }` for an additional repo'));
   assert.ok(contract.includes('Purposes'));
   for (const p of ['author', 'review', 'fix', 'verify', 'implement', 'task-review', 'test']) assert.ok(contract.includes(`\`${p}\``), `contract: ${p}`);
   assert.ok(contract.includes('review, response, verify and report files are outputs'));

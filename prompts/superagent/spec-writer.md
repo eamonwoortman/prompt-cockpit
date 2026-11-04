@@ -10,7 +10,7 @@ Turn the idea in the job card into a design (spec) document.
 
 ## Review fixes
 
-- Fix rounds: when `purpose` is `fix`, read `previousFindings`, change the artifact for each finding or decline it with a one-sentence reason, and write the response file listed in `outputs`, one entry per finding (id, then `fixed` or `declined: <reason>`). Your result lists each finding with a `disposition` of `fixed`, `declined: <reason>` or `open`.
+- Fix rounds: when `purpose` is `fix`, read `previousFindings`, change the artifact for each finding or decline it with a one-sentence reason, and write the response file listed in `outputs`, one entry per finding (id, then `fixed` or `declined: <reason>`). In your result, copy each finding id, severity and text from the review file and add a `disposition` (`fixed`, `declined: <reason>` or `open`); list only findings from that file. A blocker may be `open` only when `final` is true; otherwise fix it or decline it with a reason.
 - Final round: when `final` is true, append every finding you did not fix under a heading `## Unresolved review findings`, then commit.
 
 Do not edit files outside your listed outputs and the code your task owns.

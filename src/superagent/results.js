@@ -257,7 +257,8 @@ function evidenceErrors(evidence, job) {
 
 // `disposition: false` is a tester's finding (no disposition; an optional
 // `repo` that must be one of the job's repos).
-function findingErrors(findings, { job = null, disposition = true } = {}) {
+// `defaultOpen` (reviewers) lets a missing disposition stand for 'open'.
+function findingErrors(findings, { job = null, disposition = true, defaultOpen = false } = {}) {
   if (!Array.isArray(findings)) return ['findings must be an array'];
   const errors = [];
   const seen = new Set();
@@ -270,7 +271,7 @@ function findingErrors(findings, { job = null, disposition = true } = {}) {
     if (!SEVERITIES.includes(f.severity)) errors.push(`${at}.severity must be one of ${SEVERITIES.join('|')}`);
     if (!isNonEmptyString(f.text)) errors.push(`${at}.text must be a non-empty string`);
     if (disposition) {
-      const d = f.disposition;
+      const d = f.disposition === undefined && defaultOpen ? 'open' : f.disposition;
       const declined = typeof d === 'string' ? /^declined:(.*)$/s.exec(d) : null;
       if (!(d === 'fixed' || d === 'open' || (declined && declined[1].trim() !== ''))) {
         errors.push(`${at}.disposition must be fixed, open or "declined: <reason>"`);
@@ -285,13 +286,13 @@ function findingErrors(findings, { job = null, disposition = true } = {}) {
 function reviewErrors(value) {
   const errors = [];
   if (!VERDICTS.includes(value.verdict)) errors.push(`verdict must be one of ${VERDICTS.join('|')}`);
-  return [...errors, ...findingErrors(value.findings)];
+  return [...errors, ...findingErrors(value.findings, { defaultOpen: true })];
 }
 
 function verdictErrors(value) {
   const errors = reviewErrors(value);
   if (!Array.isArray(value.findings)) return errors;
-  const openBlocker = value.findings.some((f) => isPlainObject(f) && f.severity === 'blocker' && f.disposition === 'open');
+  const openBlocker = value.findings.some((f) => isPlainObject(f) && f.severity === 'blocker' && (f.disposition ?? 'open') === 'open');
   if (value.verdict === 'approve' && openBlocker) errors.push('approve is not allowed with an open blocker finding');
   if (value.verdict === 'changes' && value.findings.length === 0) errors.push('changes must list at least one finding');
   return errors;

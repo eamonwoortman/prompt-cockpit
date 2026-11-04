@@ -20,13 +20,13 @@ When you are finished (or blocked), publish exactly one result file in `attemptD
 }
 ```
 
-- `status` is `done` or `blocked`.
+- `status` is `done`, `blocked` or `failed` (`failed` is for the tester, and for any role that cannot finish).
 - Copy `jobId`, `phaseId`, `taskId` and `attemptId` exactly from the job card. Do not invent or alter them.
 - Publish atomically: write the JSON to `result.json.tmp` in `attemptDir`, then `rename` it to `result.json`. This is the very last thing you do; take no further actions after the rename.
 
 ## Committing outputs
 
-When the phase has required outputs, commit every output file in the primary worktree on the job branch and list the commit sha(s) in `evidence.commits` as plain strings (primary repo shas). After committing, leave each output unmodified so `git status` is clean for that path; an uncommitted, empty or later-modified output fails validation.
+When the phase has required outputs, commit every output file in the primary worktree on the job branch and list the commit sha(s) in `evidence.commits` as a plain sha for the primary repo, or `{ "repo": "<id>", "sha": "<sha>" }` for an additional repo. After committing, leave each output unmodified so `git status` is clean for that path; an uncommitted, empty or later-modified output fails validation.
 
 Note that review, response, verify and report files are outputs and must be committed and listed in `evidence.commits` like any other output.
 
@@ -35,9 +35,9 @@ Note that review, response, verify and report files are outputs and must be comm
 If the job card has a `purpose`, it says which kind of attempt this is and which result fields it needs:
 
 - `author`: write the phase outputs; `evidence.commits`.
-- `review`: `verdict` (`approve` or `changes`) and `findings` (each with `id`, `severity` and `text`).
+- `review`: `verdict` (`approve` or `changes`) and `findings` (each with `id`, `severity`, `text` and `"disposition": "open"`).
 - `task-review`: the same `verdict` and `findings`, about one task's commits.
-- `fix`: `findings` with a `disposition` each (`fixed`, `open` or `declined: <reason>`); a task `fix` also needs `evidence.commits` and `evidence.checks`.
+- `fix`: `findings` copied from the review (`id`, `severity`, `text`) each with a `disposition` (`fixed`, `open` or `declined: <reason>`); a blocker may be `open` only in the final fix; a task `fix` also needs `evidence.commits` and `evidence.checks`.
 - `verify`: `verified`, a list of `{ id, verified, evidence }` covering exactly the contested ids.
 - `implement`: `evidence.commits` and `evidence.checks`.
 - `test`: on success `status: done`; on failure `status: failed` with `findings` (each `id`, `severity`, `text`, optional `repo`).
