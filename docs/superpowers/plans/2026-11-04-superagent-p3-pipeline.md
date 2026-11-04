@@ -391,3 +391,13 @@ Router and its auth route (Plan 4); brainstorm, stand-in and manual handover; us
 15. **Path bound relied on an unenforced limit** → portable id grammar enforced for phases (Task 1) and tasks (Task 4).
 16. **`freezePhase` and an index slip in Task 1** → `inputs` defaults to `[]`; expected index is `pipeline[4].taskReview`.
 17. **Weak reviewer-bound test** → exact purpose sequences and injected-failure cases (Task 5).
+
+## Execution amendments (controller rulings during SDD, 2026-11-04)
+
+These supersede the text above where they differ; the ledger (`.superpowers/sdd/2026-11-04-superagent-p3-pipeline/progress.md`, git-ignored) holds the full record.
+
+- **Decision 14 / Task 4 / Task 6 / Task 8 (Windows path guard):** the limit is 259 (MAX_PATH including the terminating NUL), not 240; task ids are capped at **12** characters (`/^[a-z0-9][a-z0-9-]{0,11}$/i`), not 24; on win32 `createJob` trims the slug (`slugify(title, jobId, maxBase = 40)`) to fit and refuses with `ERR_PATH_TOO_LONG` only when fewer than 8 title characters would fit. Reason: at 240 almost no milestone-2 job passed under the default `COCKPIT_HOME`.
+- **Task 3 / Task 6 (review findings):** a review or task-review finding may omit `disposition` (treated as `open`); templates still tell reviewers to set it. `reviewFindings` is passed to the validator as finding objects, not bare ids. Duplicate finding ids are rejected.
+- **Task 5:** routed tester failures are excluded from the test phase's repeated-error window, back-off and recovery note; the consuming-attempt cap still counts every tester attempt.
+- **Task 8:** `tasks.json` read errors other than ENOENT are retried on the next tick instead of parking the job. The blocker `needs-you` detail also carries `attemptId`, `phase` and `task`.
+- **Test routing visit:** the `test` phase's visit stays 1 after a rewind (it advances on attempt `done`, not `phase-completed`).
