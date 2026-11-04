@@ -296,13 +296,13 @@ const completePhase = (job, phase, unresolved, verification) => ({
   verification,
 });
 
+function reviewLoopOptions(job, phase) {
+  return { initial: null, maxRounds: phase.maxRounds ?? DEFAULT_REVIEW_ROUNDS, failedCap: attemptCap(job.limits, null) };
+}
+
 function reviewAction(job, phase, ctx) {
   const attempts = attemptsFor(job, phase.phase);
-  const loop = reviewLoop(attempts, {
-    initial: null,
-    maxRounds: phase.maxRounds ?? DEFAULT_REVIEW_ROUNDS,
-    failedCap: attemptCap(job.limits, null),
-  });
+  const loop = reviewLoop(attempts, reviewLoopOptions(job, phase));
   return scopeAction(job, phase, ctx, {
     attempts,
     loop,
@@ -331,6 +331,40 @@ function perTaskAction(job, phase, ctx) {
     roles: { initial: phase.role, author: phase.role, reviewer: phase.taskReview, verifier: 'verifier' },
     onComplete: () => ({ type: 'none' }),
   });
+}
+
+// The launch action's attempt context, rebuilt from the derived job for an
+// attempt that has no live record (reconcile), so its result is validated by
+// the same rules as a live finish. Only attempts before it in its scope count,
+// as when the sequencer created the launch.
+export function attemptContext(job, attempt) {
+  const purpose = attempt.purpose ?? 'author';
+  const task = attempt.task ?? null;
+  const round = attempt.round ?? null;
+  const at = job.attempts.findIndex((a) => a.attemptId === attempt.attemptId);
+  const done = (at < 0 ? job.attempts : job.attempts.slice(0, at))
+    .filter((a) => a.phase === attempt.phase && (a.task ?? null) === task && a.outcome === 'done');
+  const phase = job.pipeline.find((p) => p.phase === attempt.phase);
+
+  let reviewFindings = null;
+  if (purpose === 'fix') {
+    const review = done.findLast((a) => REVIEW_PURPOSES.has(a.purpose) && a.round === round);
+    if (review) reviewFindings = (review.findings ?? []).map(finding);
+  }
+  let contested = null;
+  if (purpose === 'verify' && phase) {
+    const state = loopState(done, phase.kind === 'per-task' ? taskLoopOptions(job, phase) : reviewLoopOptions(job, phase));
+    if (state.type === 'launch' && state.purpose === 'verify') contested = state.contested;
+  }
+  return {
+    purpose,
+    round,
+    final: attempt.final ?? false,
+    task,
+    taskDef: task == null ? null : ((job.tasks ?? []).find((t) => t.id === task) ?? null),
+    reviewFindings,
+    contested,
+  };
 }
 
 export function nextAction(job, ctx) {

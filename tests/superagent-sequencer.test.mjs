@@ -505,3 +505,38 @@ test('nextAction: author phases of milestone-2 launch as in Plan 2 with purpose 
   const job = m2(...upTo('plan'));
   assert.deepEqual(nextAction(job, ctx()), launchOf(job, 'planner', { phase: 'plan', purpose: 'author' }));
 });
+
+const contextOf = (job, id) => sequencer.attemptContext(job, job.attempts.find((a) => a.attemptId === id));
+
+test('attemptContext rebuilds taskDef, contested and reviewFindings from the job', () => {
+  const T1 = taskCreated('T1', { verify: 'npm test' });
+  const T2 = taskCreated('T2');
+
+  const author = m2(started('a1', 1));
+  assert.deepEqual(contextOf(author, 'a1'), { purpose: 'author', round: null, final: false, task: null, taskDef: null, reviewFindings: null, contested: null });
+
+  const implementing = atImplement([T1, T2], ...forTask('T2', [{ purpose: 'implement', outcome: null, id: 'i1' }]));
+  assert.deepEqual(contextOf(implementing, 'i1'), { purpose: 'implement', round: null, final: false, task: 'T2', taskDef: T2, reviewFindings: null, contested: null });
+
+  const reviewed = [{ purpose: 'implement' }, trev(1, 'changes', [{ ...F('m1', 'blocker'), disposition: 'open' }, F('m2')])];
+  const taskFix = atImplement([T1], ...forTask('T1', [...reviewed, { purpose: 'fix', round: 1, outcome: null, id: 'tf1' }]));
+  const before = atImplement([T1], ...forTask('T1', reviewed));
+  assert.deepEqual(contextOf(taskFix, 'tf1'), { purpose: 'fix', round: 1, final: false, task: 'T1', taskDef: T1, reviewFindings: [F('m1', 'blocker'), F('m2')], contested: null });
+  assert.deepEqual(contextOf(taskFix, 'tf1').reviewFindings, nextAction(before, ctx()).reviewFindings, 'the same findings the launch action carried');
+
+  const phaseFix = atReview(rev(1, 'changes', [F('b1', 'blocker')]), fix(1, { b1: 'fixed' }), rev(2, 'changes', [F('b2', 'major')]), { purpose: 'fix', round: 2, outcome: null, id: 'pf2' });
+  assert.deepEqual(contextOf(phaseFix, 'pf2').reviewFindings, [F('b2', 'major')], 'the findings of the same round, not an earlier one');
+  assert.equal(contextOf(phaseFix, 'pf2').taskDef, null);
+
+  const capped = [rev(1, 'changes', [F('b1', 'blocker')]), fix(1, { b1: 'open' }), rev(2, 'changes', [F('b1', 'blocker')]), fix(2, { b1: 'open' }), rev(3, 'changes', [F('b1', 'blocker'), F('b2', 'blocker')]), fix(3, { b1: 'declined: no', b2: 'fixed' }, true)];
+  const verifying = atReview(...capped, { purpose: 'verify', outcome: null, id: 'v1' });
+  assert.deepEqual(contextOf(verifying, 'v1'), { purpose: 'verify', round: null, final: false, task: null, taskDef: null, reviewFindings: null, contested: ['b1'] });
+  assert.deepEqual(contextOf(verifying, 'v1').contested, nextAction(atReview(...capped), ctx()).contested);
+
+  const taskCapped = forTask('T1', [{ purpose: 'implement' }, trev(1, 'changes', [F('b1', 'blocker')]), fix(1, { b1: 'fixed' }), trev(2, 'changes', [F('b1', 'blocker')]), fix(2, { b1: 'declined: works as intended' }, true)]);
+  const taskVerifying = atImplement([T1], ...taskCapped, ...forTask('T1', [{ purpose: 'verify', outcome: null, id: 'tv1' }]));
+  assert.deepEqual(contextOf(taskVerifying, 'tv1'), { purpose: 'verify', round: null, final: false, task: 'T1', taskDef: T1, reviewFindings: null, contested: ['b1'] });
+
+  const finalFix = atReview(rev(1, 'changes', [F('b1', 'blocker')]), { purpose: 'fix', round: 1, final: true, outcome: null, id: 'ff1' });
+  assert.equal(contextOf(finalFix, 'ff1').final, true);
+});

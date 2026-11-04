@@ -4,9 +4,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as registry from '../src/session-registry.js';
 import { fakeStartSession } from './test-helpers.mjs';
-import { tempDir, sessionFactory, liveJob, launchAction, ids, deferred, T0, MIN } from './superagent-helpers.mjs';
+import { execFileSync } from 'node:child_process';
+import { tempDir, initRepo, jobCreated, sessionFactory, liveJob, launchAction, ids, deferred, taskCreated, T0, MIN } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
-import { RESULT_FILE, artifactPaths, readResult } from '../src/superagent/results.js';
+import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
+import { createWorktree } from '../src/superagent/worktree.js';
+import { RESULT_FILE, artifactPaths, attemptDir, readResult, reviewPaths } from '../src/superagent/results.js';
 import { UNATTENDED_DENY_MESSAGE, nudgeText } from '../src/superagent/prompts.js';
 import { createRunner, PROGRESS_TYPES } from '../src/superagent/runner.js';
 
@@ -694,5 +697,219 @@ test('reconcile ends in-flight attempts with their result or as interrupted', as
     assert.equal(ends[0].outcome, 'done');
     assert.equal(ends[0].summary, 'Wrote the hello design.');
     assert.deepEqual((await ended('j2')).map((e) => e.outcome), ['interrupted']);
+  } finally { registry._reset(); }
+});
+
+// Plan 3 Task 7: real validateResult against a git worktree on the job branch.
+const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+const F = (id, severity, disposition) => ({ id, severity, text: `Finding ${id}.`, ...(disposition ? { disposition } : {}) });
+
+async function gitSetup({ tasks = null } = {}) {
+  const root = await tempDir('sa-runner-git-');
+  const store = createSuperagentStore({ rootDir: path.join(root, 'jobs'), now: () => T0, logImpl: quiet });
+  const origin = path.join(root, 'origin');
+  await initRepo(origin);
+  const created = jobCreated({ pipeline: MILESTONE_2_PIPELINE, repos: [{ id: 'primary', origin }] });
+  const { jobId, branch } = created;
+  const worktree = path.join(root, 'wt');
+  const { baseSha } = await createWorktree({ origin, worktree, branch, copyLocalClaudeSettings: false });
+  await store.append(jobId, created);
+  await store.append(jobId, { type: 'worktree-created', repo: 'primary', worktree, branch, baseSha, settingsCopy: null });
+  await store.append(jobId, { type: 'job-provisioned' });
+  if (tasks) await store.append(jobId, { type: 'tasks-loaded', tasks });
+  const job = store.get(jobId);
+  const commit = async (files, message = 'work') => {
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = path.join(worktree, ...rel.split('/'));
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, content);
+      git(worktree, 'add', '--', rel);
+    }
+    git(worktree, 'commit', '-q', '-m', message);
+    return git(worktree, 'rev-parse', 'HEAD');
+  };
+  const result = (attempt, over = {}) => ({
+    jobId, phaseId: attempt.phase, taskId: attempt.task ?? null, attemptId: attempt.attemptId,
+    status: 'done', artifacts: [], summary: 'Did the work.', question: null, ...over,
+  });
+  const publish = async (attempt, value) => {
+    await fs.mkdir(attempt.dir, { recursive: true });
+    await fs.writeFile(path.join(attempt.dir, RESULT_FILE), JSON.stringify(value));
+  };
+  // A derived attempt that never ended, as a restarted cockpit finds it.
+  const startedOnly = async (attemptId, { phase, task = null, role, ...over }) => {
+    const dir = attemptDir(worktree, { jobId, phase, task, attemptId });
+    await store.append(jobId, { type: 'attempt-started', attemptId, phase, task, role, model: 'claude-opus-5-5', n: 1, recovery: false, previousAttemptId: null, dir, ...over });
+    return store.get(jobId).attempts.find((a) => a.attemptId === attemptId);
+  };
+  const doneReview = async (attemptId, round, findings) => {
+    await startedOnly(attemptId, { phase: 'spec-review', role: 'spec-reviewer', purpose: 'review', round });
+    await store.append(jobId, { type: 'attempt-ended', attemptId, outcome: 'done', verdict: 'changes', findings });
+  };
+  const events = async () => (await fs.readFile(path.join(store.jobDir(jobId), 'events.jsonl'), 'utf8'))
+    .split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  const endOf = async (attemptId) => (await events()).find((e) => e.type === 'attempt-ended' && e.attemptId === attemptId);
+  return { store, job, jobId, worktree, commit, result, publish, startedOnly, doneReview, events, endOf };
+}
+
+let liveRuns = 0;
+
+// Launches one live attempt with the real validator and finishes its turn.
+async function runLive(g, action, makeResult) {
+  const { registry: reg, impls } = sessionFactory(registry);
+  const runner = createRunner({ registry: reg, store: g.store, now: () => T0, idImpl: ids(`live${++liveRuns}-`), logImpl: quiet });
+  const launched = await runner.launch(g.store.get(g.jobId), action);
+  assert.ok(launched.attemptId, JSON.stringify(launched));
+  const attempt = lastAttempt(g.store, g.jobId);
+  await g.publish(attempt, await makeResult(attempt));
+  endTurn(impls.get(attempt.sessionId));
+  await runner.review(g.store.get(g.jobId));
+  await runner.drain();
+  return lastAttempt(g.store, g.jobId);
+}
+
+const reconcileWith = (g) => createRunner({ registry: sessionFactory(registry).registry, store: g.store, now: () => T0, idImpl: ids('r'), logImpl: quiet })
+  .reconcile(g.store.get(g.jobId));
+
+test('attempt-started records purpose and round; no purpose defaults to author', async () => {
+  registry._reset();
+  try {
+    const g = await gitSetup();
+    const runner = createRunner({ registry: sessionFactory(registry).registry, store: g.store, now: () => T0, idImpl: ids(), logImpl: quiet });
+    await runner.launch(g.job, launchAction({ phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 2, final: true, reviewFindings: [F('F1', 'major')], reviewTarget: 'spec' }));
+    const started = (await g.events()).find((e) => e.type === 'attempt-started');
+    assert.equal(started.purpose, 'fix');
+    assert.equal(started.round, 2);
+    assert.equal(started.final, true);
+    const fixAttempt = lastAttempt(g.store, g.jobId);
+    assert.deepEqual([fixAttempt.purpose, fixAttempt.round, fixAttempt.final], ['fix', 2, true]);
+    await runner.stopAttempt(g.jobId);
+
+    await runner.launch(g.store.get(g.jobId), launchAction());
+    const plain = lastAttempt(g.store, g.jobId);
+    assert.deepEqual([plain.purpose, plain.round, plain.final], ['author', null, false]);
+    const plainStarted = (await g.events()).filter((e) => e.type === 'attempt-started').at(-1);
+    assert.equal(plainStarted.purpose, 'author');
+    await runner.stopAttempt(g.jobId);
+    await runner.drain();
+  } finally { registry._reset(); }
+});
+
+test('a valid review result ends the attempt with verdict and findings stored on the derived attempt', async () => {
+  registry._reset();
+  try {
+    const g = await gitSetup();
+    const rel = reviewPaths(g.job, { phase: 'spec-review', round: 1 }).review;
+    const sha = await g.commit({ [rel]: '# review r1\n' });
+    const findings = [F('F1', 'blocker'), F('F2', 'minor')];
+    const attempt = await runLive(g, launchAction({ phase: 'spec-review', role: 'spec-reviewer', purpose: 'review', round: 1, reviewTarget: 'spec' }),
+      (a) => g.result(a, { artifacts: [rel], verdict: 'changes', findings, evidence: { commits: [sha] } }));
+    assert.equal(attempt.outcome, 'done', JSON.stringify(await g.endOf(attempt.attemptId)));
+    assert.equal(attempt.verdict, 'changes');
+    assert.deepEqual(attempt.findings, findings);
+    assert.deepEqual(attempt.commits, [{ repo: 'primary', sha }]);
+    assert.equal(attempt.verified, null);
+    const end = await g.endOf(attempt.attemptId);
+    assert.equal(end.verdict, 'changes');
+    assert.equal(end.verified, null);
+  } finally { registry._reset(); }
+});
+
+test('a valid implement result stores commits; a missing verify check ends the attempt invalid-result', async () => {
+  registry._reset();
+  try {
+    const T1 = taskCreated('T1', { verify: 'npm test' });
+    const g = await gitSetup({ tasks: [T1] });
+    const report = reviewPaths(g.job, { taskId: 'T1' }).report;
+    const reportSha = await g.commit({ [report]: '# T1 report\n' }, 'report');
+    const codeSha = await g.commit({ 'src/hello.js': 'export const hello = 1;\n' }, 'code');
+    const action = launchAction({ phase: 'implement', task: 'T1', role: 'implementer', purpose: 'implement', taskDef: T1 });
+    const evidence = (checks) => ({ commits: [reportSha, codeSha], checks });
+
+    const ok = await runLive(g, action, (a) => g.result(a, { artifacts: [report], evidence: evidence([{ cmd: 'npm test', exit: 0 }]) }));
+    assert.equal(ok.outcome, 'done', JSON.stringify(await g.endOf(ok.attemptId)));
+    assert.deepEqual(ok.commits, [{ repo: 'primary', sha: reportSha }, { repo: 'primary', sha: codeSha }]);
+    assert.equal(ok.verdict, null);
+    assert.equal(ok.findings, null);
+
+    const missing = await runLive(g, action, (a) => g.result(a, { artifacts: [report], evidence: evidence([{ cmd: 'npm run lint', exit: 0 }]) }));
+    assert.equal(missing.outcome, 'failed');
+    assert.equal(missing.reason, 'invalid-result');
+    assert.match(missing.signature, /verify command/);
+    assert.deepEqual(missing.commits, []);
+  } finally { registry._reset(); }
+});
+
+test('a worker-reported failed result gets a signature, and two identical failures produce equal signatures', async () => {
+  registry._reset();
+  try {
+    const g = await gitSetup();
+    const failing = (summary) => (a) => g.result(a, { status: 'failed', summary });
+    const first = await runLive(g, launchAction(), failing('Build broke after 3 retries at 0x7ffd12\nfirst detail'));
+    const second = await runLive(g, launchAction(), failing('Build broke after 12 retries at 0xabc\nother detail'));
+    for (const a of [first, second]) {
+      assert.equal(a.outcome, 'failed');
+      assert.equal(a.reason, 'failed');
+      assert.equal(typeof a.signature, 'string');
+    }
+    assert.equal(first.signature, second.signature);
+    assert.equal((await g.endOf(first.attemptId)).signature, first.signature);
+  } finally { registry._reset(); }
+});
+
+test('reconcile validates a finished fix attempt with the same rules as a live finish', async () => {
+  registry._reset();
+  try {
+    const g = await gitSetup();
+    await g.doneReview('rv1', 1, [F('F1', 'blocker'), F('F2', 'minor')]);
+    const response = reviewPaths(g.job, { phase: 'spec-review', round: 1 }).response;
+    const sha = await g.commit({ [artifactPaths(g.job).spec]: '# Hello design\n', [response]: '# response r1\n' });
+    const fixResult = (a, findings) => g.result(a, { artifacts: [response], findings, evidence: { commits: [sha] } });
+    const answered = [F('F1', 'blocker', 'fixed'), F('F2', 'minor', 'declined: out of scope')];
+
+    const valid = await g.startedOnly('fx1', { phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 1 });
+    await g.publish(valid, fixResult(valid, answered));
+    await reconcileWith(g);
+    const validEnd = await g.endOf('fx1');
+    assert.equal(validEnd.outcome, 'done', JSON.stringify(validEnd));
+    assert.deepEqual(validEnd.findings, answered);
+
+    const extra = await g.startedOnly('fx2', { phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 1 });
+    await g.publish(extra, fixResult(extra, [...answered, F('F9', 'major', 'fixed')]));
+    await reconcileWith(g);
+    const extraEnd = await g.endOf('fx2');
+    assert.equal(extraEnd.outcome, 'failed');
+    assert.equal(extraEnd.reason, 'invalid-result');
+    assert.match(extraEnd.signature, /not a finding of the review/);
+  } finally { registry._reset(); }
+});
+
+test('a non-final fix with an open blocker ends invalid-result live and in reconcile (final is persisted and rebuilt); the same result on the final fix is accepted', async () => {
+  registry._reset();
+  try {
+    const g = await gitSetup();
+    await g.doneReview('rv1', 1, [F('F1', 'blocker')]);
+    const response = reviewPaths(g.job, { phase: 'spec-review', round: 1 }).response;
+    const sha = await g.commit({ [artifactPaths(g.job).spec]: '# Hello design\n', [response]: '# response r1\n' });
+    const openBlocker = (a) => g.result(a, { artifacts: [response], findings: [F('F1', 'blocker', 'open')], evidence: { commits: [sha] } });
+    const fixAction = (final) => launchAction({ phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 1, final, reviewFindings: [F('F1', 'blocker')], reviewTarget: 'spec' });
+
+    const liveNonFinal = await runLive(g, fixAction(false), openBlocker);
+    assert.equal(liveNonFinal.outcome, 'failed');
+    assert.equal(liveNonFinal.reason, 'invalid-result');
+    assert.match(liveNonFinal.signature, /may only stay open in the final fix/);
+    const liveFinal = await runLive(g, fixAction(true), openBlocker);
+    assert.equal(liveFinal.outcome, 'done', JSON.stringify(await g.endOf(liveFinal.attemptId)));
+
+    const nonFinal = await g.startedOnly('fx1', { phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 1, final: false });
+    await g.publish(nonFinal, openBlocker(nonFinal));
+    const final = await g.startedOnly('fx2', { phase: 'spec-review', role: 'spec-writer', purpose: 'fix', round: 1, final: true });
+    await g.publish(final, openBlocker(final));
+    await reconcileWith(g);
+    const nonFinalEnd = await g.endOf('fx1');
+    assert.equal(nonFinalEnd.outcome, 'failed');
+    assert.equal(nonFinalEnd.reason, 'invalid-result');
+    assert.match(nonFinalEnd.signature, /may only stay open in the final fix/);
+    assert.equal((await g.endOf('fx2')).outcome, 'done', JSON.stringify(await g.endOf('fx2')));
   } finally { registry._reset(); }
 });

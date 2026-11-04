@@ -32,7 +32,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { RESULT_FILE, attemptDir, outcomeForResult, primaryRepo, readResult, validateResult } from './results.js';
 import { UNATTENDED_DENY_MESSAGE, buildWorkerPrompt, nudgeText } from './prompts.js';
-import { failureSignature } from './sequencer.js';
+import { attemptContext, failureSignature } from './sequencer.js';
 import { defaultGit } from './worktree.js';
 
 export const PROGRESS_TYPES = new Set(['assistant', 'user', 'result']);
@@ -132,9 +132,12 @@ export function createRunner({
     }
   }
 
+  const contextOf = ({ purpose, round, final, task, taskDef, reviewFindings, contested }) => ({ purpose, round, final, task, taskDef, reviewFindings, contested });
+
   // { read, payload } for a valid result, { read, invalid } for a present but
-  // invalid one, { read } otherwise.
-  async function judge(attempt, job) {
+  // invalid one, { read } otherwise. `context` is the live record's attempt
+  // context, or attemptContext() rebuilt from the job on reconcile.
+  async function judge(attempt, job, context) {
     const read = await safeRead(attempt.dir);
     if (read.state !== 'present') return { read };
     let verdict;
@@ -144,13 +147,26 @@ export function createRunner({
         phase: job?.pipeline.find((p) => p.phase === attempt.phase),
         job,
         git,
+        attempt: context,
       });
     } catch (err) {
       verdict = { ok: false, errors: [messageOf(err)] };
     }
     if (!verdict.ok) return { read, invalid: failed('invalid-result', verdict.errors?.[0] ?? '') };
     const r = verdict.result;
-    return { read, payload: { summary: r.summary, artifacts: r.artifacts, commits: r.commits, question: r.question ?? null, ...outcomeForResult(r) } };
+    return {
+      read,
+      payload: {
+        summary: r.summary,
+        artifacts: r.artifacts,
+        commits: r.commits ?? [],
+        question: r.question ?? null,
+        verdict: r.verdict ?? null,
+        findings: r.findings ?? null,
+        verified: r.verified ?? null,
+        ...outcomeForResult(r),
+      },
+    };
   }
 
   function releaseClaim(live) {
@@ -172,7 +188,7 @@ export function createRunner({
       return;
     }
     claim(live, async () => {
-      const verdict = await judge(live, store.get(live.jobId));
+      const verdict = await judge(live, store.get(live.jobId), contextOf(live));
       await finish(live, verdict.payload ?? failed('no-result', `session ${reason}`));
     });
   }
@@ -201,7 +217,7 @@ export function createRunner({
   }
 
   async function processTurnEnd(live) {
-    const verdict = await judge(live, store.get(live.jobId));
+    const verdict = await judge(live, store.get(live.jobId), contextOf(live));
     if (verdict.payload) return finish(live, verdict.payload);
     if (verdict.invalid) return finish(live, verdict.invalid);
     if (live.nudge === null) return nudge(live);
@@ -295,6 +311,12 @@ export function createRunner({
       phase: action.phase,
       task,
       dir,
+      purpose: action.purpose ?? 'author',
+      round: action.round ?? null,
+      final: action.final ?? false,
+      taskDef: action.taskDef ?? null,
+      reviewFindings: action.reviewFindings ?? null,
+      contested: action.contested ?? null,
       sessionId: null,
       scannedThrough: 0,
       lastProgressAt: now(),
@@ -324,6 +346,9 @@ export function createRunner({
         recovery: action.recovery,
         previousAttemptId: action.previousAttemptId,
         dir,
+        purpose: live.purpose,
+        round: live.round,
+        final: live.final,
       });
     } catch (err) {
       drop(live);
@@ -340,7 +365,16 @@ export function createRunner({
         role: action.role,
         job: current,
         phase: current.pipeline.find((p) => p.phase === action.phase),
-        attempt: { attemptId, phase: action.phase, task, role: action.role, n: action.n, recovery: action.recovery, previousAttemptId: action.previousAttemptId, dir },
+        attempt: {
+          attemptId,
+          phase: action.phase,
+          role: action.role,
+          n: action.n,
+          recovery: action.recovery,
+          previousAttemptId: action.previousAttemptId,
+          dir,
+          ...contextOf(live),
+        },
         projectDir: projectDirFor(current),
       });
     } catch (err) {
@@ -398,8 +432,8 @@ export function createRunner({
     for (const attempt of job.attempts) {
       if (attempt.outcome) continue;
       if (lives.get(job.jobId)?.attemptId === attempt.attemptId) continue;
-      const verdict = attempt.dir ? await judge({ ...attempt, jobId: job.jobId }, job) : {};
-      await store.append(job.jobId, { type: 'attempt-ended', attemptId: attempt.attemptId, ...(verdict.payload ?? { outcome: 'interrupted' }) });
+      const verdict = attempt.dir ? await judge({ ...attempt, jobId: job.jobId }, job, attemptContext(job, attempt)) : {};
+      await store.append(job.jobId, { type: 'attempt-ended', attemptId: attempt.attemptId, ...(verdict.payload ?? verdict.invalid ?? { outcome: 'interrupted' }) });
     }
   }
 
@@ -422,6 +456,9 @@ export function createRunner({
     }
   }
 
+  // In `auto` mode the SDK does not call canUseTool for ordinary tools
+  // (confirmed by the 2026-11-04 probe), so this deny rule only covers the
+  // asks the SDK actually makes.
   function onApprovalRequest({ row, request }) {
     const live = bySession.get(row?.id);
     if (!live) return null;
