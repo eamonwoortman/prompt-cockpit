@@ -2,14 +2,21 @@
 //
 // NOT run by npm test and NOT run by implementers of Plan 2. Run by hand only with the user's approval:
 //   node tests/superagent-two-phase.manual.mjs
-// Limits: 1 job, 1 phase, <= 3 attempts x maxTurns 20, one nudge each, 10-minute deadline.
+// Limits: 1 job, 1 phase, <= 3 attempts x maxTurns 3, one nudge each, 10-minute wall-clock deadline. There is NO cost cap:
+// only the wall-clock deadline and the attempt/turn limits bound spend. maxTurns is deliberately small (3) so the
+// turn-cap path (error_max_turns and the nudge) is likely exercised; the cost floor below stays a floor.
 // Estimated cost: about $0.50 (Sonnet 5.5) - treat as a FLOOR; Plan 1's probes cost 10-30x their header estimates.
 // Observes what unit tests cannot:
 //   (a) whether the SDK calls canUseTool for an ordinary tool (Bash) in permissionMode `auto` with
 //       sdkOptions.interceptEveryPermission (src/session.js claims it skips canUseTool in auto; spike S1 saw it
-//       only for AskUserQuestion) - printed as APPROVAL INTERCEPT lines; none for Bash means it was skipped;
+//       only for AskUserQuestion). Printed as APPROVAL INTERCEPT lines (the hook) and TOOL_USE lines (read from the
+//       row's replayed transcript via a fake ws). Outcomes:
+//         TOOL_USE Bash + APPROVAL INTERCEPT Bash = canUseTool IS called in auto;
+//         TOOL_USE Bash + no intercept line      = SDK skipped canUseTool (deny rule unenforced in auto);
+//         no TOOL_USE Bash                       = inconclusive (the worker never tried it);
 //   (b) whether maxTurns counts per prompt or per session in streaming input, and the real error_max_turns
-//       subtype - read the attempt-ended / attempt-nudged lines;
+//       subtype - read the attempt-ended / attempt-nudged lines. Probe-only note: if the nudge turn is allowed to run
+//       after a cap, maxTurns is per prompt; if the nudge ends immediately with error_max_turns, it is per session;
 //   (c) whether a PreCompact firing reaches events.jsonl (precompact lines; may legitimately be absent).
 // Uses a temp COCKPIT_HOME, operator file and toy repo; nothing under the real home is touched. Temp dirs are
 // left behind on purpose (the SDK child can hold the cwd on Windows, S2).
@@ -50,6 +57,29 @@ const repo = path.join(home, 'toy');
 const configFile = path.join(home, 'superagent', 'config.json');
 const jobsRoot = path.join(home, 'superagent', 'jobs');
 let sa = null;
+const toolUses = [];
+const attached = new Set();
+
+// Minimal fake ws: attachClient replays the whole transcript to it as sdk:message frames.
+const fakeWs = {
+  OPEN: 1,
+  readyState: 1,
+  send(raw) {
+    const frame = JSON.parse(raw);
+    if (frame.type !== 'sdk:message' || frame.message?.type !== 'assistant') return;
+    for (const b of frame.message.message?.content ?? []) {
+      if (b.type === 'tool_use') {
+        toolUses.push(b.name);
+        console.log(`TOOL_USE name=${b.name}`);
+      }
+    }
+  },
+};
+const attachNewRows = () => {
+  for (const row of realRegistry.list()) {
+    if (!attached.has(row.id)) { attached.add(row.id); realRegistry.attachClient(row.id, fakeWs, 0); }
+  }
+};
 
 async function main() {
   mkdirSync(repo, { recursive: true });
@@ -63,7 +93,7 @@ async function main() {
 
   mkdirSync(path.dirname(configFile), { recursive: true });
   writeFileSync(configFile, JSON.stringify({
-    projects: { [repo]: { models: { 'spec-writer': { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 20 } } } },
+    projects: { [repo]: { models: { 'spec-writer': { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 3 } } } },
   }));
   const config = createSuperagentConfig({ filePath: configFile });
   await config.load();
@@ -82,13 +112,21 @@ async function main() {
 
   const deadline = Date.now() + DEADLINE_MS;
   let job = created;
+  let deadlineHit = true;
   while (Date.now() < deadline) {
     await sa.tick();
+    attachNewRows();
     job = sa.getJob(created.jobId);
-    if (job?.state === 'needs-you' || job?.state === 'failed') break;
+    if (job?.state === 'needs-you' || job?.state === 'failed') { deadlineHit = false; break; }
     await sleep(POLL_MS);
   }
-  console.log(`\nfinal state: ${job?.state} reason: ${job?.reason ?? ''}${Date.now() >= deadline ? ' (DEADLINE HIT)' : ''}`);
+  console.log(`\nfinal state: ${job?.state} reason: ${job?.reason ?? ''}${deadlineHit ? ' (DEADLINE HIT)' : ''}`);
+  attachNewRows();
+  const bashRan = toolUses.includes('Bash');
+  console.log(`tool_use names seen: ${JSON.stringify(toolUses)}`);
+  console.log(bashRan
+    ? 'canUseTool verdict: Bash ran; if an APPROVAL INTERCEPT tool=Bash line appeared above, canUseTool IS called in auto, otherwise the SDK skipped it (deny rule unenforced in auto).'
+    : 'canUseTool verdict: INCONCLUSIVE - no Bash tool_use in the transcript.');`);
 
   const eventsFile = path.join(jobsRoot, created.jobId, 'events.jsonl');
   console.log('\n=== events.jsonl (attempt-* and precompact) ===');
