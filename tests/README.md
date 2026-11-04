@@ -373,7 +373,7 @@ that cannot be faked without testing the fake instead:
 
 ## Superagent core (Plan 2)
 
-`src/superagent/` is a library, not wired into `src/server.js`; only the `author` and `human` phase kinds run (the `milestone-1` fixture). One test file per module:
+`src/superagent/` is a library, not wired into `src/server.js`; the `author`, `review`, `per-task` and `human` phase kinds run (the `milestone-1` and `milestone-2` fixtures). One test file per module:
 
 | Module | Test file |
 |---|---|
@@ -397,4 +397,20 @@ The runner and end-to-end tests use the real `session-registry.js` with one `fak
 - **`maxTurns` semantics.** Whether it counts per prompt or per session in streaming input, and the real `error_max_turns` subtype.
 - **PreCompact through `sdkOptions.hooks`.** Whether a real firing reaches `events.jsonl` as a `precompact` line.
 
-Not in Plan 2 at all: router, verifier, review loops, per-task implementation, usage ledger, server wiring, worktree removal.
+Not built (as of Plan 3): router, brainstorm/stand-in, usage ledger and caps, UI, an answer/resume path for needs-you questions, server wiring, worktree removal.
+
+## Superagent pipeline (Plan 3)
+
+Unit and integration tested (no model, no network):
+
+- `superagent-pipeline.test.mjs` scenarios: the `milestone-2` happy path (spec to accept with two dependent tasks), a contested blocker reaching the verifier (`verified:false` proceeds as disputed-not-verified; confirmed parks `needs-you` with the evidence), the task review loop (changes, fix, approve; the verifier path at `taskReviewRounds`), and test-failure routing into fix tasks.
+- Results validator rules (`superagent-results.test.mjs`): review verdict/findings and dispositions, `tasks.json` shape (ids of at most 12 characters, no deadlocking dependencies), per-purpose required outputs, implement report and commit evidence.
+- Sequencer loop rules (`superagent-sequencer.test.mjs`): review loop rounds and the failed-attempt cap, final-pass blocker rule, per-task launch order, test routing.
+
+Only observed by the manual probe `tests/superagent-pipeline.manual.mjs` (not yet run; no cost cap beyond a 40-minute deadline and the attempt limits; maxRounds stays at the fixture default of 3 because config cannot override it):
+
+- Whether real reviewers produce a parseable verdict/findings with the dispositions the validator wants.
+- Whether real planners produce a valid `tasks.json` with ids of at most 12 characters.
+- Whether the real implementer reports the `verify` check.
+- Whether `auto` mode lets workers commit in every phase.
+- How long a full pipeline takes.
