@@ -1,0 +1,456 @@
+// Superagent runner: launches one attempt at a time per job as a registry
+// session, watches it, and records exactly one attempt-ended for it.
+//
+// Spec: docs/superpowers/specs/2026-11-03-superagent-design.md.
+// - Worker contract (completion detection): an attempt is finished when its
+//   turn has ended (row idle, nothing queued, a `result` seen since the last
+//   prompt) and result.json is read. A missing result gets one nudge; a second
+//   miss fails the attempt (turn-cap, invalid-result or no-result). No worker
+//   progress for limits.stallMinutes fails it as stalled; only PROGRESS_TYPES
+//   count as progress, so telemetry (rate-limit, status) cannot keep a dead
+//   worker alive.
+// - Permissions (spike S1): every ask from a worker is denied with
+//   UNATTENDED_DENY_MESSAGE, whatever the permission mode. The session is
+//   started with interceptEveryPermission so asks reach the interceptor at all.
+//   The one exception is a brainstormer's AskUserQuestion, which falls through
+//   to the human (automatic-mode routing is Plan 5).
+// - Context drift (spike S2): PreCompact is an observation point only. The hook
+//   logs a `precompact` event and lets compaction continue.
+//
+// One finish per attempt: every path that may end an attempt (turn end,
+// stall, removal, stopAttempt, launch failure) calls claim() before its first
+// await. claim() is synchronous and refuses if live.finishing is already set,
+// so two paths racing on one attempt can never both append attempt-ended. The
+// nudge is the only non-terminal claimer: it releases the claim and replays a
+// removal recorded meanwhile.
+//
+// live.sessionId is stamped synchronously right after createSession, before
+// the first await: the approval interceptor and the removal listener look the
+// attempt up by session id and either can fire during that await (same reason
+// as src/autopilot.js:517).
+import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
+import { RESULT_FILE, attemptDir, outcomeForResult, primaryRepo, readResult, validateResult } from './results.js';
+import { UNATTENDED_DENY_MESSAGE, buildWorkerPrompt, nudgeText } from './prompts.js';
+import { failureSignature } from './sequencer.js';
+import { defaultGit } from './worktree.js';
+
+export const PROGRESS_TYPES = new Set(['assistant', 'user', 'result']);
+
+const failed = (reason, detail) => ({ outcome: 'failed', reason, signature: failureSignature(reason, detail) });
+const messageOf = (err) => String(err?.message ?? err);
+
+export function createRunner({
+  registry,
+  store,
+  results = { readResult, validateResult },
+  git = defaultGit,
+  now = Date.now,
+  idImpl = randomUUID,
+  logImpl = console.error,
+  projectDirFor = (job) => primaryRepo(job).origin,
+}) {
+  const lives = new Map();
+  const bySession = new Map();
+  const tracked = new Set();
+  let stopping = false;
+
+  function log(message, err) {
+    try {
+      logImpl(`superagent runner: ${message}${err === undefined ? '' : `: ${messageOf(err)}`}`);
+    } catch { /* logging must never break the runner */ }
+  }
+
+  function track(promise) {
+    const settled = promise.catch((err) => log('unexpected failure', err));
+    tracked.add(settled);
+    settled.finally(() => tracked.delete(settled));
+    return settled;
+  }
+
+  function claim(live, work) {
+    if (live.finishing) return null;
+    live.finishing = track(Promise.resolve().then(work));
+    return live.finishing;
+  }
+
+  function drop(live) {
+    if (lives.get(live.jobId) === live) lives.delete(live.jobId);
+    if (live.sessionId && bySession.get(live.sessionId) === live) bySession.delete(live.sessionId);
+  }
+
+  function closeRow(live) {
+    if (!live.sessionId || !registry.get(live.sessionId)) return;
+    try {
+      registry.closeSession(live.sessionId);
+    } catch (err) {
+      log(`could not close session ${live.sessionId}`, err);
+    }
+  }
+
+  const endedEvent = (live, payload) => ({ type: 'attempt-ended', attemptId: live.attemptId, ...payload });
+
+  async function finish(live, payload) {
+    live.intended = true;
+    try {
+      await store.append(live.jobId, endedEvent(live, payload));
+      live.pendingEnd = null;
+      drop(live);
+    } catch (err) {
+      live.pendingEnd = payload;
+      log(`could not record the end of attempt ${live.attemptId}, will retry`, err);
+    }
+    closeRow(live);
+  }
+
+  // A rejected append may still have landed, so look before appending again.
+  function retryPendingEnd(live) {
+    if (!live.retrying) {
+      live.retrying = track((async () => {
+        try {
+          const job = await store.load(live.jobId);
+          const landed = job.attempts.some((a) => a.attemptId === live.attemptId && a.outcome);
+          if (!landed) await store.append(live.jobId, endedEvent(live, live.pendingEnd));
+          live.pendingEnd = null;
+          drop(live);
+          closeRow(live);
+        } catch (err) {
+          log(`could not record the end of attempt ${live.attemptId}, will retry`, err);
+        } finally {
+          live.retrying = null;
+        }
+      })());
+    }
+    return live.retrying;
+  }
+
+  async function safeRead(dir) {
+    try {
+      return await results.readResult(dir);
+    } catch (err) {
+      return { state: 'unparseable', error: messageOf(err) };
+    }
+  }
+
+  // { read, payload } for a valid result, { read, invalid } for a present but
+  // invalid one, { read } otherwise.
+  async function judge(attempt, job) {
+    const read = await safeRead(attempt.dir);
+    if (read.state !== 'present') return { read };
+    let verdict;
+    try {
+      verdict = await results.validateResult(read.value, {
+        expected: { jobId: attempt.jobId, phaseId: attempt.phase, taskId: attempt.task ?? null, attemptId: attempt.attemptId },
+        phase: job?.pipeline.find((p) => p.phase === attempt.phase),
+        job,
+        git,
+      });
+    } catch (err) {
+      verdict = { ok: false, errors: [messageOf(err)] };
+    }
+    if (!verdict.ok) return { read, invalid: failed('invalid-result', verdict.errors?.[0] ?? '') };
+    const r = verdict.result;
+    return { read, payload: { summary: r.summary, artifacts: r.artifacts, commits: r.commits, question: r.question ?? null, ...outcomeForResult(r) } };
+  }
+
+  function releaseClaim(live) {
+    live.finishing = null;
+    const reason = live.removedReason;
+    if (reason == null) return;
+    live.removedReason = null;
+    if (lives.get(live.jobId) === live) removed(live, reason);
+  }
+
+  function removed(live, reason) {
+    if (live.intended) return;
+    if (stopping) {
+      drop(live);
+      return;
+    }
+    if (live.finishing) {
+      live.removedReason = reason;
+      return;
+    }
+    claim(live, async () => {
+      const verdict = await judge(live, store.get(live.jobId));
+      await finish(live, verdict.payload ?? failed('no-result', `session ${reason}`));
+    });
+  }
+
+  async function nudge(live) {
+    const kind = live.lastResultSubtype === 'error_max_turns' ? 'turn-cap' : 'result';
+    live.nudge = kind;
+    try {
+      await store.append(live.jobId, { type: 'attempt-nudged', attemptId: live.attemptId, kind });
+    } catch (err) {
+      log(`could not record the nudge for attempt ${live.attemptId}`, err);
+    }
+    const row = registry.get(live.sessionId);
+    if (row && !stopping) {
+      live.promptSeq = row.eventLog.nextSeq - 1;
+      live.sawResult = false;
+      try {
+        await registry.sendInput(row.id, nudgeText(kind, { dir: live.dir }));
+      } catch (err) {
+        // Row gone: the removal path owns the attempt. Row still there: the
+        // stall deadline ends it.
+        if (registry.get(row.id)) log(`could not nudge attempt ${live.attemptId}`, err);
+      }
+    }
+    releaseClaim(live);
+  }
+
+  async function processTurnEnd(live) {
+    const verdict = await judge(live, store.get(live.jobId));
+    if (verdict.payload) return finish(live, verdict.payload);
+    if (verdict.invalid) return finish(live, verdict.invalid);
+    if (live.nudge === null) return nudge(live);
+    if (live.sawMaxTurns) return finish(live, failed('turn-cap', 'turn limit reached'));
+    if (verdict.read.state === 'unparseable') return finish(live, failed('invalid-result', verdict.read.error));
+    return finish(live, failed('no-result', `no ${RESULT_FILE} after a nudge`));
+  }
+
+  function scan(live, row) {
+    for (const { seq, message } of row.eventLog.entries) {
+      if (seq <= live.scannedThrough) continue;
+      live.scannedThrough = seq;
+      if (!PROGRESS_TYPES.has(message?.type)) continue;
+      live.lastProgressAt = now();
+      if (message.type === 'result' && seq > live.promptSeq) {
+        live.sawResult = true;
+        live.lastResultSubtype = message.subtype ?? null;
+        live.sawMaxTurns ||= message.subtype === 'error_max_turns';
+      }
+    }
+  }
+
+  async function review(job) {
+    const live = lives.get(job.jobId);
+    if (!live) return;
+    if (live.pendingEnd) return retryPendingEnd(live);
+    if (stopping || live.finishing || !live.sessionId) return;
+    const row = registry.get(live.sessionId);
+    if (!row) return;
+    scan(live, row);
+    if (row.state === 'idle' && row.queue.length === 0 && live.sawResult) {
+      await claim(live, () => processTurnEnd(live));
+      return;
+    }
+    const stallMinutes = job.limits.stallMinutes;
+    if (row.pendingApprovals.length === 0 && now() - live.lastProgressAt >= stallMinutes * 60_000) {
+      await claim(live, () => finish(live, failed('stalled', `no worker progress for ${stallMinutes} minutes`)));
+    }
+  }
+
+  async function endLaunch(live, err) {
+    log(`launch of attempt ${live.attemptId} failed`, err);
+    const claimed = claim(live, () => finish(live, failed('launch-failed', messageOf(err))));
+    if (claimed) await claimed;
+    return { error: 'launch-failed' };
+  }
+
+  // Re-checked after every await before the attempt gets a session.
+  async function gate(live) {
+    if (live.finishing) return { error: 'job-not-running' };
+    if (stopping) {
+      drop(live);
+      return { error: 'stopping' };
+    }
+    if (store.get(live.jobId)?.state !== 'running') {
+      await claim(live, () => finish(live, { outcome: 'stopped' }));
+      return { error: 'job-not-running' };
+    }
+    return null;
+  }
+
+  function preCompactHook(jobId, attemptId) {
+    return async (input) => {
+      try {
+        await store.append(jobId, { type: 'precompact', attemptId, trigger: input?.trigger ?? null });
+      } catch (err) {
+        log(`could not record a precompact for attempt ${attemptId}`, err);
+      }
+      return { continue: true };
+    };
+  }
+
+  async function launch(job, action) {
+    if (stopping) return { error: 'stopping' };
+    const { jobId } = job;
+    if (lives.has(jobId)) return { error: 'busy' };
+    const task = action.task ?? null;
+    let attemptId;
+    let dir;
+    try {
+      attemptId = idImpl();
+      dir = attemptDir(primaryRepo(job).worktree, { jobId, phase: action.phase, task, attemptId });
+    } catch (err) {
+      log(`could not prepare an attempt for job ${jobId}`, err);
+      return { error: 'launch-failed' };
+    }
+    const live = {
+      jobId,
+      attemptId,
+      role: action.role,
+      phase: action.phase,
+      task,
+      dir,
+      sessionId: null,
+      scannedThrough: 0,
+      lastProgressAt: now(),
+      promptSeq: 0,
+      sawResult: false,
+      sawMaxTurns: false,
+      lastResultSubtype: null,
+      nudge: null,
+      finishing: null,
+      removedReason: null,
+      pendingEnd: null,
+      intended: false,
+      retrying: null,
+    };
+    lives.set(jobId, live);
+
+    try {
+      await mkdir(dir, { recursive: true });
+      await store.append(jobId, {
+        type: 'attempt-started',
+        attemptId,
+        phase: action.phase,
+        task,
+        role: action.role,
+        model: action.model,
+        n: action.n,
+        recovery: action.recovery,
+        previousAttemptId: action.previousAttemptId,
+        dir,
+      });
+    } catch (err) {
+      drop(live);
+      log(`could not record the start of attempt ${attemptId}`, err);
+      return { error: 'store-failed' };
+    }
+    let blocked = await gate(live);
+    if (blocked) return blocked;
+
+    let prompt;
+    try {
+      const current = store.get(jobId) ?? job;
+      prompt = await buildWorkerPrompt({
+        role: action.role,
+        job: current,
+        phase: current.pipeline.find((p) => p.phase === action.phase),
+        attempt: { attemptId, phase: action.phase, task, role: action.role, n: action.n, recovery: action.recovery, previousAttemptId: action.previousAttemptId, dir },
+        projectDir: projectDirFor(current),
+      });
+    } catch (err) {
+      return endLaunch(live, err);
+    }
+    blocked = await gate(live);
+    if (blocked) return blocked;
+
+    const current = store.get(jobId) ?? job;
+    const primary = primaryRepo(current);
+    let row;
+    try {
+      row = registry.createSession({
+        cwd: primary.worktree,
+        provider: 'claude',
+        model: action.model,
+        effort: action.effort ?? undefined,
+        permissionMode: current.workerPermissionMode,
+        name: null,
+        sdkOptions: {
+          additionalDirectories: current.repos.filter((r) => r !== primary).map((r) => r.worktree),
+          maxTurns: action.maxTurns,
+          appendSystemPrompt: prompt.system,
+          interceptEveryPermission: true,
+          hooks: { PreCompact: [{ hooks: [preCompactHook(jobId, attemptId)] }] },
+        },
+      });
+    } catch (err) {
+      return endLaunch(live, err);
+    }
+    live.sessionId = row.id;
+    live.promptSeq = live.scannedThrough = row.eventLog.nextSeq - 1;
+    live.lastProgressAt = now();
+    bySession.set(row.id, live);
+
+    try {
+      await store.append(jobId, { type: 'attempt-session', attemptId, sessionId: row.id });
+    } catch (err) {
+      return endLaunch(live, err);
+    }
+    // A removal or stop during that await owns the attempt. While stopping,
+    // shutdown closes the row and the attempt stays in flight for reconcile.
+    if (live.finishing || !registry.get(row.id) || stopping) return { attemptId };
+
+    try {
+      await registry.sendInput(row.id, prompt.card);
+    } catch (err) {
+      if (!registry.get(row.id)) return { attemptId };
+      return endLaunch(live, err);
+    }
+    return { attemptId };
+  }
+
+  async function reconcile(job) {
+    for (const attempt of job.attempts) {
+      if (attempt.outcome) continue;
+      if (lives.get(job.jobId)?.attemptId === attempt.attemptId) continue;
+      const verdict = attempt.dir ? await judge({ ...attempt, jobId: job.jobId }, job) : {};
+      await store.append(job.jobId, { type: 'attempt-ended', attemptId: attempt.attemptId, ...(verdict.payload ?? { outcome: 'interrupted' }) });
+    }
+  }
+
+  async function stopAttempt(jobId) {
+    for (;;) {
+      const live = lives.get(jobId);
+      if (!live) return;
+      if (live.pendingEnd) {
+        await retryPendingEnd(live);
+        return;
+      }
+      if (live.finishing) {
+        const before = live.finishing;
+        await before;
+        if (lives.get(jobId) === live && live.finishing === before && !live.pendingEnd) return;
+        continue;
+      }
+      await claim(live, () => finish(live, { outcome: 'stopped' }));
+      return;
+    }
+  }
+
+  function onApprovalRequest({ row, request }) {
+    const live = bySession.get(row?.id);
+    if (!live) return null;
+    if (live.role === 'brainstormer' && request?.toolName === 'AskUserQuestion') return null;
+    return { behavior: 'deny', message: UNATTENDED_DENY_MESSAGE };
+  }
+
+  function onSessionRemoved({ id, reason }) {
+    const live = bySession.get(id);
+    if (!live) return;
+    removed(live, reason);
+  }
+
+  async function drain() {
+    while (tracked.size) await Promise.allSettled([...tracked]);
+  }
+
+  return {
+    launch,
+    review,
+    reconcile,
+    stopAttempt,
+    onApprovalRequest,
+    onSessionRemoved,
+    liveCount: () => lives.size,
+    isLive: (jobId) => lives.has(jobId),
+    setStopping(flag) {
+      stopping = Boolean(flag);
+    },
+    drain,
+  };
+}

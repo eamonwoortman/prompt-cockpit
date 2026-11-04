@@ -75,7 +75,7 @@ function staysInsideWorktree(p) {
   return norm !== '..' && !norm.startsWith('../');
 }
 
-function primaryRepo(job) {
+export function primaryRepo(job) {
   return job.repos.find((r) => r.id === 'primary') ?? job.repos[0];
 }
 
