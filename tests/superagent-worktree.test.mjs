@@ -17,6 +17,15 @@ async function setup(opts) {
   return { root, origin, sha };
 }
 
+test('slugify caps the title base at 40 by default and at maxBase when given, trimming trailing hyphens after the cap', () => {
+  const title = 'Add a hello endpoint and wire it into the router with tests';
+  assert.equal(slugify(title, '12345678-aaaa'), 'add-a-hello-endpoint-and-wire-it-into-th-12345678');
+  assert.equal(slugify(title, '12345678-aaaa', 40), slugify(title, '12345678-aaaa'));
+  assert.equal(slugify(title, '12345678-aaaa', 12), 'add-a-hello-12345678', 'the cap lands after "hello-" and the hyphen is trimmed');
+  assert.equal(slugify(title, '12345678-aaaa', 8), 'add-a-he-12345678');
+  assert.equal(slugify('Add hello!', '12345678-aaaa', 12), 'add-hello-12345678');
+});
+
 test('createWorktree makes branch superagent/<slug> from HEAD and records the base', async () => {
   const { root, origin, sha } = await setup();
   const branch = `superagent/${slugify('Add hello!', '12345678-aaaa')}`;

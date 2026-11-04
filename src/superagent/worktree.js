@@ -11,12 +11,12 @@ import path from 'node:path';
 
 export const BRANCH_PREFIX = 'superagent/';
 
-export function slugify(title, jobId) {
+export function slugify(title, jobId, maxBase = 40) {
   const base = String(title ?? '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 40)
+    .slice(0, maxBase)
     .replace(/-+$/g, '');
   return `${base || 'job'}-${String(jobId).slice(0, 8)}`;
 }

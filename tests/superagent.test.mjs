@@ -9,7 +9,7 @@ import { tempDir, initRepo, sessionFactory, jobCreated, deferred, taskCreated, e
 import { createSuperagentStore } from '../src/superagent/store.js';
 import { createSuperagentConfig, defaultConfig, MILESTONE_1_PIPELINE, MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import { RESULT_FILE, artifactPaths, attemptDir } from '../src/superagent/results.js';
-import { createWorktree, defaultGit } from '../src/superagent/worktree.js';
+import { createWorktree, defaultGit, slugify } from '../src/superagent/worktree.js';
 import { createSuperagent, TICK_MS } from '../src/superagent/index.js';
 
 const quiet = () => {};
@@ -49,6 +49,7 @@ async function harness({ configJson = {}, ...over } = {}) {
       clearIntervalImpl: () => {},
       stopTickDeadlineMs: 20,
       logImpl: quiet,
+      platform: 'linux',
       ...opts,
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
@@ -503,10 +504,6 @@ test('a corrupt job is listed as failed and never appended to', async () => {
   } finally { registry._reset(); }
 });
 
-// Milestone-2 attempt directories nest a task id, which overruns the win32
-// guard under a temp-dir root; these tests are about the actions, the guard
-// has its own test below.
-const m2 = (over = {}) => harness({ platform: 'linux', ...over });
 const createM2 = (h, over = {}) => create(h, { fixture: 'milestone-2', ...over });
 
 let synthetic = 0;
@@ -584,7 +581,7 @@ const writeTasksFile = async (job, text) => {
 
 test('createJob with the milestone-2 fixture provisions and validates', async () => {
   try {
-    const h = await m2();
+    const h = await harness();
     const job = await createM2(h);
     assert.equal(job.state, 'running');
     assert.equal(job.pipeline.length, 7);
@@ -596,7 +593,7 @@ test('createJob with the milestone-2 fixture provisions and validates', async ()
 
 test('createJob rejects a pipeline whose role has no template with ERR_NO_TEMPLATE, and the default pipeline fails on brainstormer', async () => {
   try {
-    const plain = await m2();
+    const plain = await harness();
     await assert.rejects(create(plain, { fixture: undefined }), (err) => {
       assert.equal(err.code, 'ERR_NO_TEMPLATE');
       assert.deepEqual(err.roles, ['brainstormer']);
@@ -610,7 +607,7 @@ test('createJob rejects a pipeline whose role has no template with ERR_NO_TEMPLA
       if (p.phase === 'implement') return { ...p, taskReview: 'ghost-reviewer' };
       return p;
     });
-    const h = await m2({ configJson: (repo) => ({ projects: { [repo]: { pipeline, models: { 'ghost-writer': ghost, 'ghost-reviewer': ghost } } } }) });
+    const h = await harness({ configJson: (repo) => ({ projects: { [repo]: { pipeline, models: { 'ghost-writer': ghost, 'ghost-reviewer': ghost } } } }) });
     await assert.rejects(create(h, { fixture: undefined }), (err) => {
       assert.equal(err.code, 'ERR_NO_TEMPLATE');
       assert.deepEqual(err.roles, ['brainstormer', 'ghost-writer', 'ghost-reviewer']);
@@ -624,7 +621,7 @@ test('createJob rejects a pipeline whose role has no template with ERR_NO_TEMPLA
 
 test('a project override template satisfies the check', async () => {
   try {
-    const h = await m2();
+    const h = await harness();
     const overrides = path.join(h.repo, '.superpowers', 'superagent', 'prompts');
     await fs.mkdir(overrides, { recursive: true });
     await fs.writeFile(path.join(overrides, 'brainstormer.md'), '# Brainstormer\n');
@@ -634,15 +631,94 @@ test('a project override template satisfies the check', async () => {
   } finally { registry._reset(); }
 });
 
-test('createJob on win32 with a long COCKPIT_HOME-style root rejects with ERR_PATH_TOO_LONG; a short root passes', async () => {
+// The win32 guard's arithmetic, written out independently of index.js:
+// <root>/<slug>/primary/.superpowers/superagent/<jobId>/attempts/<phase>
+// [/<12-char task>]/<36-char attempt id>/result.json.tmp. milestone-1's
+// longest phase is spec; milestone-2's is implement with a task segment.
+const FIXED_JOB = '0123abcd-0000-4000-8000-000000000000';
+const M1_LONGEST = ['spec'];
+const M2_LONGEST = ['implement', 'f'.repeat(12)];
+const longestPath = (root, slug, segments) => path.join(path.resolve(root), slug, 'primary', '.superpowers', 'superagent', FIXED_JOB, 'attempts', ...segments, 'f'.repeat(36), 'result.json.tmp').length;
+// A root under the harness's temp dir for which the longest path is `length`.
+const rootFor = (base, slug, segments, length) => {
+  const pad = length - longestPath(base, slug, segments) - 1;
+  assert.ok(pad > 0, 'the temp dir leaves room for the boundary root');
+  const root = path.join(base, 'w'.repeat(pad));
+  assert.equal(longestPath(root, slug, segments), length);
+  return root;
+};
+const win32 = (worktreesRoot) => harness({ platform: 'win32', worktreesRoot, idImpl: () => FIXED_JOB });
+
+test('createJob on win32: an attempt path of exactly 259 characters passes and 260 is refused', async () => {
   try {
     const probe = await harness();
+    const slug = 'abcdefgh-0123abcd';
+    const atLimit = rootFor(probe.root, slug, M1_LONGEST, 259);
+    const fits = await win32(atLimit);
+    const job = await create(fits, { title: 'abcdefgh' });
+    assert.equal(job.state, 'running');
+    assert.equal(job.slug, slug);
+
+    const over = await win32(`${atLimit}w`);
+    await assert.rejects(create(over, { title: 'abcdefgh' }), (err) => {
+      assert.equal(err.code, 'ERR_PATH_TOO_LONG');
+      assert.deepEqual([err.length, err.limit], [260, 259]);
+      assert.match(err.message, /COCKPIT_HOME/);
+      return true;
+    });
+    await noJobDirs(over.jobsRoot);
+  } finally { registry._reset(); }
+});
+
+test('createJob on win32 cuts a long title to fit the root and creates the job', async () => {
+  try {
+    const probe = await harness();
+    const title = 'Add a hello endpoint and wire it into the router with tests';
+    // Twelve title characters fit: the cut lands after "hello-", which is trimmed.
+    const root = rootFor(probe.root, '-0123abcd', M1_LONGEST, 259 - 12);
+    const h = await win32(root);
+    const job = await create(h, { title });
+    assert.equal(job.state, 'running');
+    assert.equal(job.slug, 'add-a-hello-0123abcd');
+    assert.ok(longestPath(root, job.slug, M1_LONGEST) <= 259);
+    assert.equal(job.branch, 'superagent/add-a-hello-0123abcd');
+  } finally { registry._reset(); }
+});
+
+test('createJob on win32 with a 59-character worktrees root (the default COCKPIT_HOME here) accepts milestone-2 with a normal title', async (t) => {
+  const probe = await harness();
+  const pad = 59 - path.resolve(probe.root).length - 1;
+  if (pad < 1) {
+    t.skip(`the temp dir ${probe.root} is longer than a 59-character root`);
+    return;
+  }
+  try {
+    const root = path.join(path.resolve(probe.root), 'w'.repeat(pad));
+    assert.equal(root.length, 59);
+    const title = 'Add a hello endpoint and wire it into the router with tests';
+    const h = await win32(root);
+    const job = await createM2(h, { title });
+    assert.equal(job.state, 'running');
+    const maxBase = 259 - longestPath(root, '-0123abcd', M2_LONGEST);
+    assert.ok(maxBase >= 30 && maxBase < 40, `${maxBase} title characters fit`);
+    assert.equal(job.slug, slugify(title, FIXED_JOB, maxBase));
+    assert.ok(longestPath(root, job.slug, M2_LONGEST) <= 259);
+  } finally { registry._reset(); }
+});
+
+test('createJob on win32 refuses a root too long for an 8-character title, writing nothing', async () => {
+  try {
+    const probe = await harness();
+    // Seven title characters would fit: one short of the minimum.
+    const tight = await win32(rootFor(probe.root, '-0123abcd', M1_LONGEST, 259 - 7));
+    await assert.rejects(create(tight), { code: 'ERR_PATH_TOO_LONG', length: 260, limit: 259 });
+    await noJobDirs(tight.jobsRoot);
+
     const longRoot = path.join(probe.root, 'x'.repeat(150), 'worktrees');
-    const long = await harness({ platform: 'win32', worktreesRoot: longRoot });
+    const long = await win32(longRoot);
     await assert.rejects(create(long), (err) => {
       assert.equal(err.code, 'ERR_PATH_TOO_LONG');
       assert.match(err.message, /COCKPIT_HOME/);
-      assert.ok(err.length > 240);
       return true;
     });
     await noJobDirs(long.jobsRoot);
@@ -650,34 +726,15 @@ test('createJob on win32 with a long COCKPIT_HOME-style root rejects with ERR_PA
 
     // Off win32 the preflight is skipped and the job is created (on a Windows
     // host its provisioning then fails on the real path limit).
-    const elsewhere = await harness({ platform: 'linux', worktreesRoot: longRoot });
+    const elsewhere = await harness({ worktreesRoot: longRoot });
     assert.ok(['running', 'failed'].includes((await create(elsewhere)).state));
     assert.equal((await elsewhere.store.listJobIds()).length, 1);
-
-    // Exactly at the limit passes, one character over is refused. milestone-1's
-    // longest path is spec's: <root>/<slug>/primary/.superpowers/superagent/
-    // <jobId>/attempts/spec/<36-char attempt id>/result.json.tmp.
-    const jobId = '0123abcd-0000-4000-8000-000000000000';
-    const longestFor = (root) => path.join(path.resolve(root), 'add-hello-0123abcd', 'primary', '.superpowers', 'superagent', jobId, 'attempts', 'spec', 'f'.repeat(36), 'result.json.tmp').length;
-    const pad = 240 - longestFor(probe.root) - 1;
-    assert.ok(pad > 0, 'the temp dir leaves room for the boundary roots');
-    const atLimit = path.join(probe.root, 'w'.repeat(pad));
-    assert.equal(longestFor(atLimit), 240);
-    const fits = await harness({ platform: 'win32', worktreesRoot: atLimit, idImpl: () => jobId });
-    assert.equal((await create(fits)).state, 'running');
-    const over = await harness({ platform: 'win32', worktreesRoot: `${atLimit}w`, idImpl: () => jobId });
-    await assert.rejects(create(over), { code: 'ERR_PATH_TOO_LONG', length: 241, limit: 240 });
-
-    // milestone-2 adds a 24-character task id bound under implement, so the
-    // root that fits milestone-1 exactly is refused for it.
-    const m2Over = await harness({ platform: 'win32', worktreesRoot: atLimit, idImpl: () => jobId });
-    await assert.rejects(createM2(m2Over), { code: 'ERR_PATH_TOO_LONG', length: 240 - '/spec'.length + '/implement'.length + 25 });
   } finally { registry._reset(); }
 });
 
 test('tick: a finished review loop appends phase-completed and the phase index advances', async () => {
   try {
-    const h = await m2();
+    const h = await harness();
     const job = await createM2(h);
     await advanceTo(h, job, 'spec-review');
     await recordAttempt(h, job, { phase: 'spec-review', purpose: 'review', round: 1, verdict: 'approve', findings: [] });
@@ -696,7 +753,7 @@ test('tick: a finished review loop appends phase-completed and the phase index a
 
 test('tick: load-tasks appends tasks-loaded once; an invalid tasks.json parks the job needs-you stuck with the errors', async () => {
   try {
-    const h = await m2();
+    const h = await harness();
     const job = await createM2(h);
     await advanceTo(h, job, 'implement');
     await writeTasksFile(job, JSON.stringify([{ id: 'T1', title: 'One', repos: ['primary'], dependsOn: [], acceptance: 'it works', verify: '' }]));
@@ -712,7 +769,7 @@ test('tick: load-tasks appends tasks-loaded once; an invalid tasks.json parks th
     assert.deepEqual([launched.phase, launched.task, launched.purpose], ['implement', 'T1', 'implement']);
     await h.sa.stop();
 
-    const missing = await m2();
+    const missing = await harness();
     const missingJob = await createM2(missing);
     await advanceTo(missing, missingJob, 'implement');
     await missing.sa.tick();
@@ -722,7 +779,7 @@ test('tick: load-tasks appends tasks-loaded once; an invalid tasks.json parks th
     assert.match(parked.detail.errors[0], /tasks\.json/);
     assert.equal(missing.sa.getJob(missingJob.jobId).state, 'needs-you');
 
-    const bad = await m2();
+    const bad = await harness();
     const badJob = await createM2(bad);
     await advanceTo(bad, badJob, 'implement');
     await writeTasksFile(badJob, '{"id":"T1"}');
@@ -734,11 +791,34 @@ test('tick: load-tasks appends tasks-loaded once; an invalid tasks.json parks th
   } finally { registry._reset(); }
 });
 
+test('tick: a tasks.json read error other than a missing file is logged and retried, not parked', async () => {
+  try {
+    const logs = [];
+    const h = await harness({ logImpl: (line) => logs.push(line) });
+    const job = await createM2(h);
+    await advanceTo(h, job, 'implement');
+    // A directory where the file should be: readFile fails with EISDIR.
+    const file = path.join(job.repos[0].worktree, ...artifactPaths(job).tasks.split('/'));
+    await fs.mkdir(file, { recursive: true });
+    const before = h.events(job.jobId).length;
+    await h.sa.tick();
+    assert.equal(h.events(job.jobId).length, before, 'nothing appended');
+    assert.equal(h.sa.getJob(job.jobId).state, 'running');
+    assert.ok(logs.some((line) => /tick failed for job/.test(line) && /EISDIR/.test(line)), logs.join('\n'));
+
+    await fs.rm(file, { recursive: true });
+    await writeTasksFile(job, JSON.stringify([{ id: 'T1', title: 'One', repos: ['primary'], dependsOn: [], acceptance: 'it works', verify: '' }]));
+    await h.sa.tick();
+    assert.equal(h.events(job.jobId).at(-1).type, 'tasks-loaded');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('tick: route-test-failure appends one test-routed event; replaying the tick after a rejected-but-landed append appends nothing more', async () => {
   const spy = rejectionSpy();
   try {
     const { arm, openImpl } = failingAppendOpen();
-    const h = await m2({ storeOpts: { openImpl } });
+    const h = await harness({ storeOpts: { openImpl } });
     const job = await createM2(h);
     await advanceTo(h, job, 'test');
     const findings = [{ id: 'F1', severity: 'major', text: 'GET /hello returns 500' }];
@@ -779,7 +859,7 @@ test('tick: route-test-failure appends one test-routed event; replaying the tick
 
 test('getJob exposes completions with unresolved findings and verifier evidence after a restart', async () => {
   try {
-    const h = await m2();
+    const h = await harness();
     const job = await createM2(h);
     await advanceTo(h, job, 'spec-review');
     await reviewToVerdict(h, job, false);
@@ -787,7 +867,7 @@ test('getJob exposes completions with unresolved findings and verifier evidence 
     assert.equal(h.events(job.jobId).at(-1).type, 'phase-completed');
     await h.sa.stop();
 
-    const fresh = await h.restart({ platform: 'linux' });
+    const fresh = await h.restart();
     await fresh.sa.start();
     const got = fresh.sa.getJob(job.jobId);
     const evidence = 'src/app.js:12 throws on a missing file';
@@ -815,7 +895,7 @@ test('getJob exposes completions with unresolved findings and verifier evidence 
 
 test('a verified blocker parks the job needs-you with the blocker text and evidence', async () => {
   try {
-    const h = await m2();
+    const h = await harness();
     const job = await createM2(h);
     await advanceTo(h, job, 'spec-review');
     await reviewToVerdict(h, job, true);

@@ -536,7 +536,7 @@ test('parseTasks accepts a minimal valid list and fills origin/fromAttemptId', (
     { id: 'T1', title: 'Task T1', repos: ['primary'], dependsOn: [], acceptance: 'T1 works.', verify: '', origin: 'plan', fromAttemptId: null },
     { id: 't-2', title: 'Task t-2', repos: ['lib', 'primary'], dependsOn: ['T1'], acceptance: 't-2 works.', verify: 'npm test', origin: 'plan', fromAttemptId: null },
   ]);
-  assert.equal(parseTasks(JSON.stringify([task('a'.repeat(24))]), libJob()).ok, true, 'a 24-character id is allowed');
+  assert.equal(parseTasks(JSON.stringify([task('a'.repeat(12))]), libJob()).ok, true, 'a 12-character id is allowed');
 });
 
 test('parseTasks rejects malformed lists, naming the field', () => {
@@ -561,7 +561,7 @@ test('parseTasks rejects malformed lists, naming the field', () => {
     ['an id with a path separator', JSON.stringify([task('a/b')]), /tasks\[0\]\.id/],
     ['an id with a backslash', JSON.stringify([task('a\\b')]), /tasks\[0\]\.id/],
     ['an id with a space', JSON.stringify([task('a b')]), /tasks\[0\]\.id/],
-    ['an id over 24 chars', JSON.stringify([task('a'.repeat(25))]), /tasks\[0\]\.id/],
+    ['an id over 12 chars', JSON.stringify([task('a'.repeat(13))]), /tasks\[0\]\.id must be 1-12/],
     ['an id starting with a hyphen', JSON.stringify([task('-a')]), /tasks\[0\]\.id/],
     ['a non-string verify', JSON.stringify([task('T1', { verify: null })]), /tasks\[0\]\.verify/],
   ];

@@ -104,7 +104,7 @@ export function reviseOutputs(job, phase) {
 // Ids become path segments (tasks/<id>-report.md), so uniqueness and the
 // reserved generated-fix pattern are compared case-insensitively: T1 and t1
 // would share one report file on a case-insensitive filesystem.
-const TASK_ID_RE = /^[a-z0-9][a-z0-9-]{0,23}$/i;
+const TASK_ID_RE = /^[a-z0-9][a-z0-9-]{0,11}$/i;
 const FIX_TASK_ID_RE = /^F-[0-9a-f]{8}$/i;
 
 // Iterative DFS; returns the ids on the first cycle found, in path order.
@@ -153,7 +153,7 @@ export function parseTasks(text, job) {
     const at = `tasks[${i}]`;
     if (!isPlainObject(t)) return errors.push(`${at} must be an object`);
     const idOk = typeof t.id === 'string' && TASK_ID_RE.test(t.id);
-    if (!idOk) errors.push(`${at}.id must be 1-24 letters, digits or hyphens, starting with a letter or digit: ${JSON.stringify(t.id)}`);
+    if (!idOk) errors.push(`${at}.id must be 1-12 letters, digits or hyphens, starting with a letter or digit: ${JSON.stringify(t.id)}`);
     else if (FIX_TASK_ID_RE.test(t.id)) errors.push(`${at}.id: ${JSON.stringify(t.id)} is reserved for generated fix tasks (F-<8 hex>)`);
     else if (seen.has(t.id.toLowerCase())) errors.push(`${at}.id: duplicate id ${JSON.stringify(t.id)}`);
     if (idOk) seen.add(t.id.toLowerCase());

@@ -30,11 +30,14 @@ import { BRANCH_PREFIX, archiveLedger, createWorktree, defaultGit, listOrphanWor
 
 export const TICK_MS = 15_000;
 
-// Decision 14: phase and task ids are bounded at 24 characters by validation,
-// attempt ids are uuids.
-const WIN32_PATH_LIMIT = 240;
-const TASK_ID_MAX = 24;
+// Decision 14: MAX_PATH less its terminating NUL. Validation bounds phase ids
+// at 24 characters and task ids at 12; attempt ids are uuids. On win32 the
+// title part of the slug shrinks to fit, down to SLUG_BASE_MIN.
+const WIN32_PATH_LIMIT = 259;
+const TASK_ID_MAX = 12;
 const ATTEMPT_ID_LENGTH = 36;
+const SLUG_BASE_MAX = 40;
+const SLUG_BASE_MIN = 8;
 
 const messageOf = (err) => String(err?.message ?? err);
 const pad = (n) => String(n).padStart(2, '0');
@@ -178,6 +181,9 @@ export function createSuperagent({
     try {
       parsed = parseTasks(await readFile(path.join(primaryRepo(job).worktree, ...rel.split('/')), 'utf8'), job);
     } catch (err) {
+      // Anything but a missing file (EBUSY, EPERM...) may pass: the step's
+      // catch logs and reloads, and the next tick retries.
+      if (err?.code !== 'ENOENT') throw err;
       parsed = { ok: false, errors: [`could not read ${rel}: ${messageOf(err)}`] };
     }
     if (stopping || stopRequested.has(jobId) || store.get(jobId)?.state !== 'running') return;
@@ -359,10 +365,9 @@ export function createSuperagent({
     return pipeline;
   }
 
-  // Decision 14: built with the runner's own attemptDir, so the bound cannot
-  // drift from the directories it actually creates.
-  function checkPathLength(pipeline, { jobId, slug }) {
-    if (platform !== 'win32') return;
+  // Built with the runner's own attemptDir, so the bound cannot drift from the
+  // directories it actually creates.
+  function longestAttemptPath(pipeline, { jobId, slug }) {
     const primaryWorktree = path.join(path.resolve(worktreesRoot), slug, 'primary');
     const attemptId = 'f'.repeat(ATTEMPT_ID_LENGTH);
     let longest = '';
@@ -372,13 +377,24 @@ export function createSuperagent({
       const file = path.join(attemptDir(primaryWorktree, { jobId, phase: p.phase, task, attemptId }), `${RESULT_FILE}.tmp`);
       if (file.length > longest.length) longest = file;
     }
-    if (longest.length > WIN32_PATH_LIMIT) {
+    return longest;
+  }
+
+  // Decision 14: on win32 the slug's title part is cut to whatever still fits;
+  // only a root too long for SLUG_BASE_MIN characters is refused.
+  function fitSlug(pipeline, { title, jobId }) {
+    if (platform !== 'win32') return slugify(title, jobId);
+    const bare = longestAttemptPath(pipeline, { jobId, slug: `-${String(jobId).slice(0, 8)}` }).length;
+    const maxBase = Math.min(SLUG_BASE_MAX, WIN32_PATH_LIMIT - bare);
+    if (maxBase < SLUG_BASE_MIN) {
+      const length = bare + SLUG_BASE_MIN;
       throw fail(
         'ERR_PATH_TOO_LONG',
-        `superagent: attempt paths for this job reach ${longest.length} characters, over the ${WIN32_PATH_LIMIT}-character Windows limit (${longest}). Set COCKPIT_HOME to a shorter directory, or use a shorter title.`,
-        { length: longest.length, limit: WIN32_PATH_LIMIT },
+        `superagent: attempt paths for this job would reach ${length} characters with an ${SLUG_BASE_MIN}-character title, over the ${WIN32_PATH_LIMIT}-character Windows limit. Set COCKPIT_HOME to a shorter directory (worktrees live under ${path.resolve(worktreesRoot)}).`,
+        { length, limit: WIN32_PATH_LIMIT },
       );
     }
+    return slugify(title, jobId, maxBase);
   }
 
   async function provision(job) {
@@ -401,8 +417,7 @@ export function createSuperagent({
     const resolved = config.resolve(origin);
     const pipeline = await resolvePipeline(resolved, fixture, origin);
     const jobId = idImpl();
-    const slug = slugify(title, jobId);
-    checkPathLength(pipeline, { jobId, slug });
+    const slug = fitSlug(pipeline, { title, jobId });
     const created = {
       type: 'job-created',
       jobId,

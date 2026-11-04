@@ -235,7 +235,7 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   const has = async (f, ...needles) => { const t = await read(f); for (const n of needles) assert.ok(t.includes(n), `${f}: missing ${n}`); };
   const fixRule = ['when `purpose` is `fix`, read `previousFindings`, change the artifact for each finding or decline it with a one-sentence reason, and write the response file', 'when `final` is true, append every finding you did not fix under a heading `## Unresolved review findings`'];
   await has('spec-writer.md', ...fixRule, '## Unresolved review findings');
-  await has('planner.md', ...fixRule, '## Unresolved review findings', '`id`', '`title`', '`repos`', '`dependsOn`', '`acceptance`', '`verify`', 'ids are at most 24 characters, letters, digits and hyphens', 'one task = one worker session');
+  await has('planner.md', ...fixRule, '## Unresolved review findings', '`id`', '`title`', '`repos`', '`dependsOn`', '`acceptance`', '`verify`', 'ids are at most 12 characters, letters, digits and hyphens', 'one task = one worker session');
   for (const f of ['spec-reviewer.md', 'plan-reviewer.md']) await has(f, 'read-only', '`approve` only if there is no open blocker', 'blocker', 'major', 'minor', 'commit your review file and list its commit');
   await has('implementer.md', 'evidence.checks', 'exit code', 'check `git status` and `git log` before repeating work');
   await has('task-reviewer.md', 'taskCommits', 'git show', 'read-only');
