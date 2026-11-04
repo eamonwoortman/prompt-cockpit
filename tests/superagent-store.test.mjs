@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createSuperagentStore, deriveJob } from '../src/superagent/store.js';
-import { tempDir, jobCreated, provisionedEvents } from './superagent-helpers.mjs';
+import { tempDir, jobCreated, provisionedEvents, taskCreated, ev } from './superagent-helpers.mjs';
+import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 
 const quiet = () => {};
 const stamp = (events) => events.map((e, i) => ({ seq: i + 1, at: 1000 + i, ...e }));
@@ -189,4 +190,95 @@ test('an append rejected inside the chain does not disturb the next append', asy
   await store.flush();
   const lines = (await fs.readFile(path.join(rootDir, 'j1', 'events.jsonl'), 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.deepEqual(lines.map((e) => [e.seq, e.type]), [[1, 'job-created'], [2, 'job-provisioned']]);
+});
+
+const m2 = (...more) => stamp([jobCreated({ pipeline: MILESTONE_2_PIPELINE }), { type: 'job-provisioned' }, ...more]);
+const started = (attemptId, phase, over = {}) => ({ type: 'attempt-started', attemptId, phase, task: null, role: 'r', model: 'm', n: 1, ...over });
+const ended = (attemptId, outcome = 'done', over = {}) => ({ type: 'attempt-ended', attemptId, outcome, ...over });
+
+test('a Plan 2 attempt without purpose derives as purpose author, round null', () => {
+  const job = deriveJob(m2(started('a1', 'spec'), ended('a1')));
+  const a = job.attempts[0];
+  assert.deepEqual([a.purpose, a.round, a.final, a.verdict, a.findings, a.commits, a.verified], ['author', null, false, null, null, [], null]);
+});
+
+test('attempt-started purpose and round are kept; attempt-ended verdict, findings, commits and verified are kept', () => {
+  const job = deriveJob(m2(
+    started('a1', 'spec-review', { purpose: 'review', round: 2, final: true }),
+    ended('a1', 'done', { verdict: 'fail', findings: [{ id: 'f1' }], commits: ['abc'], verified: true }),
+  ));
+  const a = job.attempts[0];
+  assert.deepEqual([a.purpose, a.round, a.final], ['review', 2, true]);
+  assert.deepEqual([a.verdict, a.findings, a.commits, a.verified], ['fail', [{ id: 'f1' }], ['abc'], true]);
+});
+
+test('tasks-loaded sets tasks; a second tasks-loaded is ignored', () => {
+  assert.equal(deriveJob(m2()).tasks, null);
+  const job = deriveJob(m2(ev.tasksLoaded([taskCreated('t1')]), ev.tasksLoaded([taskCreated('t2'), taskCreated('t3')])));
+  assert.deepEqual(job.tasks.map((t) => t.id), ['t1']);
+});
+
+// plan phases done through implement -> current phase is test (index 5)
+const toTest = [ev.tasksLoaded([taskCreated('t1')]), ...[0, 1, 2, 3, 4].map((i) => ev.phaseCompleted(MILESTONE_2_PIPELINE[i].phase, 1))];
+
+test('test-routed appends the fix task and rewinds to implement in one event; a second for the same attemptId is ignored; outside test it is ignored', () => {
+  const fix = taskCreated('fix1', { origin: 'test', fromAttemptId: 'tt1' });
+  let job = deriveJob(m2(ev.tasksLoaded([taskCreated('t1')]), ev.testRouted('tt1', fix)));
+  assert.equal(job.tasks.length, 1, 'ignored while the current phase is spec');
+  assert.equal(job.phaseId, 'spec');
+  job = deriveJob(m2(...toTest, ev.testRouted('tt1', fix)));
+  assert.deepEqual(job.tasks.map((t) => t.id), ['t1', 'fix1']);
+  assert.equal(job.phaseId, 'implement');
+  assert.equal(job.visits.implement, 2);
+  job = deriveJob(m2(...toTest, ev.testRouted('tt1', fix), ev.testRouted('tt1', taskCreated('fix2', { origin: 'test', fromAttemptId: 'tt1' }))));
+  assert.equal(job.tasks.length, 2);
+  assert.equal(job.visits.implement, 2);
+});
+
+test('a Plan-2-style log (no purpose/final) derives visits of 1 for every reached phase', () => {
+  const job = deriveJob(m2(started('a1', 'spec'), ended('a1')));
+  assert.deepEqual(job.visits, { spec: 1, 'spec-review': 1 });
+  assert.deepEqual(job.completions, []);
+});
+
+test('phase-completed advances only when it names the current phase and the current visit', () => {
+  let job = deriveJob(m2(ev.phaseCompleted('plan', 1)));
+  assert.equal(job.phaseId, 'spec');
+  job = deriveJob(m2(ev.phaseCompleted('spec', 2)));
+  assert.equal(job.phaseId, 'spec');
+  job = deriveJob(m2({ ...ev.phaseCompleted('spec', 1, ['x']), verification: { ok: true } }));
+  assert.equal(job.phaseId, 'spec-review');
+  assert.deepEqual(job.completions, [{ phase: 'spec', visit: 1, unresolved: ['x'], verification: { ok: true } }]);
+});
+
+test('two test-failure cycles: a replayed phase-completed for a stale visit is ignored, the current visit advances', () => {
+  const fix = taskCreated('fix1', { origin: 'test', fromAttemptId: 'tt1' });
+  const base = [...toTest, ev.testRouted('tt1', fix)];
+  let job = deriveJob(m2(...base, ev.phaseCompleted('implement', 1)));
+  assert.equal(job.phaseId, 'implement');
+  assert.equal(job.completions.length, 5);
+  job = deriveJob(m2(...base, ev.phaseCompleted('implement', 2)));
+  assert.equal(job.phaseId, 'test');
+  assert.deepEqual(job.completions.at(-1), { phase: 'implement', visit: 2, unresolved: [], verification: null });
+});
+
+test('a done review or per-task attempt does not advance phaseIndex, a done author attempt does', () => {
+  let job = deriveJob(m2(started('a1', 'spec'), ended('a1')));
+  assert.equal(job.phaseId, 'spec-review');
+  job = deriveJob(m2(ev.phaseCompleted('spec', 1), started('a2', 'spec-review', { purpose: 'review', round: 1 }), ended('a2')));
+  assert.equal(job.phaseId, 'spec-review');
+  const toImplement = [0, 1, 2, 3].map((i) => ev.phaseCompleted(MILESTONE_2_PIPELINE[i].phase, 1));
+  job = deriveJob(m2(...toImplement, started('a3', 'implement', { task: 't1' }), ended('a3')));
+  assert.equal(job.phaseId, 'implement');
+});
+
+test('store.append accepts the new event types and persists them across load', async () => {
+  const rootDir = await tempDir('sa-store-');
+  const store = createSuperagentStore({ rootDir, logImpl: quiet });
+  for (const e of provisionedEvents({ pipeline: MILESTONE_2_PIPELINE })) await store.append('j1', e);
+  await store.append('j1', ev.tasksLoaded([taskCreated('t1')]));
+  await store.append('j1', ev.phaseCompleted('spec', 1));
+  const job = await createSuperagentStore({ rootDir, logImpl: quiet }).load('j1');
+  assert.equal(job.tasks.length, 1);
+  assert.equal(job.phaseId, 'spec-review');
 });

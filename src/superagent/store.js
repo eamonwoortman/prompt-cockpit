@@ -20,7 +20,7 @@ import { writeJsonAtomic } from '../json-store.js';
 import { isSafeSessionId } from '../safe-id.js';
 import { defaultSuperagentRoot } from './config.js';
 
-export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact'];
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed'];
 
 const NEWLINE = 0x0a;
 
@@ -48,6 +48,9 @@ export function deriveJob(events) {
     phaseIndex: 0,
     phaseId: null,
     attempts: [],
+    tasks: null,
+    visits: {},
+    completions: [],
     lastSeq: first.seq ?? null,
   };
   const attempt = (id) => job.attempts.find((a) => a.attemptId === id);
@@ -92,6 +95,13 @@ export function deriveJob(events) {
           question: null,
           nudges: [],
           precompacts: [],
+          purpose: ev.purpose ?? 'author',
+          round: ev.round ?? null,
+          final: ev.final ?? false,
+          verdict: null,
+          findings: null,
+          commits: [],
+          verified: null,
         });
         break;
       case 'attempt-session': {
@@ -115,8 +125,31 @@ export function deriveJob(events) {
           signature: ev.signature ?? null,
           summary: ev.summary ?? null,
           question: ev.question ?? null,
+          verdict: ev.verdict ?? null,
+          findings: ev.findings ?? null,
+          commits: ev.commits ?? [],
+          verified: ev.verified ?? null,
         });
-        if (ev.outcome === 'done' && a.phase === job.pipeline[job.phaseIndex]?.phase) job.phaseIndex++;
+        const current = job.pipeline[job.phaseIndex];
+        if (ev.outcome === 'done' && current?.kind === 'author' && a.phase === current.phase) job.phaseIndex++;
+        break;
+      }
+      case 'tasks-loaded':
+        if (job.tasks === null) job.tasks = structuredClone(ev.tasks ?? []);
+        break;
+      case 'test-routed': {
+        const implementIndex = job.pipeline.findIndex((p) => p.phase === 'implement');
+        if (job.pipeline[job.phaseIndex]?.phase !== 'test' || implementIndex < 0) break;
+        if ((job.tasks ?? []).some((t) => t.fromAttemptId === ev.attemptId)) break;
+        job.tasks = [...(job.tasks ?? []), structuredClone(ev.task)];
+        job.phaseIndex = implementIndex;
+        job.visits.implement = (job.visits.implement ?? 1) + 1;
+        break;
+      }
+      case 'phase-completed': {
+        if (job.pipeline[job.phaseIndex]?.phase !== ev.phase || ev.visit !== (job.visits[ev.phase] ?? 1)) break;
+        job.completions.push({ phase: ev.phase, visit: ev.visit, unresolved: ev.unresolved ?? [], verification: ev.verification ?? null });
+        job.phaseIndex++;
         break;
       }
       default:
@@ -124,6 +157,7 @@ export function deriveJob(events) {
     }
     job.lastSeq = ev.seq ?? job.lastSeq;
   }
+  for (let p = 0; p <= job.phaseIndex && p < job.pipeline.length; p++) job.visits[job.pipeline[p].phase] ??= 1;
   job.phaseId = job.pipeline[job.phaseIndex]?.phase ?? null;
   return job;
 }

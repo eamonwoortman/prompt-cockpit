@@ -133,3 +133,21 @@ export function deferred() {
   });
   return { promise, resolve, reject };
 }
+
+export const taskCreated = (id, over = {}) => ({
+  id,
+  title: `Task ${id}`,
+  repos: ['primary'],
+  dependsOn: [],
+  acceptance: ['it works'],
+  verify: null,
+  origin: 'plan',
+  fromAttemptId: null,
+  ...over,
+});
+
+export const ev = {
+  tasksLoaded: (tasks) => ({ type: 'tasks-loaded', tasks }),
+  testRouted: (attemptId, task) => ({ type: 'test-routed', attemptId, task }),
+  phaseCompleted: (phase, visit, unresolved = []) => ({ type: 'phase-completed', phase, visit, unresolved, verification: null }),
+};
