@@ -126,7 +126,7 @@ async function main() {
   console.log(`tool_use names seen: ${JSON.stringify(toolUses)}`);
   console.log(bashRan
     ? 'canUseTool verdict: Bash ran; if an APPROVAL INTERCEPT tool=Bash line appeared above, canUseTool IS called in auto, otherwise the SDK skipped it (deny rule unenforced in auto).'
-    : 'canUseTool verdict: INCONCLUSIVE - no Bash tool_use in the transcript.');`);
+    : 'canUseTool verdict: INCONCLUSIVE - no Bash tool_use in the transcript.');
 
   const eventsFile = path.join(jobsRoot, created.jobId, 'events.jsonl');
   console.log('\n=== events.jsonl (attempt-* and precompact) ===');
