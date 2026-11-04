@@ -5,9 +5,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as registry from '../src/session-registry.js';
-import { tempDir, initRepo, sessionFactory, jobCreated, deferred, T0 } from './superagent-helpers.mjs';
+import { tempDir, initRepo, sessionFactory, jobCreated, deferred, taskCreated, ev, T0 } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
-import { createSuperagentConfig, MILESTONE_1_PIPELINE } from '../src/superagent/config.js';
+import { createSuperagentConfig, defaultConfig, MILESTONE_1_PIPELINE, MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import { RESULT_FILE, artifactPaths, attemptDir } from '../src/superagent/results.js';
 import { createWorktree, defaultGit } from '../src/superagent/worktree.js';
 import { createSuperagent, TICK_MS } from '../src/superagent/index.js';
@@ -198,12 +198,12 @@ test('createJob refuses pipelines this plan cannot run', async () => {
   try {
     const h = await harness({ configJson: (repo) => ({ projects: { [repo]: { models: { 'spec-writer': { provider: 'grok' } } } } }) });
     await assert.rejects(create(h, { fixture: undefined }), { code: 'ERR_INVALID_CONFIG' });
-    await assert.rejects(create(h, { fixture: 'milestone-2' }), { code: 'ERR_UNKNOWN_FIXTURE' });
+    await assert.rejects(create(h, { fixture: 'milestone-9' }), { code: 'ERR_UNKNOWN_FIXTURE' });
     await assert.rejects(create(h), { code: 'ERR_INVALID_CONFIG' });
 
     const plain = await harness();
-    await assert.rejects(create(plain, { fixture: undefined }), { code: 'ERR_PHASE_KIND_UNSUPPORTED' });
-    await assert.rejects(create(plain, { fixture: 'milestone-2' }), { code: 'ERR_UNKNOWN_FIXTURE' });
+    await assert.rejects(create(plain, { fixture: undefined }), { code: 'ERR_NO_TEMPLATE' });
+    await assert.rejects(create(plain, { fixture: 'milestone-9' }), { code: 'ERR_UNKNOWN_FIXTURE' });
     for (const jobsRoot of [h.jobsRoot, plain.jobsRoot]) {
       const entries = await fs.readdir(jobsRoot).catch((err) => (err.code === 'ENOENT' ? [] : Promise.reject(err)));
       assert.deepEqual(entries, []);
@@ -500,5 +500,341 @@ test('a corrupt job is listed as failed and never appended to', async () => {
     await fresh.sa.tick();
     await fresh.sa.stop();
     assert.equal(await fs.readFile(file, 'utf8'), before);
+  } finally { registry._reset(); }
+});
+
+// Milestone-2 attempt directories nest a task id, which overruns the win32
+// guard under a temp-dir root; these tests are about the actions, the guard
+// has its own test below.
+const m2 = (over = {}) => harness({ platform: 'linux', ...over });
+const createM2 = (h, over = {}) => create(h, { fixture: 'milestone-2', ...over });
+
+let synthetic = 0;
+const syntheticId = () => `${(++synthetic).toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
+
+// Records a finished attempt straight into the store, as if a worker had run.
+async function recordAttempt(h, job, { phase, purpose = 'author', round = null, final = false, task = null, outcome = 'done', ...end }) {
+  const attemptId = syntheticId();
+  await h.store.append(job.jobId, { type: 'attempt-started', attemptId, phase, task, role: 'stand-in', model: 'claude-opus-5-5', n: 1, recovery: false, previousAttemptId: null, dir: null, purpose, round, final });
+  await h.store.append(job.jobId, { type: 'attempt-ended', attemptId, outcome, ...end });
+  return attemptId;
+}
+
+const M2_STEPS = {
+  spec: (h, job) => recordAttempt(h, job, { phase: 'spec' }),
+  'spec-review': (h, job) => h.store.append(job.jobId, ev.phaseCompleted('spec-review', 1)),
+  plan: (h, job) => recordAttempt(h, job, { phase: 'plan' }),
+  'plan-review': (h, job) => h.store.append(job.jobId, ev.phaseCompleted('plan-review', 1)),
+  implement: async (h, job) => {
+    await h.store.append(job.jobId, ev.tasksLoaded([taskCreated('T1')]));
+    await h.store.append(job.jobId, ev.phaseCompleted('implement', 1));
+  },
+};
+
+async function advanceTo(h, job, phaseId) {
+  while (h.store.get(job.jobId).phaseId !== phaseId) await M2_STEPS[h.store.get(job.jobId).phaseId](h, job);
+}
+
+const BLOCKER = { id: 'B1', severity: 'blocker', text: 'the spec omits error handling' };
+const MAJOR = { id: 'M1', severity: 'major', text: 'name the config file' };
+
+// Three review rounds whose fixes decline both findings, then one verifier.
+async function reviewToVerdict(h, job, verified) {
+  for (let round = 1; round <= 3; round++) {
+    await recordAttempt(h, job, { phase: 'spec-review', purpose: 'review', round, verdict: 'changes', findings: [BLOCKER, MAJOR] });
+    await recordAttempt(h, job, {
+      phase: 'spec-review',
+      purpose: 'fix',
+      round,
+      final: round === 3,
+      findings: [{ ...BLOCKER, disposition: 'declined: out of scope' }, { ...MAJOR, disposition: 'declined: kept as is' }],
+    });
+  }
+  await recordAttempt(h, job, { phase: 'spec-review', purpose: 'verify', verified: [{ id: 'B1', verified, evidence: 'src/app.js:12 throws on a missing file' }] });
+}
+
+function failingAppendOpen() {
+  const arm = { next: false };
+  const openImpl = async (file, flags) => {
+    const fh = await fs.open(file, flags);
+    if (flags !== 'a' || !arm.next) return fh;
+    arm.next = false;
+    return {
+      write: (buf) => fh.write(buf),
+      datasync: async () => {
+        await fh.datasync();
+        throw new Error('injected datasync failure');
+      },
+      close: () => fh.close(),
+    };
+  };
+  return { arm, openImpl };
+}
+
+const noJobDirs = async (jobsRoot) => {
+  const entries = await fs.readdir(jobsRoot).catch((err) => (err.code === 'ENOENT' ? [] : Promise.reject(err)));
+  assert.deepEqual(entries, []);
+};
+
+const writeTasksFile = async (job, text) => {
+  const file = path.join(job.repos[0].worktree, ...artifactPaths(job).tasks.split('/'));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, text);
+};
+
+test('createJob with the milestone-2 fixture provisions and validates', async () => {
+  try {
+    const h = await m2();
+    const job = await createM2(h);
+    assert.equal(job.state, 'running');
+    assert.equal(job.pipeline.length, 7);
+    assert.deepEqual(job.pipeline, JSON.parse(JSON.stringify(MILESTONE_2_PIPELINE)));
+    assert.deepEqual(h.events(job.jobId)[0].pipeline, job.pipeline);
+    assert.equal(job.phaseId, 'spec');
+  } finally { registry._reset(); }
+});
+
+test('createJob rejects a pipeline whose role has no template with ERR_NO_TEMPLATE, and the default pipeline fails on brainstormer', async () => {
+  try {
+    const plain = await m2();
+    await assert.rejects(create(plain, { fixture: undefined }), (err) => {
+      assert.equal(err.code, 'ERR_NO_TEMPLATE');
+      assert.deepEqual(err.roles, ['brainstormer']);
+      assert.match(err.message, /brainstormer/);
+      return true;
+    });
+
+    const ghost = { provider: 'claude', model: 'claude-opus-5-5', maxTurns: 10 };
+    const pipeline = defaultConfig().pipeline.map((p) => {
+      if (p.phase === 'spec-review') return { ...p, author: 'ghost-writer' };
+      if (p.phase === 'implement') return { ...p, taskReview: 'ghost-reviewer' };
+      return p;
+    });
+    const h = await m2({ configJson: (repo) => ({ projects: { [repo]: { pipeline, models: { 'ghost-writer': ghost, 'ghost-reviewer': ghost } } } }) });
+    await assert.rejects(create(h, { fixture: undefined }), (err) => {
+      assert.equal(err.code, 'ERR_NO_TEMPLATE');
+      assert.deepEqual(err.roles, ['brainstormer', 'ghost-writer', 'ghost-reviewer']);
+      return true;
+    });
+    await noJobDirs(plain.jobsRoot);
+    await noJobDirs(h.jobsRoot);
+    assert.deepEqual(h.sa.listJobs(), []);
+  } finally { registry._reset(); }
+});
+
+test('a project override template satisfies the check', async () => {
+  try {
+    const h = await m2();
+    const overrides = path.join(h.repo, '.superpowers', 'superagent', 'prompts');
+    await fs.mkdir(overrides, { recursive: true });
+    await fs.writeFile(path.join(overrides, 'brainstormer.md'), '# Brainstormer\n');
+    const job = await create(h, { fixture: undefined });
+    assert.equal(job.state, 'running');
+    assert.equal(job.pipeline[0].role, 'brainstormer');
+  } finally { registry._reset(); }
+});
+
+test('createJob on win32 with a long COCKPIT_HOME-style root rejects with ERR_PATH_TOO_LONG; a short root passes', async () => {
+  try {
+    const probe = await harness();
+    const longRoot = path.join(probe.root, 'x'.repeat(150), 'worktrees');
+    const long = await harness({ platform: 'win32', worktreesRoot: longRoot });
+    await assert.rejects(create(long), (err) => {
+      assert.equal(err.code, 'ERR_PATH_TOO_LONG');
+      assert.match(err.message, /COCKPIT_HOME/);
+      assert.ok(err.length > 240);
+      return true;
+    });
+    await noJobDirs(long.jobsRoot);
+    assert.deepEqual(long.sa.listJobs(), []);
+
+    // Off win32 the preflight is skipped and the job is created (on a Windows
+    // host its provisioning then fails on the real path limit).
+    const elsewhere = await harness({ platform: 'linux', worktreesRoot: longRoot });
+    assert.ok(['running', 'failed'].includes((await create(elsewhere)).state));
+    assert.equal((await elsewhere.store.listJobIds()).length, 1);
+
+    // Exactly at the limit passes, one character over is refused. milestone-1's
+    // longest path is spec's: <root>/<slug>/primary/.superpowers/superagent/
+    // <jobId>/attempts/spec/<36-char attempt id>/result.json.tmp.
+    const jobId = '0123abcd-0000-4000-8000-000000000000';
+    const longestFor = (root) => path.join(path.resolve(root), 'add-hello-0123abcd', 'primary', '.superpowers', 'superagent', jobId, 'attempts', 'spec', 'f'.repeat(36), 'result.json.tmp').length;
+    const pad = 240 - longestFor(probe.root) - 1;
+    assert.ok(pad > 0, 'the temp dir leaves room for the boundary roots');
+    const atLimit = path.join(probe.root, 'w'.repeat(pad));
+    assert.equal(longestFor(atLimit), 240);
+    const fits = await harness({ platform: 'win32', worktreesRoot: atLimit, idImpl: () => jobId });
+    assert.equal((await create(fits)).state, 'running');
+    const over = await harness({ platform: 'win32', worktreesRoot: `${atLimit}w`, idImpl: () => jobId });
+    await assert.rejects(create(over), { code: 'ERR_PATH_TOO_LONG', length: 241, limit: 240 });
+
+    // milestone-2 adds a 24-character task id bound under implement, so the
+    // root that fits milestone-1 exactly is refused for it.
+    const m2Over = await harness({ platform: 'win32', worktreesRoot: atLimit, idImpl: () => jobId });
+    await assert.rejects(createM2(m2Over), { code: 'ERR_PATH_TOO_LONG', length: 240 - '/spec'.length + '/implement'.length + 25 });
+  } finally { registry._reset(); }
+});
+
+test('tick: a finished review loop appends phase-completed and the phase index advances', async () => {
+  try {
+    const h = await m2();
+    const job = await createM2(h);
+    await advanceTo(h, job, 'spec-review');
+    await recordAttempt(h, job, { phase: 'spec-review', purpose: 'review', round: 1, verdict: 'approve', findings: [] });
+    await h.sa.tick();
+    const last = h.events(job.jobId).at(-1);
+    assert.equal(last.type, 'phase-completed');
+    assert.deepEqual({ phase: last.phase, visit: last.visit, unresolved: last.unresolved, verification: last.verification }, { phase: 'spec-review', visit: 1, unresolved: [], verification: [] });
+    const got = h.sa.getJob(job.jobId);
+    assert.equal(got.phaseIndex, 2);
+    assert.equal(got.phaseId, 'plan');
+    assert.deepEqual(got.completions, [{ phase: 'spec-review', visit: 1, unresolved: [], verification: [] }]);
+    assert.equal(h.started(job.jobId).length, 2, 'the completing tick launches nothing');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('tick: load-tasks appends tasks-loaded once; an invalid tasks.json parks the job needs-you stuck with the errors', async () => {
+  try {
+    const h = await m2();
+    const job = await createM2(h);
+    await advanceTo(h, job, 'implement');
+    await writeTasksFile(job, JSON.stringify([{ id: 'T1', title: 'One', repos: ['primary'], dependsOn: [], acceptance: 'it works', verify: '' }]));
+    await h.sa.tick();
+    const loaded = () => h.events(job.jobId).filter((e) => e.type === 'tasks-loaded');
+    assert.equal(loaded().length, 1);
+    assert.deepEqual(loaded()[0].tasks, [taskCreated('T1', { title: 'One' })]);
+    assert.deepEqual(h.sa.getJob(job.jobId).tasks, [taskCreated('T1', { title: 'One' })]);
+
+    await h.sa.tick();
+    assert.equal(loaded().length, 1);
+    const launched = h.started(job.jobId).at(-1);
+    assert.deepEqual([launched.phase, launched.task, launched.purpose], ['implement', 'T1', 'implement']);
+    await h.sa.stop();
+
+    const missing = await m2();
+    const missingJob = await createM2(missing);
+    await advanceTo(missing, missingJob, 'implement');
+    await missing.sa.tick();
+    const parked = missing.events(missingJob.jobId).at(-1);
+    assert.deepEqual([parked.type, parked.reason, parked.detail.why], ['needs-you', 'stuck', 'tasks-invalid']);
+    assert.equal(parked.detail.errors.length, 1);
+    assert.match(parked.detail.errors[0], /tasks\.json/);
+    assert.equal(missing.sa.getJob(missingJob.jobId).state, 'needs-you');
+
+    const bad = await m2();
+    const badJob = await createM2(bad);
+    await advanceTo(bad, badJob, 'implement');
+    await writeTasksFile(badJob, '{"id":"T1"}');
+    await bad.sa.tick();
+    const invalid = bad.events(badJob.jobId).at(-1);
+    assert.deepEqual([invalid.type, invalid.reason, invalid.detail], ['needs-you', 'stuck', { why: 'tasks-invalid', errors: ['tasks.json must be a JSON array'] }]);
+    assert.equal(bad.events(badJob.jobId).filter((e) => e.type === 'tasks-loaded').length, 0);
+    assert.equal(bad.sa.getJob(badJob.jobId).tasks, null);
+  } finally { registry._reset(); }
+});
+
+test('tick: route-test-failure appends one test-routed event; replaying the tick after a rejected-but-landed append appends nothing more', async () => {
+  const spy = rejectionSpy();
+  try {
+    const { arm, openImpl } = failingAppendOpen();
+    const h = await m2({ storeOpts: { openImpl } });
+    const job = await createM2(h);
+    await advanceTo(h, job, 'test');
+    const findings = [{ id: 'F1', severity: 'major', text: 'GET /hello returns 500' }];
+    const testAttempt = await recordAttempt(h, job, { phase: 'test', purpose: 'test', outcome: 'failed', reason: 'failed', signature: 'failed|tests fail', findings });
+
+    arm.next = true;
+    await h.sa.tick();
+    assert.equal(arm.next, false, 'the injected failure fired');
+    const routed = () => h.events(job.jobId).filter((e) => e.type === 'test-routed');
+    assert.equal(routed().length, 1);
+    assert.equal(routed()[0].attemptId, testAttempt);
+    const short = testAttempt.slice(0, 8);
+    assert.deepEqual(routed()[0].task, {
+      id: `F-${short}`,
+      title: `Fix test failures from attempt ${short}`,
+      repos: ['primary'],
+      dependsOn: [],
+      acceptance: 'GET /hello returns 500',
+      verify: '',
+      origin: 'test',
+      fromAttemptId: testAttempt,
+    });
+    const got = h.sa.getJob(job.jobId);
+    assert.equal(got.phaseId, 'implement');
+    assert.equal(got.visits.implement, 2);
+    assert.equal(got.tasks.filter((t) => t.fromAttemptId === testAttempt).length, 1);
+
+    await h.sa.tick();
+    await h.sa.tick();
+    assert.equal(routed().length, 1);
+    await h.sa.stop();
+  } finally {
+    await spy.stop();
+    registry._reset();
+  }
+  assert.deepEqual(spy.seen, []);
+});
+
+test('getJob exposes completions with unresolved findings and verifier evidence after a restart', async () => {
+  try {
+    const h = await m2();
+    const job = await createM2(h);
+    await advanceTo(h, job, 'spec-review');
+    await reviewToVerdict(h, job, false);
+    await h.sa.tick();
+    assert.equal(h.events(job.jobId).at(-1).type, 'phase-completed');
+    await h.sa.stop();
+
+    const fresh = await h.restart({ platform: 'linux' });
+    await fresh.sa.start();
+    const got = fresh.sa.getJob(job.jobId);
+    const evidence = 'src/app.js:12 throws on a missing file';
+    assert.deepEqual(got.completions, [{
+      phase: 'spec-review',
+      visit: 1,
+      unresolved: [{ ...BLOCKER, status: 'disputed-not-verified' }, { ...MAJOR, status: 'declined' }],
+      verification: [{ id: 'B1', verified: false, evidence }],
+    }]);
+    assert.deepEqual(got.visits, { spec: 1, 'spec-review': 1, plan: 1 });
+    assert.equal(got.tasks, null);
+    const review = got.attempts.filter((a) => a.phase === 'spec-review');
+    assert.deepEqual(review.map((a) => [a.purpose, a.round, a.final]), [
+      ['review', 1, false], ['fix', 1, false], ['review', 2, false], ['fix', 2, false], ['review', 3, false], ['fix', 3, true], ['verify', null, false],
+    ]);
+    assert.equal(review[0].verdict, 'changes');
+    assert.deepEqual(review[0].findings, [BLOCKER, MAJOR]);
+    assert.deepEqual(review.at(-1).verified, [{ id: 'B1', verified: false, evidence }]);
+    const listed = fresh.sa.listJobs().find((j) => j.jobId === job.jobId);
+    assert.deepEqual(listed.completions, got.completions);
+    assert.deepEqual(listed.attempts, got.attempts);
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a verified blocker parks the job needs-you with the blocker text and evidence', async () => {
+  try {
+    const h = await m2();
+    const job = await createM2(h);
+    await advanceTo(h, job, 'spec-review');
+    await reviewToVerdict(h, job, true);
+    const verifyId = h.store.get(job.jobId).attempts.at(-1).attemptId;
+    await h.sa.tick();
+    const last = h.events(job.jobId).at(-1);
+    assert.equal(last.type, 'needs-you');
+    assert.equal(last.reason, 'question');
+    assert.deepEqual(last.detail, {
+      kind: 'blocker',
+      text: `The verifier confirmed blocker B1: ${BLOCKER.text}`,
+      evidence: 'B1: src/app.js:12 throws on a missing file',
+      attemptId: verifyId,
+      phase: 'spec-review',
+      task: null,
+    });
+    const got = h.sa.getJob(job.jobId);
+    assert.equal(got.state, 'needs-you');
+    assert.equal(got.completions.length, 0);
+    assert.equal(got.phaseId, 'spec-review');
   } finally { registry._reset(); }
 });

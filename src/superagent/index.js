@@ -19,16 +19,23 @@
 // attempt the store shows in flight with no live runner entry is reconciled,
 // never launched beside.
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { MILESTONE_1_PIPELINE, defaultSuperagentRoot, validateDefaults, validateMilestoneFixture } from './config.js';
-import { primaryRepo } from './results.js';
+import { FIXTURES, defaultSuperagentRoot, validateDefaults, validateMilestoneFixture } from './config.js';
+import { hasTemplate } from './prompts.js';
+import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { createRunner } from './runner.js';
-import { RUNNABLE_KINDS, nextAction } from './sequencer.js';
+import { RUNNABLE_KINDS, buildFixTask, nextAction } from './sequencer.js';
 import { BRANCH_PREFIX, archiveLedger, createWorktree, defaultGit, listOrphanWorktrees, repoIds, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
 
-const FIXTURES = { 'milestone-1': MILESTONE_1_PIPELINE };
+// Decision 14: phase and task ids are bounded at 24 characters by validation,
+// attempt ids are uuids.
+const WIN32_PATH_LIMIT = 240;
+const TASK_ID_MAX = 24;
+const ATTEMPT_ID_LENGTH = 36;
+
 const messageOf = (err) => String(err?.message ?? err);
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -39,6 +46,25 @@ function fail(code, message, extra = {}) {
 function localDate(ms) {
   const d = new Date(ms);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function pipelineRoles(pipeline) {
+  const roles = [];
+  for (const p of pipeline) {
+    if (p.kind !== 'human') roles.push(p.role);
+    if (p.kind === 'review') roles.push(p.author);
+    if (p.kind === 'per-task' && p.taskReview !== undefined) roles.push(p.taskReview);
+  }
+  if (pipeline.some((p) => p.kind === 'review' || p.kind === 'per-task')) roles.push('verifier');
+  return [...new Set(roles)];
+}
+
+// A blocker the verifier confirmed reaches the sequencer as a question that
+// carries evidence; an attempt's own question carries none.
+function needsYouDetail({ reason, detail }) {
+  if (reason !== 'question' || detail?.evidence == null) return detail;
+  const { attemptId, question, evidence, phase, task } = detail;
+  return { kind: 'blocker', text: question, evidence, attemptId, phase, task };
 }
 
 export function createSuperagent({
@@ -54,6 +80,7 @@ export function createSuperagent({
   budgetCheck = () => ({ allow: true }),
   stopTickDeadlineMs = 2_000,
   logImpl = console.error,
+  platform = process.platform,
 }) {
   const runner = createRunner({ registry, store, git, now, idImpl, logImpl });
   const known = new Set();
@@ -145,6 +172,29 @@ export function createSuperagent({
     if (result?.error === 'store-failed') await reload(jobId);
   }
 
+  async function loadTasksStep(jobId, job) {
+    const rel = artifactPaths(job).tasks;
+    let parsed;
+    try {
+      parsed = parseTasks(await readFile(path.join(primaryRepo(job).worktree, ...rel.split('/')), 'utf8'), job);
+    } catch (err) {
+      parsed = { ok: false, errors: [`could not read ${rel}: ${messageOf(err)}`] };
+    }
+    if (stopping || stopRequested.has(jobId) || store.get(jobId)?.state !== 'running') return;
+    if (parsed.ok) {
+      await store.append(jobId, { type: 'tasks-loaded', tasks: parsed.tasks });
+    } else {
+      await store.append(jobId, { type: 'needs-you', reason: 'stuck', detail: { why: 'tasks-invalid', errors: parsed.errors } });
+    }
+  }
+
+  // deriveJob ignores a second test-routed for the same attempt, so a replay
+  // after a rejected append that landed is harmless.
+  async function routeTestFailureStep(jobId, job, { attemptId, findings }) {
+    const event = { type: 'test-routed', attemptId, task: buildFixTask(job, attemptId, findings) };
+    await appendConfirmed(jobId, event, (j) => (j.tasks ?? []).some((t) => t.fromAttemptId === attemptId));
+  }
+
   async function stepJob(jobId) {
     if (stopping || provisioningNow.has(jobId)) return;
     let job = store.get(jobId);
@@ -167,9 +217,16 @@ export function createSuperagent({
       if (stopping || stopRequested.has(jobId)) return;
       const action = nextAction(job, { now: now(), liveSessions: runner.liveCount(), maxConcurrentSessions });
       if (action.type === 'needs-you') {
-        await store.append(jobId, { type: 'needs-you', reason: action.reason, detail: action.detail });
+        await store.append(jobId, { type: 'needs-you', reason: action.reason, detail: needsYouDetail(action) });
       } else if (action.type === 'launch') {
         await launchStep(jobId, job, action);
+      } else if (action.type === 'load-tasks') {
+        await loadTasksStep(jobId, job);
+      } else if (action.type === 'complete-phase') {
+        const { phase, visit, unresolved, verification } = action;
+        await store.append(jobId, { type: 'phase-completed', phase, visit, unresolved, verification });
+      } else if (action.type === 'route-test-failure') {
+        await routeTestFailureStep(jobId, job, action);
       }
     } catch (err) {
       log(`tick failed for job ${jobId}`, err);
@@ -278,12 +335,13 @@ export function createSuperagent({
     await drain();
   }
 
-  function resolvePipeline(resolved, fixture) {
+  // Decision 11: a project override template (under projectDir) counts.
+  async function resolvePipeline(resolved, fixture, projectDir) {
     if (fixture != null && !Object.hasOwn(FIXTURES, fixture)) {
       throw fail('ERR_UNKNOWN_FIXTURE', `superagent: unknown fixture ${JSON.stringify(fixture)}`);
     }
     const pipeline = fixture != null ? FIXTURES[fixture] : resolved.pipeline;
-    const { errors } = fixture != null ? validateMilestoneFixture(resolved) : validateDefaults(resolved);
+    const { errors } = fixture != null ? validateMilestoneFixture(resolved, fixture) : validateDefaults(resolved);
     if (errors.length > 0) {
       throw fail('ERR_INVALID_CONFIG', `superagent config is invalid: ${errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`, { errors });
     }
@@ -291,7 +349,36 @@ export function createSuperagent({
     if (unsupported.length > 0) {
       throw fail('ERR_PHASE_KIND_UNSUPPORTED', `superagent: phase kinds not runnable yet: ${unsupported.map((p) => `${p.phase} (${p.kind})`).join(', ')}`);
     }
+    const missing = [];
+    for (const role of pipelineRoles(pipeline)) {
+      if (!(await hasTemplate(role, { projectDir }))) missing.push(role);
+    }
+    if (missing.length > 0) {
+      throw fail('ERR_NO_TEMPLATE', `superagent: no prompt template for role${missing.length > 1 ? 's' : ''} ${missing.join(', ')}`, { roles: missing });
+    }
     return pipeline;
+  }
+
+  // Decision 14: built with the runner's own attemptDir, so the bound cannot
+  // drift from the directories it actually creates.
+  function checkPathLength(pipeline, { jobId, slug }) {
+    if (platform !== 'win32') return;
+    const primaryWorktree = path.join(path.resolve(worktreesRoot), slug, 'primary');
+    const attemptId = 'f'.repeat(ATTEMPT_ID_LENGTH);
+    let longest = '';
+    for (const p of pipeline) {
+      if (p.kind === 'human') continue;
+      const task = p.kind === 'per-task' ? 'f'.repeat(TASK_ID_MAX) : null;
+      const file = path.join(attemptDir(primaryWorktree, { jobId, phase: p.phase, task, attemptId }), `${RESULT_FILE}.tmp`);
+      if (file.length > longest.length) longest = file;
+    }
+    if (longest.length > WIN32_PATH_LIMIT) {
+      throw fail(
+        'ERR_PATH_TOO_LONG',
+        `superagent: attempt paths for this job reach ${longest.length} characters, over the ${WIN32_PATH_LIMIT}-character Windows limit (${longest}). Set COCKPIT_HOME to a shorter directory, or use a shorter title.`,
+        { length: longest.length, limit: WIN32_PATH_LIMIT },
+      );
+    }
   }
 
   async function provision(job) {
@@ -312,9 +399,10 @@ export function createSuperagent({
   async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null }) {
     const origin = path.resolve(primaryPath);
     const resolved = config.resolve(origin);
-    const pipeline = resolvePipeline(resolved, fixture);
+    const pipeline = await resolvePipeline(resolved, fixture, origin);
     const jobId = idImpl();
     const slug = slugify(title, jobId);
+    checkPathLength(pipeline, { jobId, slug });
     const created = {
       type: 'job-created',
       jobId,

@@ -13,9 +13,8 @@
 // attempts. Author phases and `test` keep Plan 2's consuming-attempt cap.
 
 export const CONSUMING_OUTCOMES = new Set(['done', 'failed', 'question']);
-// createJob's gate (index.js). It gains 'review' and 'per-task' only once the
-// supervisor executes load-tasks, complete-phase and route-test-failure.
-export const RUNNABLE_KINDS = new Set(['author', 'human']);
+// createJob's gate (index.js).
+export const RUNNABLE_KINDS = new Set(['author', 'review', 'per-task', 'human']);
 
 const REVIEW_PURPOSES = new Set(['review', 'task-review']);
 const DEFAULT_REVIEW_ROUNDS = 3;
