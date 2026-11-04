@@ -4,9 +4,10 @@
 // Spec: docs/superpowers/specs/2026-11-03-superagent-design.md, "Worker
 // contract"; plan builder decision 14 (summary truncated, not rejected;
 // verdict/findings ignored outside review phases; required outputs must be
-// committed by a listed commit and unchanged since). Plan 3 decisions 12, 13,
-// 15 and 16 add per-purpose schemas, required outputs and revise outputs,
-// selected by the optional `attempt` passed to validateResult.
+// committed by a listed commit and unchanged since). Plan 3 decisions 5, 12,
+// 13, 15, 16 and 17 add tasks.json validation, per-purpose schemas, required
+// and revise outputs and implement evidence, selected by the optional
+// `attempt` passed to validateResult.
 //
 // Everything in result.json is untrusted worker output. Identity is compared
 // field by field against the attempt that was launched, so a result copied
@@ -98,6 +99,87 @@ export function requiredOutputs(job, { phase, purpose, round = null, task = null
 export function reviseOutputs(job, phase) {
   const author = job.pipeline.find((p) => p.kind === 'author' && (p.outputs ?? []).includes(phase.target));
   return author ? outputPaths(job, author.outputs) : [];
+}
+
+// Ids become path segments (tasks/<id>-report.md), so uniqueness and the
+// reserved generated-fix pattern are compared case-insensitively: T1 and t1
+// would share one report file on a case-insensitive filesystem.
+const TASK_ID_RE = /^[a-z0-9][a-z0-9-]{0,23}$/i;
+const FIX_TASK_ID_RE = /^F-[0-9a-f]{8}$/i;
+
+// Iterative DFS; returns the ids on the first cycle found, in path order.
+// Self and unknown dependencies are reported separately, so they are skipped.
+function findCycle(deps) {
+  const done = new Set();
+  for (const root of deps.keys()) {
+    if (done.has(root)) continue;
+    const trail = [root];
+    const next = [0];
+    while (trail.length) {
+      const id = trail[trail.length - 1];
+      const ds = deps.get(id);
+      const i = next[next.length - 1]++;
+      if (i >= ds.length) {
+        done.add(id);
+        trail.pop();
+        next.pop();
+        continue;
+      }
+      const d = ds[i];
+      if (d === id || !deps.has(d) || done.has(d)) continue;
+      const back = trail.indexOf(d);
+      if (back !== -1) return trail.slice(back);
+      trail.push(d);
+      next.push(0);
+    }
+  }
+  return [];
+}
+
+export function parseTasks(text, job) {
+  let list;
+  try {
+    list = JSON.parse(typeof text === 'string' && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  } catch (err) {
+    return { ok: false, errors: [`tasks.json is not valid JSON: ${err.message}`] };
+  }
+  if (!Array.isArray(list)) return { ok: false, errors: ['tasks.json must be a JSON array'] };
+  if (list.length === 0) return { ok: false, errors: ['tasks.json must list at least one task'] };
+  const errors = [];
+  const seen = new Set();
+  const known = new Set(list.filter((t) => isPlainObject(t) && typeof t.id === 'string').map((t) => t.id));
+  const deps = new Map();
+  list.forEach((t, i) => {
+    const at = `tasks[${i}]`;
+    if (!isPlainObject(t)) return errors.push(`${at} must be an object`);
+    const idOk = typeof t.id === 'string' && TASK_ID_RE.test(t.id);
+    if (!idOk) errors.push(`${at}.id must be 1-24 letters, digits or hyphens, starting with a letter or digit: ${JSON.stringify(t.id)}`);
+    else if (FIX_TASK_ID_RE.test(t.id)) errors.push(`${at}.id: ${JSON.stringify(t.id)} is reserved for generated fix tasks (F-<8 hex>)`);
+    else if (seen.has(t.id.toLowerCase())) errors.push(`${at}.id: duplicate id ${JSON.stringify(t.id)}`);
+    if (idOk) seen.add(t.id.toLowerCase());
+    if (!isNonEmptyString(t.title)) errors.push(`${at}.title must be a non-empty string`);
+    if (!isNonEmptyString(t.acceptance)) errors.push(`${at}.acceptance must be a non-empty string`);
+    if (!Array.isArray(t.repos) || t.repos.length === 0) errors.push(`${at}.repos must be a non-empty array of repo ids`);
+    else {
+      for (const r of t.repos) if (!job.repos.some((repo) => repo.id === r)) errors.push(`${at}.repos: unknown repo ${JSON.stringify(r)}`);
+    }
+    if (!Array.isArray(t.dependsOn)) errors.push(`${at}.dependsOn must be an array of task ids`);
+    else {
+      for (const d of t.dependsOn) {
+        if (d === t.id) errors.push(`${at}.dependsOn: ${JSON.stringify(d)} depends on itself`);
+        else if (!known.has(d)) errors.push(`${at}.dependsOn: unknown task ${JSON.stringify(d)}`);
+      }
+      if (idOk && !deps.has(t.id)) deps.set(t.id, t.dependsOn);
+    }
+    if (typeof t.verify !== 'string') errors.push(`${at}.verify must be a string (may be empty)`);
+  });
+  const cycle = findCycle(deps);
+  if (cycle.length) errors.push(`dependsOn: dependency cycle among ${cycle.map((id) => JSON.stringify(id)).join(', ')}`);
+  if (errors.length) return { ok: false, errors };
+  const tasks = list.map(({ id, title, repos, dependsOn, acceptance, verify }) => ({
+    id, title, repos: [...repos], dependsOn: [...dependsOn], acceptance, verify, origin: 'plan', fromAttemptId: null,
+  }));
+  return { ok: true, tasks };
 }
 
 export async function readResult(dir) {
@@ -278,6 +360,37 @@ function purposeErrors(value, { attempt, job }) {
   }
 }
 
+const isTaskWork = (attempt) => attempt.purpose === 'implement' || (attempt.purpose === 'fix' && attempt.task != null);
+const normalizeCmd = (cmd) => cmd.trim().replace(/\s+/g, ' ');
+
+// Decision 17. Runs only on well-formed evidence, so commit indexes line up
+// with evidence.commits. The primary repo carries the report file, so a
+// primary commit is always allowed but only counts as code evidence when the
+// task lists primary.
+function taskEvidenceErrors(value, { attempt, job, commits }) {
+  if (value.status !== 'done') return [];
+  const { taskDef } = attempt;
+  if (!isPlainObject(taskDef) || !Array.isArray(taskDef.repos)) {
+    throw new Error('superagent: validateResult needs attempt.taskDef for implement and task fix attempts');
+  }
+  if (commits.length === 0) return ['evidence.commits must list at least one commit'];
+  const errors = [];
+  const primary = primaryRepo(job).id;
+  const repos = taskDef.repos;
+  commits.forEach(({ repo }, i) => {
+    if (repo !== primary && !repos.includes(repo)) {
+      errors.push(`evidence.commits[${i}]: repo ${JSON.stringify(repo)} is not one of the task's repos (${repos.join(', ')})`);
+    }
+  });
+  if (!commits.some((c) => repos.includes(c.repo))) errors.push(`evidence.commits must include a commit in one of the task's repos (${repos.join(', ')})`);
+  const verify = typeof taskDef.verify === 'string' ? normalizeCmd(taskDef.verify) : '';
+  const checks = value.evidence?.checks ?? [];
+  if (verify && !checks.some((c) => c.exit === 0 && normalizeCmd(c.cmd) === verify)) {
+    errors.push(`evidence.checks must include the task's verify command ${JSON.stringify(verify)} with exit 0`);
+  }
+  return errors;
+}
+
 function schemaErrors(value, { phase, job, attempt }) {
   const errors = [];
   if (!STATUSES.includes(value.status)) errors.push(`status must be one of ${STATUSES.join('|')}`);
@@ -295,6 +408,7 @@ function schemaErrors(value, { phase, job, attempt }) {
   errors.push(...evidence.errors);
   if (attempt) errors.push(...purposeErrors(value, { attempt, job }));
   else if (phase?.kind === 'review') errors.push(...reviewErrors(value));
+  if (attempt && isTaskWork(attempt) && evidence.errors.length === 0) errors.push(...taskEvidenceErrors(value, { attempt, job, commits: evidence.commits }));
   return { errors, commits: evidence.commits };
 }
 
@@ -409,10 +523,26 @@ async function outputErrors({ phase, job, commits, git, attempt }) {
     if (status.code !== 0) errors.push(`could not check output status: ${rel}`);
     else if (status.stdout.trim() !== '') errors.push(`output changed after its commit: ${rel}`);
   }
-  if (attempt?.purpose === 'fix' && attempt.task == null && phase?.kind === 'review') {
-    errors.push(...(await reviseErrors({ phase, job, git })));
-  }
+  const reviewFix = attempt?.purpose === 'fix' && attempt.task == null && phase?.kind === 'review';
+  if (reviewFix) errors.push(...(await reviseErrors({ phase, job, git })));
+  const publishesTasks = (attempt?.purpose === 'author' && (phase?.outputs ?? []).includes('tasks'))
+    || (reviewFix && reviseOutputs(job, phase).includes(paths.tasks));
+  if (publishesTasks && errors.length === 0) errors.push(...(await tasksFileErrors(job)));
   return errors;
+}
+
+// Decision 5: a tasks.json that would deadlock the implement phase is refused
+// whenever it is published, by the planner or by a planner fix.
+async function tasksFileErrors(job) {
+  const rel = artifactPaths(job).tasks;
+  let text;
+  try {
+    text = await readFile(path.join(primaryRepo(job).worktree, ...rel.split('/')), 'utf8');
+  } catch (err) {
+    return [`could not read ${rel}: ${err.message}`];
+  }
+  const parsed = parseTasks(text, job);
+  return parsed.ok ? [] : parsed.errors.map((e) => `${rel}: ${e}`);
 }
 
 function truncateSummary(summary) {

@@ -8,7 +8,7 @@ import { slugify, createWorktree } from '../src/superagent/worktree.js';
 import { deriveJob } from '../src/superagent/store.js';
 import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import {
-  RESULT_FILE, artifactPaths, attemptDir, outcomeForResult, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
+  RESULT_FILE, artifactPaths, attemptDir, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
 } from '../src/superagent/results.js';
 
 const JOB_ID = '12345678-aaaa-bbbb-cccc-000000000000';
@@ -40,9 +40,15 @@ async function fixture({ commitSpec = true, specContent = '# Hello design\n', pi
   const branch = `superagent/${slug}`;
   const worktree = path.join(root, 'wt');
   const { baseSha } = await createWorktree({ origin, worktree, branch, copyLocalClaudeSettings: false });
+  const worktrees = { primary: { worktree, baseSha } };
+  for (const id of extraRepos) {
+    await initRepo(path.join(root, id));
+    const wt = path.join(root, `wt-${id}`);
+    worktrees[id] = { worktree: wt, ...(await createWorktree({ origin: path.join(root, id), worktree: wt, branch, copyLocalClaudeSettings: false })) };
+  }
   const repos = [{ id: 'primary', origin }, ...extraRepos.map((id) => ({ id, origin: path.join(root, id) }))];
   const events = provisionedEvents({ jobId: JOB_ID, slug, branch, createdDate: '2026-11-03', repos, ...(pipeline ? { pipeline } : {}) })
-    .map((ev) => (ev.type === 'worktree-created' && ev.repo === 'primary' ? { ...ev, worktree, baseSha } : ev));
+    .map((ev) => (ev.type === 'worktree-created' ? { ...ev, worktree: worktrees[ev.repo].worktree, baseSha: worktrees[ev.repo].baseSha } : ev));
   const job = deriveJob(events);
   const phase = job.pipeline.find((p) => p.phase === 'spec');
   const dir = attemptDir(worktree, { jobId: JOB_ID, phase: 'spec', task: null, attemptId: 'a2' });
@@ -62,7 +68,8 @@ async function fixture({ commitSpec = true, specContent = '# Hello design\n', pi
   const expected = (over = {}) => ({ jobId: JOB_ID, phaseId: 'spec', taskId: null, attemptId: 'a2', ...over });
   const check = (value, { phase: p = phase, expect = {}, attempt } = {}) => validateResult(value, { expected: expected(expect), phase: p, job, attempt });
   const commit = (rel, content = '# x\n', message = rel) => commitFile(worktree, rel, content, message);
-  return { root, origin, worktree, baseSha, job, phase, dir, specSha, goodResult, check, commit };
+  const commitIn = (repo, rel, content = 'x\n', message = rel) => commitFile(worktrees[repo].worktree, rel, content, message);
+  return { root, origin, worktree, baseSha, job, phase, dir, specSha, goodResult, check, commit, commitIn };
 }
 
 test('a result carrying an earlier attempt\'s id is invalid-result', async () => {
@@ -516,4 +523,191 @@ test('duplicate finding ids are invalid in review and fix results', async () => 
     f.as({ purpose: 'fix', final: true, reviewFindings: ['F1'] }));
   assert.equal(dupFix.ok, false);
   assert.match(dupFix.errors.join('\n'), /duplicate id "F1"/);
+});
+
+const task = (id, over = {}) => ({ id, title: `Task ${id}`, repos: ['primary'], dependsOn: [], acceptance: `${id} works.`, verify: 'npm test', ...over });
+const libJob = () => deriveJob(provisionedEvents({ jobId: JOB_ID, slug: SLUG, repos: [{ id: 'primary', origin: '/repo' }, { id: 'lib', origin: '/lib' }] }));
+
+test('parseTasks accepts a minimal valid list and fills origin/fromAttemptId', () => {
+  const text = `\ufeff${JSON.stringify([task('T1', { verify: '' }), task('t-2', { repos: ['lib', 'primary'], dependsOn: ['T1'], notes: 'dropped' })])}`;
+  const parsed = parseTasks(text, libJob());
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.errors));
+  assert.deepEqual(parsed.tasks, [
+    { id: 'T1', title: 'Task T1', repos: ['primary'], dependsOn: [], acceptance: 'T1 works.', verify: '', origin: 'plan', fromAttemptId: null },
+    { id: 't-2', title: 'Task t-2', repos: ['lib', 'primary'], dependsOn: ['T1'], acceptance: 't-2 works.', verify: 'npm test', origin: 'plan', fromAttemptId: null },
+  ]);
+  assert.equal(parseTasks(JSON.stringify([task('a'.repeat(24))]), libJob()).ok, true, 'a 24-character id is allowed');
+});
+
+test('parseTasks rejects malformed lists, naming the field', () => {
+  const { title, ...noTitle } = task('T1');
+  const { acceptance, ...noAcceptance } = task('T1');
+  const cases = [
+    ['not JSON', '[{', /JSON/],
+    ['not an array', JSON.stringify(task('T1')), /tasks\.json must be a JSON array/],
+    ['empty', '[]', /tasks\.json must list at least one task/],
+    ['a non-object element', JSON.stringify([task('T1'), 7]), /tasks\[1\] must be an object/],
+    ['missing title', JSON.stringify([noTitle]), /tasks\[0\]\.title/],
+    ['blank title', JSON.stringify([task('T1', { title: '  ' })]), /tasks\[0\]\.title/],
+    ['missing acceptance', JSON.stringify([noAcceptance]), /tasks\[0\]\.acceptance/],
+    ['empty repos', JSON.stringify([task('T1', { repos: [] })]), /tasks\[0\]\.repos/],
+    ['an unknown repo', JSON.stringify([task('T1', { repos: ['primary', 'nope'] })]), /tasks\[0\]\.repos: unknown repo "nope"/],
+    ['an unknown dependsOn', JSON.stringify([task('T1', { dependsOn: ['T9'] })]), /tasks\[0\]\.dependsOn: unknown task "T9"/],
+    ['a non-array dependsOn', JSON.stringify([task('T1', { dependsOn: 'T2' })]), /tasks\[0\]\.dependsOn/],
+    ['a self dependency', JSON.stringify([task('T1', { dependsOn: ['T1'] })]), /tasks\[0\]\.dependsOn: "T1" depends on itself/],
+    ['a dependency cycle (A->B->A)', JSON.stringify([task('A', { dependsOn: ['B'] }), task('B', { dependsOn: ['A'] }), task('C', { dependsOn: ['A'] })]), /dependsOn: dependency cycle among "A", "B"$/m],
+    ['a duplicate id', JSON.stringify([task('T1'), task('T1')]), /tasks\[1\]\.id: duplicate id "T1"/],
+    ['a duplicate id differing only in case', JSON.stringify([task('T1'), task('t1')]), /tasks\[1\]\.id: duplicate id "t1"/],
+    ['an id with a path separator', JSON.stringify([task('a/b')]), /tasks\[0\]\.id/],
+    ['an id with a backslash', JSON.stringify([task('a\\b')]), /tasks\[0\]\.id/],
+    ['an id with a space', JSON.stringify([task('a b')]), /tasks\[0\]\.id/],
+    ['an id over 24 chars', JSON.stringify([task('a'.repeat(25))]), /tasks\[0\]\.id/],
+    ['an id starting with a hyphen', JSON.stringify([task('-a')]), /tasks\[0\]\.id/],
+    ['a non-string verify', JSON.stringify([task('T1', { verify: null })]), /tasks\[0\]\.verify/],
+  ];
+  for (const [name, text, want] of cases) {
+    const parsed = parseTasks(text, libJob());
+    assert.equal(parsed.ok, false, name);
+    assert.match(parsed.errors.join('\n'), want, name);
+  }
+});
+
+test('parseTasks rejects an id matching the generated fix-task pattern', () => {
+  for (const id of ['F-0123abcd', 'f-0123ABCD']) {
+    const parsed = parseTasks(JSON.stringify([task(id)]), libJob());
+    assert.equal(parsed.ok, false, id);
+    assert.match(parsed.errors.join('\n'), /tasks\[0\]\.id: .*reserved/, id);
+  }
+  for (const id of ['F-0123abc', 'F-0123abcg', 'Fx0123abcd']) assert.equal(parseTasks(JSON.stringify([task(id)]), libJob()).ok, true, id);
+});
+
+async function commitFiles(cwd, files, message) {
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = path.join(cwd, ...rel.split('/'));
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, content);
+    git(cwd, 'add', '--', rel);
+  }
+  git(cwd, 'commit', '-q', '-m', message);
+  return git(cwd, 'rev-parse', 'HEAD');
+}
+
+const CYCLIC = [task('A', { dependsOn: ['B'] }), task('B', { dependsOn: ['A'] })];
+const VALID = [task('A'), task('B', { dependsOn: ['A'] })];
+
+async function planFixture(tasks) {
+  const f = await fixture({ pipeline: MILESTONE_2_PIPELINE });
+  const a = artifactPaths(f.job);
+  const sha = await commitFiles(f.worktree, { [a.plan]: '# plan\n', [a.tasks]: JSON.stringify(tasks) }, 'plan');
+  return { ...f, a, sha };
+}
+
+test('the planner\'s done result is invalid-result when tasks.json has a cycle', async () => {
+  const run = async (tasks) => {
+    const f = await planFixture(tasks);
+    const value = f.goodResult({ phaseId: 'plan', artifacts: [f.a.plan, f.a.tasks], evidence: { commits: [f.sha] } });
+    return f.check(value, { phase: phaseOf(f.job, 'plan'), expect: { phaseId: 'plan' }, attempt: { purpose: 'author' } });
+  };
+  const cyclic = await run(CYCLIC);
+  assert.equal(cyclic.ok, false);
+  assert.match(cyclic.errors.join('\n'), /dependsOn: dependency cycle among "A", "B"/);
+  const valid = await run(VALID);
+  assert.equal(valid.ok, true, JSON.stringify(valid.errors));
+});
+
+test('a planner fix that leaves a cyclic tasks.json is invalid-result (review-phase fix revalidates tasks)', async () => {
+  const run = async (tasks) => {
+    const f = await planFixture(tasks);
+    const response = reviewPaths(f.job, { phase: 'plan-review', round: 1 }).response;
+    const sha = await f.commit(response);
+    const value = f.goodResult({ phaseId: 'plan-review', artifacts: [response], evidence: { commits: [sha] }, findings: [finding('F1', 'major', 'declined: fine as is')] });
+    return f.check(value, { phase: phaseOf(f.job, 'plan-review'), expect: { phaseId: 'plan-review' }, attempt: { purpose: 'fix', round: 1, final: false, task: null, reviewFindings: ['F1'] } });
+  };
+  const cyclic = await run(CYCLIC);
+  assert.equal(cyclic.ok, false);
+  assert.match(cyclic.errors.join('\n'), /dependsOn: dependency cycle among "A", "B"/);
+  const valid = await run(VALID);
+  assert.equal(valid.ok, true, JSON.stringify(valid.errors));
+});
+
+async function implementFixture() {
+  const f = await fixture({ pipeline: MILESTONE_2_PIPELINE, extraRepos: ['lib'] });
+  const report = reviewPaths(f.job, { taskId: 'T1' }).report;
+  const reportSha = await f.commit(report, '# T1 report\n');
+  const primary = (sha) => ({ repo: 'primary', sha });
+  const lib = (sha) => ({ repo: 'lib', sha });
+  const result = (commits, checks = [{ cmd: 'npm test', exit: 0 }], over = {}) => f.goodResult({
+    phaseId: 'implement', taskId: 'T1', artifacts: [report], evidence: { commits, checks }, ...over,
+  });
+  const as = (taskDef, attempt = {}) => ({
+    phase: phaseOf(f.job, 'implement'),
+    expect: { phaseId: 'implement', taskId: 'T1' },
+    attempt: { purpose: 'implement', round: 1, final: false, task: 'T1', taskDef: task('T1', taskDef), ...attempt },
+  });
+  return { ...f, report, reportSha, primary, lib, result, as };
+}
+
+test('implement: no commit listed is invalid; a missing verify check is invalid; a verify check with exit 1 is invalid; matching check with exit 0 and a commit in a listed repo is ok', async () => {
+  const f = await implementFixture();
+  const codeSha = await f.commitIn('primary', 'src/hello.js', 'export const hello = 1;\n');
+  const commits = [f.primary(f.reportSha), f.primary(codeSha)];
+
+  const none = await f.check(f.result([]), f.as());
+  assert.equal(none.ok, false);
+  assert.match(none.errors.join('\n'), /evidence\.commits must list at least one commit/);
+
+  const noCheck = await f.check(f.result(commits, [{ cmd: 'npm run lint', exit: 0 }]), f.as());
+  assert.equal(noCheck.ok, false);
+  assert.match(noCheck.errors.join('\n'), /evidence\.checks must include the task's verify command "npm test" with exit 0/);
+
+  const failing = await f.check(f.result(commits, [{ cmd: 'npm test', exit: 1 }]), f.as());
+  assert.equal(failing.ok, false);
+  assert.match(failing.errors.join('\n'), /verify command "npm test"/);
+
+  const ok = await f.check(f.result(commits, [{ cmd: 'npm test', exit: 1 }, { cmd: '  npm \t test\n', exit: 0 }]), f.as({ verify: ' npm  test ' }));
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+});
+
+test('implement: a commit in a non-primary repo the task does not list is invalid', async () => {
+  const f = await implementFixture();
+  const codeSha = await f.commitIn('primary', 'src/hello.js');
+  const libSha = await f.commitIn('lib', 'lib.js');
+  const v = await f.check(f.result([f.primary(f.reportSha), f.primary(codeSha), f.lib(libSha)]), f.as({ repos: ['primary'] }));
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join('\n'), /evidence\.commits\[2\]: repo "lib" is not one of the task's repos/);
+});
+
+test('implement: a task listing only an additional repo is ok with one commit in that repo plus the primary report commit, and invalid with only the primary report commit', async () => {
+  const f = await implementFixture();
+  const libSha = await f.commitIn('lib', 'lib.js');
+  const ok = await f.check(f.result([f.primary(f.reportSha), f.lib(libSha)]), f.as({ repos: ['lib'] }));
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  const reportOnly = await f.check(f.result([f.primary(f.reportSha)]), f.as({ repos: ['lib'] }));
+  assert.equal(reportOnly.ok, false);
+  assert.match(reportOnly.errors.join('\n'), /evidence\.commits must include a commit in one of the task's repos \(lib\)/);
+});
+
+test('implement: an empty verify string needs no check', async () => {
+  const f = await implementFixture();
+  const codeSha = await f.commitIn('primary', 'src/hello.js');
+  for (const verify of ['', '  \n']) {
+    const v = await f.check(f.result([f.primary(f.reportSha), f.primary(codeSha)], []), f.as({ verify }));
+    assert.equal(v.ok, true, JSON.stringify(v.errors));
+  }
+});
+
+test('implement: a task fix follows the same evidence rules; a blocked result needs none; a done result needs taskDef', async () => {
+  const f = await implementFixture();
+  const fix = { purpose: 'fix', reviewFindings: ['F1'] };
+  const findings = [finding('F1', 'major', 'fixed')];
+  const reportOnly = await f.check(f.result([f.primary(f.reportSha)], undefined, { findings }), f.as({ repos: ['lib'] }, fix));
+  assert.equal(reportOnly.ok, false);
+  assert.match(reportOnly.errors.join('\n'), /task's repos \(lib\)/);
+  const libSha = await f.commitIn('lib', 'lib.js');
+  const ok = await f.check(f.result([f.primary(f.reportSha), f.lib(libSha)], undefined, { findings }), f.as({ repos: ['lib'] }, fix));
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+
+  const blocked = await f.check(f.result([], [], { status: 'blocked', question: 'Which port?' }), f.as());
+  assert.equal(blocked.ok, true, JSON.stringify(blocked.errors));
+  await assert.rejects(f.check(f.result([f.primary(f.reportSha)]), f.as({}, { taskDef: undefined })), /taskDef/);
 });
