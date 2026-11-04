@@ -1,0 +1,287 @@
+// Superagent job store: one append-only events.jsonl per job, a pure
+// deriveJob() over it, and a state.json mirror for humans and tooling.
+//
+// Spec: docs/superpowers/specs/2026-11-03-superagent-design.md, section
+// "Restart and recovery": "`events.jsonl` is the source of truth; `state.json`
+// is a derived cache". state.json is written after every append and never
+// read back - load() always rebuilds from events.jsonl.
+//
+// Torn tail: a hard kill mid-append can leave a final line without its '\n'.
+// That line is ignored on read and truncated away before the next append.
+// Any other unparseable line is corruption and is refused, never rewritten.
+import { mkdir, open, readFile, readdir } from 'node:fs/promises';
+import path from 'node:path';
+import { writeJsonAtomic } from '../json-store.js';
+import { isSafeSessionId } from '../safe-id.js';
+import { defaultSuperagentRoot } from './config.js';
+
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact'];
+
+const NEWLINE = 0x0a;
+
+export function deriveJob(events) {
+  const first = events[0];
+  if (first?.type !== 'job-created') throw new Error('superagent: events must start with job-created');
+  const job = {
+    jobId: first.jobId,
+    slug: first.slug,
+    title: first.title,
+    idea: first.idea,
+    mode: first.mode,
+    branch: first.branch,
+    createdAt: first.at ?? null,
+    createdDate: first.createdDate,
+    repos: (first.repos ?? []).map((r) => ({ id: r.id, origin: r.origin, worktree: null, baseSha: null, settingsCopy: null })),
+    pipeline: structuredClone(first.pipeline ?? []),
+    models: structuredClone(first.models ?? {}),
+    limits: structuredClone(first.limits ?? {}),
+    workerPermissionMode: first.workerPermissionMode,
+    copyLocalClaudeSettings: first.copyLocalClaudeSettings,
+    state: 'provisioning',
+    reason: null,
+    detail: null,
+    phaseIndex: 0,
+    phaseId: null,
+    attempts: [],
+    lastSeq: first.seq ?? null,
+  };
+  const attempt = (id) => job.attempts.find((a) => a.attemptId === id);
+  const setState = (state, reason = null, detail = null) => {
+    job.state = state;
+    job.reason = reason;
+    job.detail = detail;
+  };
+  for (let i = 1; i < events.length; i++) {
+    const ev = events[i];
+    switch (ev.type) {
+      case 'job-created':
+        throw new Error(`superagent: a second job-created at seq ${ev.seq}`);
+      case 'worktree-created': {
+        const repo = job.repos.find((r) => r.id === ev.repo);
+        if (repo) Object.assign(repo, { worktree: ev.worktree ?? null, baseSha: ev.baseSha ?? null, settingsCopy: ev.settingsCopy ?? null });
+        break;
+      }
+      case 'job-provisioned': setState('running'); break;
+      case 'job-failed': setState('failed', 'job-failed', { error: ev.error }); break;
+      case 'needs-you': setState('needs-you', ev.reason ?? null, ev.detail ?? null); break;
+      case 'job-accepted': setState('done'); break;
+      case 'job-stopped': setState('stopped'); break;
+      case 'attempt-started':
+        job.attempts.push({
+          attemptId: ev.attemptId,
+          phase: ev.phase,
+          task: ev.task ?? null,
+          role: ev.role,
+          model: ev.model,
+          n: ev.n,
+          recovery: ev.recovery ?? false,
+          previousAttemptId: ev.previousAttemptId ?? null,
+          dir: ev.dir ?? null,
+          sessionId: null,
+          startedAt: ev.at ?? null,
+          endedAt: null,
+          outcome: null,
+          reason: null,
+          signature: null,
+          summary: null,
+          question: null,
+          nudges: [],
+          precompacts: [],
+        });
+        break;
+      case 'attempt-session': {
+        const a = attempt(ev.attemptId);
+        if (a) a.sessionId = ev.sessionId;
+        break;
+      }
+      case 'attempt-nudged':
+        attempt(ev.attemptId)?.nudges.push({ kind: ev.kind, at: ev.at ?? null });
+        break;
+      case 'precompact':
+        attempt(ev.attemptId)?.precompacts.push({ trigger: ev.trigger ?? null, at: ev.at ?? null });
+        break;
+      case 'attempt-ended': {
+        const a = attempt(ev.attemptId);
+        if (!a) break;
+        Object.assign(a, {
+          endedAt: ev.at ?? null,
+          outcome: ev.outcome,
+          reason: ev.reason ?? null,
+          signature: ev.signature ?? null,
+          summary: ev.summary ?? null,
+          question: ev.question ?? null,
+        });
+        if (ev.outcome === 'done' && a.phase === job.pipeline[job.phaseIndex]?.phase) job.phaseIndex++;
+        break;
+      }
+      default:
+        break;
+    }
+    job.lastSeq = ev.seq ?? job.lastSeq;
+  }
+  job.phaseId = job.pipeline[job.phaseIndex]?.phase ?? null;
+  return job;
+}
+
+function corruptError(file, line) {
+  const err = new Error(`superagent: ${file} line ${line} is not valid JSON - refusing to read or append. Fix the file by hand.`);
+  err.code = 'ERR_EVENTS_CORRUPT';
+  err.line = line;
+  return err;
+}
+
+// keepBytes is the length up to and including the last '\n'; tornBytes is
+// whatever follows it (a torn final line). Throws ENOENT for a missing file.
+async function readEvents(file) {
+  const buf = await readFile(file);
+  const keepBytes = buf.length === 0 || buf[buf.length - 1] === NEWLINE ? buf.length : buf.lastIndexOf(NEWLINE) + 1;
+  const lines = buf.subarray(0, keepBytes).toString('utf8').split('\n');
+  lines.pop();
+  const events = lines.map((line, i) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      throw corruptError(file, i + 1);
+    }
+  });
+  return { events, keepBytes, tornBytes: buf.length - keepBytes };
+}
+
+export function createSuperagentStore({ rootDir = path.join(defaultSuperagentRoot(), 'jobs'), now = Date.now, logImpl = console.error } = {}) {
+  // jobId -> { events, job, keepBytes, tornBytes } once read in this process.
+  const cache = new Map();
+  const chains = new Map();
+
+  function jobDir(jobId) {
+    if (!isSafeSessionId(jobId)) throw new Error(`superagent: unsafe job id ${JSON.stringify(jobId)}`);
+    return path.join(rootDir, jobId);
+  }
+  const eventsFile = (jobId) => path.join(jobDir(jobId), 'events.jsonl');
+
+  function enqueue(jobId, work) {
+    const prev = chains.get(jobId) || Promise.resolve();
+    const run = prev.catch(() => {}).then(work);
+    chains.set(jobId, run);
+    run.finally(() => {
+      if (chains.get(jobId) === run) chains.delete(jobId);
+    }).catch(() => {});
+    return run;
+  }
+
+  async function prime(jobId, { missingOk }) {
+    if (cache.has(jobId)) return cache.get(jobId);
+    const file = eventsFile(jobId);
+    let read;
+    try {
+      read = await readEvents(file);
+    } catch (err) {
+      if (err.code !== 'ENOENT' || !missingOk) throw err;
+      read = { events: [], keepBytes: 0, tornBytes: 0 };
+    }
+    const entry = { ...read, job: read.events.length ? deriveJob(read.events) : null };
+    cache.set(jobId, entry);
+    return entry;
+  }
+
+  async function repairTornTail(jobId, entry) {
+    if (!entry.tornBytes) return;
+    const file = eventsFile(jobId);
+    const fh = await open(file, 'r+');
+    try {
+      await fh.truncate(entry.keepBytes);
+      await fh.datasync();
+    } finally {
+      await fh.close();
+    }
+    entry.tornBytes = 0;
+    logImpl(`superagent: dropped a torn final line in ${file}`);
+  }
+
+  function append(jobId, event) {
+    let dir;
+    try {
+      dir = jobDir(jobId);
+      if (!event || !EVENT_TYPES.includes(event.type)) throw new Error(`superagent: unknown event type ${JSON.stringify(event?.type)}`);
+      if ('seq' in event || 'at' in event) throw new Error('superagent: events must not carry their own seq or at');
+      if (event.type === 'job-created' && event.jobId !== jobId) throw new Error(`superagent: job-created for ${event.jobId} appended to ${jobId}`);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    const written = enqueue(jobId, async () => {
+      const entry = await prime(jobId, { missingOk: true });
+      const stamped = { seq: (entry.job?.lastSeq ?? 0) + 1, at: now(), ...event };
+      const events = [...entry.events, stamped];
+      const job = deriveJob(events);
+      await repairTornTail(jobId, entry);
+      await mkdir(dir, { recursive: true });
+      const line = Buffer.from(JSON.stringify(stamped) + '\n', 'utf8');
+      try {
+        const fh = await open(eventsFile(jobId), 'a');
+        try {
+          await fh.write(line);
+          await fh.datasync();
+        } finally {
+          await fh.close();
+        }
+      } catch (err) {
+        // The line may be partly on disk; re-read (and repair) before the next append.
+        cache.delete(jobId);
+        throw err;
+      }
+      Object.assign(entry, { events, job, keepBytes: entry.keepBytes + line.length });
+      return stamped;
+    });
+    enqueue(jobId, async () => {
+      try {
+        await written;
+      } catch {
+        return;
+      }
+      const entry = cache.get(jobId);
+      if (!entry?.job) return;
+      try {
+        await writeJsonAtomic(path.join(dir, 'state.json'), entry.job);
+      } catch (err) {
+        logImpl(`superagent: could not write state.json for ${jobId}: ${err.message}`);
+      }
+    });
+    return written;
+  }
+
+  function load(jobId) {
+    try {
+      jobDir(jobId);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return enqueue(jobId, async () => {
+      const entry = await prime(jobId, { missingOk: false });
+      if (!entry.job) throw new Error(`superagent: ${eventsFile(jobId)} has no events`);
+      return structuredClone(entry.job);
+    });
+  }
+
+  function get(jobId) {
+    const job = cache.get(jobId)?.job;
+    return job ? structuredClone(job) : null;
+  }
+
+  async function listJobIds() {
+    let entries;
+    try {
+      entries = await readdir(rootDir, { withFileTypes: true });
+    } catch (err) {
+      if (err.code === 'ENOENT') return [];
+      throw err;
+    }
+    return entries.filter((e) => e.isDirectory() && isSafeSessionId(e.name)).map((e) => e.name).sort();
+  }
+
+  async function flush() {
+    while (chains.size) {
+      await Promise.allSettled([...chains.values()]);
+    }
+  }
+
+  return { append, load, get, listJobIds, jobDir, flush };
+}
