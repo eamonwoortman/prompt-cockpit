@@ -88,6 +88,38 @@ test('the milestone-1 fixture validates only through its own entry point', () =>
   d.models['spec-writer'].provider = 'grok';
   assert.ok(hasError(validateMilestoneFixture(d), "models['spec-writer'].provider"));
   assert.ok(Object.isFrozen(MILESTONE_1_PIPELINE));
+  assert.ok(Object.isFrozen(MILESTONE_1_PIPELINE[0]));
+  assert.ok(Object.isFrozen(MILESTONE_1_PIPELINE[0].inputs));
+  assert.ok(Object.isFrozen(MILESTONE_1_PIPELINE[0].outputs));
+});
+
+test('the composition rule reports a changed outputs contract at pipeline[i].outputs', () => {
+  const d = defaultConfig();
+  d.pipeline[3].outputs = ['plan'];
+  const result = validateDefaults(d);
+  assert.ok(hasError(result, 'pipeline[3].outputs'));
+  assert.ok(!hasError(result, 'pipeline[3].inputs'));
+});
+
+test('malformed pipeline entries are reported, not thrown', async () => {
+  const malformed = [
+    ['null entry', (d) => { d.pipeline = [null]; }, 'pipeline[0]'],
+    ['inputs not an array', (d) => { d.pipeline[1].inputs = 5; }, 'pipeline[1].inputs'],
+    ['outputs not an array', (d) => { d.pipeline[1].outputs = 5; }, 'pipeline[1].outputs'],
+    ['per-task inputs not an array', (d) => { d.pipeline[5].inputs = 5; }, 'pipeline[5].inputs'],
+  ];
+  const dir = await tempDir('sa-config-');
+  const cfg = createSuperagentConfig({ filePath: path.join(dir, 'config.json') });
+  await cfg.load();
+  for (const [name, mutate, expectedPath] of malformed) {
+    const d = defaultConfig();
+    mutate(d);
+    let result;
+    assert.doesNotThrow(() => { result = validateDefaults(d); }, name);
+    assert.ok(hasError(result, expectedPath), `${name}: expected an error at ${expectedPath}`);
+    assert.doesNotThrow(() => validateMilestoneFixture(d), name);
+    await assert.rejects(cfg.save({ defaults: { pipeline: d.pipeline } }), (err) => err.code === 'ERR_INVALID_CONFIG', name);
+  }
 });
 
 test('an unpriced model is a warning, not an error', () => {

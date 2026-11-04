@@ -15,9 +15,15 @@ export const PHASE_KINDS = ['author', 'review', 'per-task', 'human'];
 export const WORKER_PERMISSION_MODES = ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk'];
 const MODES = ['automatic', 'manual'];
 
+const freezePhase = (p) => Object.freeze({
+  ...p,
+  inputs: Object.freeze([...p.inputs]),
+  ...(p.outputs ? { outputs: Object.freeze([...p.outputs]) } : {}),
+});
+
 export const MILESTONE_1_PIPELINE = Object.freeze([
-  { phase: 'spec', kind: 'author', role: 'spec-writer', inputs: ['idea'], outputs: ['spec'] },
-  { phase: 'accept', kind: 'human', inputs: ['spec'] },
+  freezePhase({ phase: 'spec', kind: 'author', role: 'spec-writer', inputs: ['idea'], outputs: ['spec'] }),
+  freezePhase({ phase: 'accept', kind: 'human', inputs: ['spec'] }),
 ]);
 
 export function defaultSuperagentRoot() {
@@ -84,7 +90,7 @@ const V1_NON_REVIEW = defaultConfig().pipeline.filter((p) => p.kind !== 'review'
 const sameList = (a, b) => Array.isArray(a) && a.length === b.length && a.every((x, i) => x === b[i]);
 
 function checkComposition(pipeline, errors) {
-  const nonReview = pipeline.map((phase, i) => ({ phase, i })).filter(({ phase }) => phase.kind !== 'review');
+  const nonReview = pipeline.map((phase, i) => ({ phase, i })).filter(({ phase }) => isPlainObject(phase) && phase.kind !== 'review');
   const shapeOk = nonReview.length === V1_NON_REVIEW.length
     && nonReview.every(({ phase }, k) => phase.phase === V1_NON_REVIEW[k].phase && phase.kind === V1_NON_REVIEW[k].kind);
   if (!shapeOk) {
@@ -121,6 +127,21 @@ function checkPipeline(d, errors, { composition }) {
 
   pipeline.forEach((phase, i) => {
     const at = (field) => `pipeline[${i}].${field}`;
+    if (!isPlainObject(phase)) {
+      errors.push({ path: `pipeline[${i}]`, message: 'phase must be an object' });
+      return;
+    }
+    const list = (field) => {
+      const value = phase[field];
+      if (value === undefined) return [];
+      if (!Array.isArray(value)) {
+        errors.push({ path: at(field), message: `${field} must be an array` });
+        return [];
+      }
+      return value;
+    };
+    const inputs = list('inputs');
+    const outputs = list('outputs');
     if (!isNonEmptyString(phase?.phase)) {
       errors.push({ path: at('phase'), message: 'phase id is required' });
     } else if (seen.has(phase.phase)) {
@@ -132,7 +153,7 @@ function checkPipeline(d, errors, { composition }) {
       errors.push({ path: at('kind'), message: `unknown kind "${phase?.kind}"` });
     }
     if (phase?.kind !== 'human') requireRole(phase?.role, 'role', i);
-    for (const input of phase?.inputs ?? []) {
+    for (const input of inputs) {
       if (!produced.has(input)) {
         errors.push({ path: at('inputs'), message: `input "${input}" is not produced by an earlier phase` });
       }
@@ -143,14 +164,14 @@ function checkPipeline(d, errors, { composition }) {
       requireRole(phase.author, 'author', i);
     }
     if (phase?.kind === 'per-task') {
-      if (!(phase.inputs ?? []).includes('tasks')) errors.push({ path: at('inputs'), message: 'per-task needs "tasks" among its inputs' });
+      if (!inputs.includes('tasks')) errors.push({ path: at('inputs'), message: 'per-task needs "tasks" among its inputs' });
       else if (!produced.has('tasks')) errors.push({ path: at('inputs'), message: '"tasks" is not produced by an earlier phase' });
       if (phase.taskReview !== undefined) requireRole(phase.taskReview, 'taskReview', i);
     }
     if (phase?.maxRounds !== undefined && !isPositiveInt(phase.maxRounds)) {
       errors.push({ path: at('maxRounds'), message: 'maxRounds must be a positive integer' });
     }
-    for (const output of phase?.outputs ?? []) produced.add(output);
+    for (const output of outputs) produced.add(output);
   });
 
   const humans = pipeline.map((p, i) => [p, i]).filter(([p]) => p?.kind === 'human');
