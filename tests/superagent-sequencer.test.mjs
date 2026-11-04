@@ -106,7 +106,11 @@ test('helpers: attemptCap, attemptsFor and outcomeForResult', () => {
   assert.deepEqual(attemptsFor(job, 'spec').map((a) => a.attemptId), ['a1']);
   assert.deepEqual(attemptsFor(job, 'spec', 'T1').map((a) => a.attemptId), ['a2']);
   assert.deepEqual(outcomeForResult({ status: 'done' }), { outcome: 'done' });
-  assert.deepEqual(outcomeForResult({ status: 'failed' }), { outcome: 'failed', reason: 'failed' });
+  const failed = outcomeForResult({ status: 'failed' });
+  assert.equal(failed.reason, 'failed');
+  assert.equal(typeof failed.signature, 'string');
   assert.deepEqual(outcomeForResult({ status: 'blocked', question: 'Q?' }), { outcome: 'question', question: 'Q?' });
-  assert.deepEqual(outcomeForResult({ status: 'blocked' }), { outcome: 'failed', reason: 'blocked' });
+  const blocked = outcomeForResult({ status: 'blocked' });
+  assert.equal(blocked.reason, 'blocked');
+  assert.equal(typeof blocked.signature, 'string');
 });

@@ -4,7 +4,9 @@
 // Spec: docs/superpowers/specs/2026-11-03-superagent-design.md, "Worker
 // contract"; plan builder decision 14 (summary truncated, not rejected;
 // verdict/findings ignored outside review phases; required outputs must be
-// committed by a listed commit and unchanged since).
+// committed by a listed commit and unchanged since). Plan 3 decisions 12, 13,
+// 15 and 16 add per-purpose schemas, required outputs and revise outputs,
+// selected by the optional `attempt` passed to validateResult.
 //
 // Everything in result.json is untrusted worker output. Identity is compared
 // field by field against the attempt that was launched, so a result copied
@@ -14,6 +16,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { isSafeSessionId } from '../safe-id.js';
+import { failureSignature } from './sequencer.js';
 import { defaultGit } from './worktree.js';
 
 export const RESULT_FILE = 'result.json';
@@ -49,6 +52,52 @@ export function artifactPaths(job) {
     tasks: `docs/superpowers/jobs/${slug}/tasks.json`,
     testReport: `docs/superpowers/jobs/${slug}/test-report.md`,
   };
+}
+
+// Decision 15. A key whose inputs were not given (no round, no taskId) is null.
+export function reviewPaths(job, { phase = null, round = null, taskId = null }) {
+  const jobs = `docs/superpowers/jobs/${job.slug}`;
+  const p = phase == null ? null : segment('phase', phase);
+  const t = taskId == null ? null : segment('taskId', taskId);
+  const r = Number.isInteger(round);
+  return {
+    review: p && r ? `${jobs}/reviews/${p}-r${round}.md` : null,
+    response: p && r ? `${jobs}/reviews/${p}-r${round}-response.md` : null,
+    verify: p ? `${jobs}/reviews/${p}-verify.md` : null,
+    report: t ? `${jobs}/tasks/${t}-report.md` : null,
+    taskReview: t && r ? `${jobs}/tasks/${t}-review-r${round}.md` : null,
+    taskVerify: t ? `${jobs}/tasks/${t}-verify.md` : null,
+  };
+}
+
+function outputPaths(job, keys) {
+  const paths = artifactPaths(job);
+  return keys.map((key) => {
+    if (!paths[key]) throw new Error(`superagent: unknown output ${JSON.stringify(key)}`);
+    return paths[key];
+  });
+}
+
+const PURPOSE_OUTPUT = {
+  review: () => 'review',
+  fix: (scoped) => (scoped ? 'report' : 'response'),
+  verify: (scoped) => (scoped ? 'taskVerify' : 'verify'),
+  implement: () => 'report',
+  'task-review': () => 'taskReview',
+};
+
+export function requiredOutputs(job, { phase, purpose, round = null, task = null }) {
+  if (purpose === 'author' || purpose === 'test') return outputPaths(job, phase?.outputs ?? []);
+  if (!PURPOSE_OUTPUT[purpose]) throw new Error(`superagent: unknown attempt purpose ${JSON.stringify(purpose)}`);
+  const key = PURPOSE_OUTPUT[purpose](task != null);
+  const rel = reviewPaths(job, { phase: phase?.phase ?? null, round, taskId: task })[key];
+  if (!rel) throw new Error(`superagent: ${purpose} outputs need the phase, task and round they belong to (got round ${JSON.stringify(round)})`);
+  return [rel];
+}
+
+export function reviseOutputs(job, phase) {
+  const author = job.pipeline.find((p) => p.kind === 'author' && (p.outputs ?? []).includes(phase.target));
+  return author ? outputPaths(job, author.outputs) : [];
 }
 
 export async function readResult(dir) {
@@ -124,26 +173,109 @@ function evidenceErrors(evidence, job) {
   return { errors, commits };
 }
 
-function reviewErrors(value) {
+// `disposition: false` is a tester's finding (no disposition; an optional
+// `repo` that must be one of the job's repos).
+function findingErrors(findings, { job = null, disposition = true } = {}) {
+  if (!Array.isArray(findings)) return ['findings must be an array'];
   const errors = [];
-  if (!VERDICTS.includes(value.verdict)) errors.push(`verdict must be one of ${VERDICTS.join('|')}`);
-  if (!Array.isArray(value.findings)) return [...errors, 'findings must be an array'];
-  value.findings.forEach((f, i) => {
+  findings.forEach((f, i) => {
     const at = `findings[${i}]`;
     if (!isPlainObject(f)) return errors.push(`${at} must be an object`);
     if (!isNonEmptyString(f.id)) errors.push(`${at}.id must be a non-empty string`);
     if (!SEVERITIES.includes(f.severity)) errors.push(`${at}.severity must be one of ${SEVERITIES.join('|')}`);
     if (!isNonEmptyString(f.text)) errors.push(`${at}.text must be a non-empty string`);
-    const d = f.disposition;
-    const declined = typeof d === 'string' ? /^declined:(.*)$/s.exec(d) : null;
-    if (!(d === 'fixed' || d === 'open' || (declined && declined[1].trim() !== ''))) {
-      errors.push(`${at}.disposition must be fixed, open or "declined: <reason>"`);
+    if (disposition) {
+      const d = f.disposition;
+      const declined = typeof d === 'string' ? /^declined:(.*)$/s.exec(d) : null;
+      if (!(d === 'fixed' || d === 'open' || (declined && declined[1].trim() !== ''))) {
+        errors.push(`${at}.disposition must be fixed, open or "declined: <reason>"`);
+      }
+    } else if (f.repo !== undefined && !job.repos.some((r) => r.id === f.repo)) {
+      errors.push(`${at}.repo: unknown repo ${JSON.stringify(f.repo)}`);
     }
   });
   return errors;
 }
 
-function schemaErrors(value, { phase, job }) {
+function reviewErrors(value) {
+  const errors = [];
+  if (!VERDICTS.includes(value.verdict)) errors.push(`verdict must be one of ${VERDICTS.join('|')}`);
+  return [...errors, ...findingErrors(value.findings)];
+}
+
+function verdictErrors(value) {
+  const errors = reviewErrors(value);
+  if (!Array.isArray(value.findings)) return errors;
+  const openBlocker = value.findings.some((f) => isPlainObject(f) && f.severity === 'blocker' && f.disposition === 'open');
+  if (value.verdict === 'approve' && openBlocker) errors.push('approve is not allowed with an open blocker finding');
+  if (value.verdict === 'changes' && value.findings.length === 0) errors.push('changes must list at least one finding');
+  return errors;
+}
+
+// attempt.reviewFindings is the round's review findings, as ids or finding
+// objects. A finding the review graded blocker stays a blocker even if the fix
+// result downgrades it.
+function fixErrors(value, attempt) {
+  const errors = findingErrors(value.findings);
+  if (!Array.isArray(value.findings)) return errors;
+  const reviewed = new Map();
+  for (const f of attempt.reviewFindings ?? []) {
+    if (typeof f === 'string') reviewed.set(f, null);
+    else if (isPlainObject(f) && typeof f.id === 'string') reviewed.set(f.id, f.severity ?? null);
+  }
+  value.findings.forEach((f, i) => {
+    if (!isPlainObject(f) || typeof f.id !== 'string') return;
+    if (!reviewed.has(f.id)) return errors.push(`findings[${i}]: ${JSON.stringify(f.id)} is not a finding of the review`);
+    const blocker = f.severity === 'blocker' || reviewed.get(f.id) === 'blocker';
+    if (blocker && f.disposition === 'open' && !attempt.final) {
+      errors.push(`findings[${i}]: blocker ${JSON.stringify(f.id)} may only stay open in the final fix`);
+    }
+  });
+  return errors;
+}
+
+function verifyErrors(value, attempt) {
+  if (!Array.isArray(value.verified)) return ['verified must be an array'];
+  const errors = [];
+  const seen = new Set();
+  value.verified.forEach((v, i) => {
+    const at = `verified[${i}]`;
+    if (!isPlainObject(v)) return errors.push(`${at} must be an object`);
+    if (!isNonEmptyString(v.id)) errors.push(`${at}.id must be a non-empty string`);
+    else if (seen.has(v.id)) errors.push(`${at}: duplicate id ${JSON.stringify(v.id)}`);
+    else seen.add(v.id);
+    if (typeof v.verified !== 'boolean') errors.push(`${at}.verified must be a boolean`);
+    if (!isNonEmptyString(v.evidence)) errors.push(`${at}.evidence must be a non-empty string`);
+  });
+  const contested = new Set(attempt.contested ?? []);
+  for (const id of contested) if (!seen.has(id)) errors.push(`verified is missing contested id ${JSON.stringify(id)}`);
+  for (const id of seen) if (!contested.has(id)) errors.push(`verified lists ${JSON.stringify(id)}, which is not contested`);
+  return errors;
+}
+
+function testErrors(value, job) {
+  if (value.status !== 'failed') return [];
+  if (!Array.isArray(value.findings) || value.findings.length === 0) return ['a failed test result must list at least one finding'];
+  return findingErrors(value.findings, { job, disposition: false });
+}
+
+function purposeErrors(value, { attempt, job }) {
+  switch (attempt.purpose) {
+    case 'review':
+    case 'task-review':
+      return verdictErrors(value);
+    case 'fix':
+      return fixErrors(value, attempt);
+    case 'verify':
+      return verifyErrors(value, attempt);
+    case 'test':
+      return testErrors(value, job);
+    default:
+      return [];
+  }
+}
+
+function schemaErrors(value, { phase, job, attempt }) {
   const errors = [];
   if (!STATUSES.includes(value.status)) errors.push(`status must be one of ${STATUSES.join('|')}`);
   if (!Array.isArray(value.artifacts)) errors.push('artifacts must be an array');
@@ -158,7 +290,8 @@ function schemaErrors(value, { phase, job }) {
   else if (question !== null && value.status !== 'blocked') errors.push('question is only allowed with status blocked');
   const evidence = evidenceErrors(value.evidence, job);
   errors.push(...evidence.errors);
-  if (phase?.kind === 'review') errors.push(...reviewErrors(value));
+  if (attempt) errors.push(...purposeErrors(value, { attempt, job }));
+  else if (phase?.kind === 'review') errors.push(...reviewErrors(value));
   return { errors, commits: evidence.commits };
 }
 
@@ -201,10 +334,41 @@ async function resolveCommits(commits, { job, git }) {
   return { errors, resolved };
 }
 
-async function outputErrors({ phase, job, commits, git }) {
+// Decision 16: the author may decline every finding, so the revised artifacts
+// need only exist, be non-empty and be clean; no commit has to touch them.
+async function reviseErrors({ phase, job, git }) {
+  const errors = [];
+  const primary = primaryRepo(job);
+  for (const rel of reviseOutputs(job, phase)) {
+    let info;
+    try {
+      info = await stat(path.join(primary.worktree, ...rel.split('/')));
+    } catch {
+      errors.push(`missing revised output: ${rel}`);
+      continue;
+    }
+    if (!info.isFile()) {
+      errors.push(`revised output is not a file: ${rel}`);
+      continue;
+    }
+    if (info.size === 0) {
+      errors.push(`empty revised output: ${rel}`);
+      continue;
+    }
+    const status = await git(['status', '--porcelain', '--', rel], { cwd: primary.worktree });
+    if (status.code !== 0) errors.push(`could not check revised output status: ${rel}`);
+    else if (status.stdout.trim() !== '') errors.push(`revised output has uncommitted changes: ${rel}`);
+  }
+  return errors;
+}
+
+async function outputErrors({ phase, job, commits, git, attempt }) {
   const errors = [];
   const primary = primaryRepo(job);
   const paths = artifactPaths(job);
+  const required = attempt
+    ? requiredOutputs(job, { phase, purpose: attempt.purpose, round: attempt.round ?? null, task: attempt.task ?? null }).map((rel) => ({ rel }))
+    : (phase?.outputs ?? []).map((key) => ({ key, rel: paths[key] }));
   const changed = new Map();
   const filesIn = async (sha) => {
     if (!changed.has(sha)) {
@@ -214,8 +378,7 @@ async function outputErrors({ phase, job, commits, git }) {
     return changed.get(sha);
   };
   const primaryShas = commits.filter((c) => c.repo === primary.id).map((c) => c.sha);
-  for (const key of phase?.outputs ?? []) {
-    const rel = paths[key];
+  for (const { key, rel } of required) {
     if (!rel) {
       errors.push(`unknown output ${JSON.stringify(key)}`);
       continue;
@@ -243,6 +406,9 @@ async function outputErrors({ phase, job, commits, git }) {
     if (status.code !== 0) errors.push(`could not check output status: ${rel}`);
     else if (status.stdout.trim() !== '') errors.push(`output changed after its commit: ${rel}`);
   }
+  if (attempt?.purpose === 'fix' && attempt.task == null && phase?.kind === 'review') {
+    errors.push(...(await reviseErrors({ phase, job, git })));
+  }
   return errors;
 }
 
@@ -251,10 +417,13 @@ function truncateSummary(summary) {
   return words.length > SUMMARY_WORDS ? words.slice(0, SUMMARY_WORDS).join(' ') : summary;
 }
 
-export async function validateResult(value, { expected, phase, job, git = defaultGit }) {
+// `attempt` ({ purpose, round, final, task, taskDef?, contested?,
+// reviewFindings? }) selects the per-purpose schema and the required outputs;
+// without it the Plan 2 rules apply unchanged.
+export async function validateResult(value, { expected, phase, job, git = defaultGit, attempt = null }) {
   if (!isPlainObject(value)) return { ok: false, errors: ['result is not a JSON object'] };
   const errors = identityErrors(value, expected);
-  const schema = schemaErrors(value, { phase, job });
+  const schema = schemaErrors(value, { phase, job, attempt });
   errors.push(...schema.errors);
   if (errors.length) return { ok: false, errors };
 
@@ -262,7 +431,7 @@ export async function validateResult(value, { expected, phase, job, git = defaul
   if (commitErrors.length) return { ok: false, errors: commitErrors };
 
   if (value.status === 'done') {
-    const missing = await outputErrors({ phase, job, commits: resolved, git });
+    const missing = await outputErrors({ phase, job, commits: resolved, git, attempt });
     if (missing.length) return { ok: false, errors: missing };
   }
 
@@ -272,8 +441,13 @@ export async function validateResult(value, { expected, phase, job, git = defaul
   };
 }
 
+// Decision 13: a worker-reported failure carries a signature from the
+// summary's first line, so repeated-error can trip on it.
 export function outcomeForResult(result) {
-  if (result.status === 'done') return { outcome: 'done' };
-  if (result.status === 'blocked' && result.question) return { outcome: 'question', question: result.question };
-  return { outcome: 'failed', reason: result.status === 'blocked' ? 'blocked' : 'failed' };
+  const extra = {};
+  for (const key of ['verdict', 'findings', 'verified']) if (result[key] !== undefined) extra[key] = result[key];
+  if (result.status === 'done') return { outcome: 'done', ...extra };
+  if (result.status === 'blocked' && result.question) return { outcome: 'question', question: result.question, ...extra };
+  const reason = result.status === 'blocked' ? 'blocked' : 'failed';
+  return { outcome: 'failed', reason, signature: failureSignature(reason, result.summary ?? ''), ...extra };
 }
