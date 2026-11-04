@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   MILESTONE_1_PIPELINE,
+  MILESTONE_2_PIPELINE,
+  FIXTURES,
   defaultConfig,
   validateDefaults,
   validateMilestoneFixture,
@@ -189,4 +191,63 @@ test('save refuses an invalid config and leaves the file unchanged', async () =>
   await fresh.load();
   assert.equal(fresh.resolve(null).limits.stallMinutes, 45);
   assert.equal(fresh.resolve(repo).limits.attemptsPerTask, 4);
+});
+
+test('milestone-2 fixture validates against defaults', () => {
+  assert.deepEqual(validateMilestoneFixture(defaultConfig(), 'milestone-2').errors, []);
+  assert.equal(FIXTURES['milestone-2'], MILESTONE_2_PIPELINE);
+  assert.equal(FIXTURES['milestone-1'], MILESTONE_1_PIPELINE);
+});
+
+test('milestone-2 fixture is deep-frozen and has no brainstorm phase', () => {
+  assert.ok(Object.isFrozen(MILESTONE_2_PIPELINE));
+  for (const p of MILESTONE_2_PIPELINE) {
+    assert.ok(Object.isFrozen(p), p.phase);
+    assert.ok(Object.isFrozen(p.inputs), p.phase);
+    if (p.outputs) assert.ok(Object.isFrozen(p.outputs), p.phase);
+  }
+  assert.ok(!MILESTONE_2_PIPELINE.some((p) => p.phase === 'brainstorm'));
+});
+
+test('milestone-2 phase order and contracts', () => {
+  assert.deepEqual(MILESTONE_2_PIPELINE.map((p) => p.phase), ['spec', 'spec-review', 'plan', 'plan-review', 'implement', 'test', 'accept']);
+  assert.deepEqual(MILESTONE_2_PIPELINE[2].outputs, ['plan', 'tasks']);
+  assert.equal(MILESTONE_2_PIPELINE[4].taskReview, 'task-reviewer');
+});
+
+test('an unknown fixture name throws', () => {
+  assert.throws(() => validateMilestoneFixture(defaultConfig(), 'nope'), Error);
+  assert.throws(() => validateMilestoneFixture(defaultConfig(), 'toString'), Error);
+});
+
+test('a models map missing task-reviewer fails milestone-2 validation', () => {
+  const d = defaultConfig();
+  delete d.models['task-reviewer'];
+  assert.ok(hasError(validateMilestoneFixture(d, 'milestone-2'), 'pipeline[4].taskReview'));
+});
+
+test('a phase id with a slash, a space or 25+ characters is rejected', () => {
+  for (const id of ['a/b', 'a b', 'x'.repeat(25)]) {
+    const d = defaultConfig();
+    d.pipeline[1].phase = id;
+    assert.ok(hasError(validateDefaults(d), 'pipeline[1].phase'), id);
+  }
+  const ok = defaultConfig();
+  ok.pipeline[1].phase = 'x'.repeat(24);
+  assert.ok(!hasError(validateDefaults(ok), 'pipeline[1].phase'));
+});
+
+test('deleting models.verifier fails validation for any pipeline with a review or per-task phase, and not for MILESTONE_1', () => {
+  const d = defaultConfig();
+  delete d.models.verifier;
+  assert.ok(hasError(validateDefaults(d), 'models.verifier'));
+  assert.ok(hasError(validateMilestoneFixture(d, 'milestone-2'), 'models.verifier'));
+  assert.ok(!hasError(validateMilestoneFixture(d), 'models.verifier'));
+});
+
+test('taskReviewRounds defaults to 2 and rejects 0', () => {
+  assert.equal(defaultConfig().limits.taskReviewRounds, 2);
+  const d = defaultConfig();
+  d.limits.taskReviewRounds = 0;
+  assert.ok(hasError(validateDefaults(d), 'limits.taskReviewRounds'));
 });

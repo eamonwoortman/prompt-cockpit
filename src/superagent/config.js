@@ -17,7 +17,7 @@ const MODES = ['automatic', 'manual'];
 
 const freezePhase = (p) => Object.freeze({
   ...p,
-  inputs: Object.freeze([...p.inputs]),
+  inputs: Object.freeze([...(p.inputs ?? [])]),
   ...(p.outputs ? { outputs: Object.freeze([...p.outputs]) } : {}),
 });
 
@@ -25,6 +25,18 @@ export const MILESTONE_1_PIPELINE = Object.freeze([
   freezePhase({ phase: 'spec', kind: 'author', role: 'spec-writer', inputs: ['idea'], outputs: ['spec'] }),
   freezePhase({ phase: 'accept', kind: 'human', inputs: ['spec'] }),
 ]);
+
+export const MILESTONE_2_PIPELINE = Object.freeze([
+  freezePhase({ phase: 'spec', kind: 'author', role: 'spec-writer', inputs: ['idea'], outputs: ['spec'] }),
+  freezePhase({ phase: 'spec-review', kind: 'review', role: 'spec-reviewer', author: 'spec-writer', target: 'spec', maxRounds: 3 }),
+  freezePhase({ phase: 'plan', kind: 'author', role: 'planner', inputs: ['spec'], outputs: ['plan', 'tasks'] }),
+  freezePhase({ phase: 'plan-review', kind: 'review', role: 'plan-reviewer', author: 'planner', target: 'plan', maxRounds: 3 }),
+  freezePhase({ phase: 'implement', kind: 'per-task', role: 'implementer', taskReview: 'task-reviewer', inputs: ['tasks'] }),
+  freezePhase({ phase: 'test', kind: 'author', role: 'tester', inputs: ['spec', 'tasks'], outputs: ['testReport'] }),
+  freezePhase({ phase: 'accept', kind: 'human', inputs: ['testReport'] }),
+]);
+
+export const FIXTURES = Object.freeze({ 'milestone-1': MILESTONE_1_PIPELINE, 'milestone-2': MILESTONE_2_PIPELINE });
 
 export function defaultSuperagentRoot() {
   return path.join(process.env.COCKPIT_HOME || os.homedir(), '.prompt-cockpit', 'superagent');
@@ -65,6 +77,7 @@ export function defaultConfig() {
     limits: {
       attemptsPerPhase: 3,
       attemptsPerTask: 2,
+      taskReviewRounds: 2,
       backoffMinutes: [1, 5],
       stallMinutes: 20,
       repeatedErrorStop: 2,
@@ -87,6 +100,7 @@ const isNonEmptyString = (v) => typeof v === 'string' && v.length > 0;
 const keyPath = (base, key) => (/^[A-Za-z_$][\w$]*$/.test(key) ? `${base}.${key}` : `${base}['${key}']`);
 
 const V1_NON_REVIEW = defaultConfig().pipeline.filter((p) => p.kind !== 'review');
+const PHASE_ID = /^[a-z0-9][a-z0-9-]{0,23}$/i;
 const sameList = (a, b) => Array.isArray(a) && a.length === b.length && a.every((x, i) => x === b[i]);
 
 function checkComposition(pipeline, errors) {
@@ -144,6 +158,8 @@ function checkPipeline(d, errors, { composition }) {
     const outputs = list('outputs');
     if (!isNonEmptyString(phase?.phase)) {
       errors.push({ path: at('phase'), message: 'phase id is required' });
+    } else if (!PHASE_ID.test(phase.phase)) {
+      errors.push({ path: at('phase'), message: `phase id "${phase.phase}" must be 1-24 letters, digits or hyphens, starting with a letter or digit` });
     } else if (seen.has(phase.phase)) {
       errors.push({ path: at('phase'), message: `duplicate phase id "${phase.phase}"` });
     } else {
@@ -177,6 +193,9 @@ function checkPipeline(d, errors, { composition }) {
   const humans = pipeline.map((p, i) => [p, i]).filter(([p]) => p?.kind === 'human');
   if (humans.length !== 1 || humans[0][1] !== pipeline.length - 1) {
     errors.push({ path: 'pipeline', message: 'pipeline needs exactly one human phase, and it must be last' });
+  }
+  if (pipeline.some((p) => p?.kind === 'review' || p?.kind === 'per-task') && !isPlainObject(models.verifier)) {
+    errors.push({ path: 'models.verifier', message: 'a verifier model is required when the pipeline has a review or per-task phase' });
   }
   if (composition) checkComposition(pipeline, errors);
 }
@@ -248,8 +267,9 @@ export function validateDefaults(d) {
   return validate(d, { composition: true });
 }
 
-export function validateMilestoneFixture(d) {
-  return validate({ ...d, pipeline: MILESTONE_1_PIPELINE }, { composition: false });
+export function validateMilestoneFixture(d, name = 'milestone-1') {
+  if (!Object.hasOwn(FIXTURES, name)) throw new Error(`unknown milestone fixture "${name}"`);
+  return validate({ ...d, pipeline: FIXTURES[name] }, { composition: false });
 }
 
 function merge(base, override) {
