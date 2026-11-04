@@ -489,3 +489,31 @@ test('without attempt, Plan 2 validation is unchanged', async () => {
   assert.equal(plainBad.ok, false);
   assert.deepEqual(withAttemptBad, plainBad);
 });
+
+test('a truncated summary keeps its first line, so long failures that differ after line 1 share a signature', async () => {
+  const f = await testFixture();
+  const findings = [{ id: 'F1', severity: 'major', text: 'hello() returns undefined.' }];
+  const tail = (tag) => Array.from({ length: 70 }, (_, i) => `${tag}${String.fromCharCode(97 + (i % 26))}`).join(' ');
+  const first = 'npm test failed in hello.test.js';
+  const a = await f.check(f.failed({ findings, summary: `${first}\n${tail('alpha')}` }), f.as);
+  const b = await f.check(f.failed({ findings, summary: `${first}\n${tail('omega')}` }), f.as);
+  assert.equal(a.ok && b.ok, true, JSON.stringify([a.errors, b.errors]));
+  assert.equal(a.result.summary.split('\n')[0], first);
+  assert.equal(a.result.summary.trim().split(/\s+/).length, 60);
+  assert.equal(outcomeForResult(a.result).signature, outcomeForResult(b.result).signature);
+});
+
+test('duplicate finding ids are invalid in review and fix results', async () => {
+  const f = await reviewFixture();
+  const reviewSha = await f.commit(f.paths.review);
+  const dupReview = await f.check(f.result(f.paths.review, reviewSha, { verdict: 'changes', findings: [finding('F1', 'major', 'open'), finding('F1', 'minor', 'open')] }),
+    f.as({ purpose: 'review' }));
+  assert.equal(dupReview.ok, false);
+  assert.match(dupReview.errors.join('\n'), /duplicate id "F1"/);
+
+  const responseSha = await f.commit(f.paths.response);
+  const dupFix = await f.check(f.result(f.paths.response, responseSha, { findings: [finding('F1', 'blocker', 'fixed'), finding('F1', 'blocker', 'declined: no')] }),
+    f.as({ purpose: 'fix', final: true, reviewFindings: ['F1'] }));
+  assert.equal(dupFix.ok, false);
+  assert.match(dupFix.errors.join('\n'), /duplicate id "F1"/);
+});

@@ -178,10 +178,13 @@ function evidenceErrors(evidence, job) {
 function findingErrors(findings, { job = null, disposition = true } = {}) {
   if (!Array.isArray(findings)) return ['findings must be an array'];
   const errors = [];
+  const seen = new Set();
   findings.forEach((f, i) => {
     const at = `findings[${i}]`;
     if (!isPlainObject(f)) return errors.push(`${at} must be an object`);
     if (!isNonEmptyString(f.id)) errors.push(`${at}.id must be a non-empty string`);
+    else if (seen.has(f.id)) errors.push(`${at}: duplicate id ${JSON.stringify(f.id)}`);
+    else seen.add(f.id);
     if (!SEVERITIES.includes(f.severity)) errors.push(`${at}.severity must be one of ${SEVERITIES.join('|')}`);
     if (!isNonEmptyString(f.text)) errors.push(`${at}.text must be a non-empty string`);
     if (disposition) {
@@ -414,7 +417,8 @@ async function outputErrors({ phase, job, commits, git, attempt }) {
 
 function truncateSummary(summary) {
   const words = summary.trim().split(/\s+/);
-  return words.length > SUMMARY_WORDS ? words.slice(0, SUMMARY_WORDS).join(' ') : summary;
+  if (words.length <= SUMMARY_WORDS) return summary;
+  return summary.trim().match(new RegExp(`^(?:\\S+\\s+){${SUMMARY_WORDS - 1}}\\S+`))[0];
 }
 
 // `attempt` ({ purpose, round, final, task, taskDef?, contested?,
