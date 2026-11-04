@@ -407,7 +407,7 @@ Unit and integration tested (no model, no network):
 - Results validator rules (`superagent-results.test.mjs`): review verdict/findings and dispositions, `tasks.json` shape (ids of at most 12 characters, no deadlocking dependencies), per-purpose required outputs, implement report and commit evidence.
 - Sequencer loop rules (`superagent-sequencer.test.mjs`): review loop rounds and the failed-attempt cap, final-pass blocker rule, per-task launch order, test routing.
 
-Only observed by the manual probe `tests/superagent-pipeline.manual.mjs` (not yet run; no cost cap beyond a 40-minute deadline and the attempt limits; maxRounds stays at the fixture default of 3 because config cannot override it):
+Only observed by the manual probe `tests/superagent-pipeline.manual.mjs` (not yet run; no cost cap beyond a 40-minute deadline and the attempt limits; Opus 5.5 for spec-writer, planner, both reviewers and the verifier, Sonnet 5.5 for implementer, tester and task-reviewer; maxRounds stays at the fixture default of 3 review rounds per review phase because config cannot override it):
 
 - Whether real reviewers produce a parseable verdict/findings with the dispositions the validator wants.
 - Whether real planners produce a valid `tasks.json` with ids of at most 12 characters.

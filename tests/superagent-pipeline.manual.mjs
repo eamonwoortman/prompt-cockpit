@@ -4,7 +4,9 @@
 // NOT run by npm test and NOT run by the implementers of Plan 3. The controller runs it by hand after the final review:
 //   node tests/superagent-pipeline.manual.mjs
 // There is NO cost cap: only the 40-minute wall-clock deadline and the attempt limits bound spend (limits.attemptsPerPhase 2,
-// limits.taskReviewRounds 1; models are the defaults from defaultConfig()).
+// limits.taskReviewRounds 1). Models are the defaults from defaultConfig(): Opus 5.5 for spec-writer, planner, spec-reviewer,
+// plan-reviewer and the verifier; Sonnet 5.5 for implementer, tester and task-reviewer. Worst case is 3 review rounds per review phase
+// (maxRounds is frozen at 3 in the fixture), each possibly followed by a fix and a verifier attempt.
 // maxRounds for spec-review and plan-review is a field on the frozen MILESTONE_2_PIPELINE phases (src/superagent/config.js) and a
 // fixture job uses that pipeline as is, so config.json cannot override it: this probe runs with the real default of 3 review rounds.
 // Observes what unit tests (which use scripted workers) cannot:
@@ -15,8 +17,11 @@
 //   (e) how long a full pipeline takes.
 // Prints per-attempt purpose/round/role/outcome/summary (and the reason of every failed attempt), phase-completed and test-routed
 // events, job state transitions, the final state and reason, the worktree `git log --oneline`, and which artifact paths exist.
-// Uses a temp COCKPIT_HOME, operator file and toy repo; nothing under the real home is touched. Temp dirs are left behind on
-// purpose (the SDK child can hold the cwd on Windows).
+// Uses a temp COCKPIT_HOME, operator file and toy repo, so cockpit state stays under the temp home; the Claude SDK still writes its
+// own session transcripts under the real ~/.claude. The home is a SHORT path (PROBE_HOME if set, else <drive root>\sa-XXXXXX), because
+// under the default os.tmpdir() the longest attempt path exceeds createJob's win32 limit and it refuses with ERR_PATH_TOO_LONG.
+// Temp dirs are left behind on purpose (the SDK child can hold the cwd on Windows).
+// Exit code 0 only if the job ends needs-you with reason ready-to-try; anything else (or the deadline) exits 1.
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,7 +30,9 @@ import path from 'node:path';
 const DEADLINE_MS = 40 * 60_000;
 const POLL_MS = 5_000;
 
-const home = mkdtempSync(path.join(tmpdir(), 'superagent-pipeline-home-'));
+const home = process.env.PROBE_HOME
+  ? (mkdirSync(process.env.PROBE_HOME, { recursive: true }), path.resolve(process.env.PROBE_HOME))
+  : mkdtempSync(path.join(path.parse(tmpdir()).root, 'sa-'));
 process.env.COCKPIT_HOME = home;
 process.env.COCKPIT_OPERATOR_FILE = path.join(home, 'operator-token');
 process.env.COCKPIT_RUNTIME_FILE = path.join(home, 'runtime.json');
@@ -110,7 +117,7 @@ function printArtifacts(job, worktree) {
     rels.push(`${jobs}/reviews/${phase}-verify.md`);
   }
   for (const t of job.tasks ?? []) {
-    const id = t.id ?? t.taskId;
+    const id = t.id;
     rels.push(`${jobs}/tasks/${id}-report.md`, `${jobs}/tasks/${id}-review-r1.md`, `${jobs}/tasks/${id}-verify.md`);
   }
   console.log('\n=== artifacts (exists?) ===');
@@ -140,12 +147,20 @@ async function main() {
   console.log('home:', home, '\nrepo:', repo);
   const startedAt = Date.now();
   await sa.start();
-  const created = await sa.createJob({
-    title: 'Add a hello file',
-    idea: 'Add a hello.txt containing the text hi at the repo root, verified by a node one-liner (for example node -e "process.exit(require(\'fs\').readFileSync(\'hello.txt\',\'utf8\').trim()===\'hi\'?0:1)").',
-    primaryRepo: repo,
-    fixture: 'milestone-2',
-  });
+  let created;
+  try {
+    created = await sa.createJob({
+      title: 'Add a hello file',
+      idea: 'Add a hello.txt containing the text hi at the repo root, verified by a node one-liner (for example node -e "process.exit(require(\'fs\').readFileSync(\'hello.txt\',\'utf8\').trim()===\'hi\'?0:1)").',
+      primaryRepo: repo,
+      fixture: 'milestone-2',
+    });
+  } catch (err) {
+    console.log(`createJob failed: ${err?.code ?? ''} ${err?.message ?? err}`);
+    if (err?.code === 'ERR_PATH_TOO_LONG') console.log('HINT: the home path is too long for the win32 path guard; set PROBE_HOME to a shorter path (for example C:\\sa).');
+    process.exitCode = 1;
+    return;
+  }
   console.log('created job', created.jobId, 'state', created.state);
 
   const deadline = startedAt + DEADLINE_MS;
@@ -161,6 +176,9 @@ async function main() {
   }
   attachNewRows();
   console.log(`\nfinal state: ${job?.state} reason: ${job?.reason ?? ''}${deadlineHit ? ' (DEADLINE HIT)' : ''}`);
+  const ok = !deadlineHit && job?.state === 'needs-you' && job?.reason === 'ready-to-try';
+  console.log(ok ? 'VERDICT: pipeline reached ready-to-try' : 'VERDICT: pipeline did NOT reach ready-to-try');
+  if (!ok) process.exitCode = 1;
   if (job?.detail) console.log('detail:', clip(JSON.stringify(job.detail), 1000));
   console.log(`elapsed: ${Math.round((Date.now() - startedAt) / 1000)}s, attempts: ${job?.attempts?.length ?? 0}`);
 
