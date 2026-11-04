@@ -390,7 +390,7 @@ The runner and end-to-end tests use the real `session-registry.js` with one `fak
 
 **Not covered by unit tests, hand-verified only (not yet run):** all three are observed by `tests/superagent-two-phase.manual.mjs`, which needs the user's approval to run (floor estimate about $0.50; Plan 1's probes cost 10-30x their header estimates).
 
-- **Real `auto`-mode behaviour.** Whether the SDK calls `canUseTool` for an ordinary tool such as Bash when a worker runs in `auto` with `sdkOptions.interceptEveryPermission`. `src/session.js` says it skips it; spike S1 saw it only for `AskUserQuestion`. Until observed, the unattended-denial path is proven only against the fake.
+- **Real `auto`-mode behaviour.** Whether the SDK calls `canUseTool` for an ordinary tool such as Bash when a worker runs in `auto` with `sdkOptions.interceptEveryPermission`. `src/session.js` says it skips it; spike S1 saw it only for `AskUserQuestion`. Until observed, the unattended-denial path is proven only against the fake. **Resolved by the 2026-11-04 probe run: the SDK skipped canUseTool for Bash in auto; commits succeed and the deny rule does not constrain ordinary tools.**
 - **`maxTurns` semantics.** Whether it counts per prompt or per session in streaming input, and the real `error_max_turns` subtype.
 - **PreCompact through `sdkOptions.hooks`.** Whether a real firing reaches `events.jsonl` as a `precompact` line.
 
