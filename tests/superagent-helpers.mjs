@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,6 +6,19 @@ import { MILESTONE_1_PIPELINE, defaultConfig } from '../src/superagent/config.js
 
 export async function tempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+export async function initRepo(dir, { ignoreLocalSettings = true } = {}) {
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+  await fs.mkdir(dir, { recursive: true });
+  git('init', '-q');
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'user.name', 'Test');
+  await fs.writeFile(path.join(dir, 'README.md'), '# test\n');
+  if (ignoreLocalSettings) await fs.writeFile(path.join(dir, '.gitignore'), '.claude/settings.local.json\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return git('rev-parse', 'HEAD');
 }
 
 export function jobCreated(over = {}) {
