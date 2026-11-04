@@ -370,3 +370,28 @@ that cannot be faked without testing the fake instead:
   `taskkill /f`-ing a cockpit: the next start must either reap the orphaned
   CLI or log a refusal naming the pid. A silent no-op means the probe is
   returning something `Date.parse` cannot read.
+
+## Superagent core (Plan 2)
+
+`src/superagent/` is a library, not wired into `src/server.js`; only the `author` and `human` phase kinds run (the `milestone-1` fixture). One test file per module:
+
+| Module | Test file |
+|---|---|
+| `config.js` | `superagent-config.test.mjs` |
+| `store.js` (`events.jsonl` truth, `state.json` cache) | `superagent-store.test.mjs` |
+| `worktree.js` | `superagent-worktree.test.mjs` |
+| `results.js` (attempt results, validation) | `superagent-results.test.mjs` |
+| `prompts.js` (role templates, job card, prompt-surface test) | `superagent-prompts.test.mjs` |
+| `sequencer.js` | `superagent-sequencer.test.mjs` |
+| `runner.js` | `superagent-runner.test.mjs` |
+| `index.js` (`createSuperagent`) | `superagent.test.mjs` |
+
+The runner and end-to-end tests use the real `session-registry.js` with one `fakeStartSession` per session (`sessionFactory` in `superagent-helpers.mjs`, which spreads the real registry and overrides only `createSession`) and real `git` in temp repos. No model, no network, no cost.
+
+**Not covered by unit tests, hand-verified only (not yet run):** all three are observed by `tests/superagent-two-phase.manual.mjs`, which needs the user's approval to run (floor estimate about $0.50; Plan 1's probes cost 10-30x their header estimates).
+
+- **Real `auto`-mode behaviour.** Whether the SDK calls `canUseTool` for an ordinary tool such as Bash when a worker runs in `auto` with `sdkOptions.interceptEveryPermission`. `src/session.js` says it skips it; spike S1 saw it only for `AskUserQuestion`. Until observed, the unattended-denial path is proven only against the fake.
+- **`maxTurns` semantics.** Whether it counts per prompt or per session in streaming input, and the real `error_max_turns` subtype.
+- **PreCompact through `sdkOptions.hooks`.** Whether a real firing reaches `events.jsonl` as a `precompact` line.
+
+Not in Plan 2 at all: router, verifier, review loops, per-task implementation, usage ledger, server wiring, worktree removal.
