@@ -9,6 +9,11 @@
 // Torn tail: a hard kill mid-append can leave a final line without its '\n'.
 // That line is ignored on read and truncated away before the next append.
 // Any other unparseable line is corruption and is refused, never rewritten.
+//
+// A rejected append is not proof the event is absent: the write can land and
+// datasync or close fail afterwards. The store re-reads the file before the
+// next append, so seq stays correct, but a caller that retries a rejected
+// append must tolerate the event appearing twice.
 import { mkdir, open, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { writeJsonAtomic } from '../json-store.js';
@@ -147,8 +152,10 @@ async function readEvents(file) {
   return { events, keepBytes, tornBytes: buf.length - keepBytes };
 }
 
-export function createSuperagentStore({ rootDir = path.join(defaultSuperagentRoot(), 'jobs'), now = Date.now, logImpl = console.error } = {}) {
-  // jobId -> { events, job, keepBytes, tornBytes } once read in this process.
+export function createSuperagentStore({ rootDir = path.join(defaultSuperagentRoot(), 'jobs'), now = Date.now, logImpl = console.error, openImpl = open } = {}) {
+  // jobId -> { events, job, keepBytes, tornBytes, stale } once read in this
+  // process. `stale` means a failed append may have left bytes on disk: get()
+  // keeps serving the last good job, the next append or load re-reads first.
   const cache = new Map();
   const chains = new Map();
 
@@ -169,7 +176,8 @@ export function createSuperagentStore({ rootDir = path.join(defaultSuperagentRoo
   }
 
   async function prime(jobId, { missingOk }) {
-    if (cache.has(jobId)) return cache.get(jobId);
+    const cached = cache.get(jobId);
+    if (cached && !cached.stale) return cached;
     const file = eventsFile(jobId);
     let read;
     try {
@@ -178,15 +186,18 @@ export function createSuperagentStore({ rootDir = path.join(defaultSuperagentRoo
       if (err.code !== 'ENOENT' || !missingOk) throw err;
       read = { events: [], keepBytes: 0, tornBytes: 0 };
     }
-    const entry = { ...read, job: read.events.length ? deriveJob(read.events) : null };
-    cache.set(jobId, entry);
-    return entry;
+    const fresh = { ...read, job: read.events.length ? deriveJob(read.events) : null, stale: false };
+    if (!cached) {
+      cache.set(jobId, fresh);
+      return fresh;
+    }
+    return Object.assign(cached, fresh);
   }
 
   async function repairTornTail(jobId, entry) {
     if (!entry.tornBytes) return;
     const file = eventsFile(jobId);
-    const fh = await open(file, 'r+');
+    const fh = await openImpl(file, 'r+');
     try {
       await fh.truncate(entry.keepBytes);
       await fh.datasync();
@@ -216,16 +227,16 @@ export function createSuperagentStore({ rootDir = path.join(defaultSuperagentRoo
       await mkdir(dir, { recursive: true });
       const line = Buffer.from(JSON.stringify(stamped) + '\n', 'utf8');
       try {
-        const fh = await open(eventsFile(jobId), 'a');
+        const fh = await openImpl(eventsFile(jobId), 'a');
         try {
-          await fh.write(line);
+          const { bytesWritten } = await fh.write(line);
+          if (bytesWritten !== line.length) throw new Error(`superagent: short write to ${eventsFile(jobId)} (${bytesWritten} of ${line.length} bytes)`);
           await fh.datasync();
         } finally {
           await fh.close();
         }
       } catch (err) {
-        // The line may be partly on disk; re-read (and repair) before the next append.
-        cache.delete(jobId);
+        entry.stale = true;
         throw err;
       }
       Object.assign(entry, { events, job, keepBytes: entry.keepBytes + line.length });

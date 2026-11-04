@@ -140,3 +140,53 @@ test('job ids must be safe path segments and listJobIds returns only those direc
   await assert.rejects(store.append('j1', { type: 'not-a-type' }));
   await store.flush();
 });
+
+test('a short write rejects the append, keeps get() on the last good state and the next append repairs the tail', async () => {
+  const rootDir = await tempDir('sa-store-');
+  let shortNext = false;
+  const openImpl = async (file, flags) => {
+    const fh = await fs.open(file, flags);
+    if (flags !== 'a' || !shortNext) return fh;
+    shortNext = false;
+    return {
+      write: (buf) => fh.write(buf, 0, Math.floor(buf.length / 2)),
+      datasync: () => fh.datasync(),
+      close: () => fh.close(),
+    };
+  };
+  const logs = [];
+  const store = createSuperagentStore({ rootDir, now: () => 1000, logImpl: (m) => logs.push(m), openImpl });
+  for (const e of provisionedEvents()) await store.append('j1', e);
+  shortNext = true;
+  await assert.rejects(store.append('j1', { type: 'needs-you', reason: 'stuck', detail: {} }), /short write/);
+  const kept = store.get('j1');
+  assert.notEqual(kept, null);
+  assert.equal(kept.state, 'running');
+  assert.equal(kept.lastSeq, 3);
+  const ev = await store.append('j1', { type: 'job-stopped' });
+  assert.equal(ev.seq, 4);
+  await store.flush();
+  const file = path.join(rootDir, 'j1', 'events.jsonl');
+  const lines = (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assert.deepEqual(lines.map((e) => e.seq), [1, 2, 3, 4]);
+  assert.deepEqual(logs, [`superagent: dropped a torn final line in ${file}`]);
+  assert.equal(store.get('j1').state, 'stopped');
+  assert.equal((await createSuperagentStore({ rootDir, logImpl: quiet }).load('j1')).state, 'stopped');
+});
+
+test('an append rejected inside the chain does not disturb the next append', async () => {
+  const rootDir = await tempDir('sa-store-');
+  const store = createSuperagentStore({ rootDir, now: () => 1000, logImpl: quiet });
+  await store.append('j1', jobCreated());
+  const [rejected, next] = await Promise.allSettled([
+    store.append('j1', jobCreated()),
+    store.append('j1', { type: 'job-provisioned' }),
+  ]);
+  assert.equal(rejected.status, 'rejected');
+  assert.equal(next.status, 'fulfilled');
+  assert.equal(next.value.seq, 2);
+  assert.equal(store.get('j1').state, 'running');
+  await store.flush();
+  const lines = (await fs.readFile(path.join(rootDir, 'j1', 'events.jsonl'), 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assert.deepEqual(lines.map((e) => [e.seq, e.type]), [[1, 'job-created'], [2, 'job-provisioned']]);
+});
