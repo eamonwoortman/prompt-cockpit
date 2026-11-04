@@ -62,7 +62,7 @@ The spec's sequencing step 2 bundles five things. This plan builds four of them;
 
 ## Not in this plan
 
-Router and its auth route (Plan 4); brainstorm, stand-in and manual handover; usage ledger, budgets and usage-cap pause/resume; the feedback route and an answer/resume path for `needs-you(question)` (a verified blocker parks the job exactly like Plan 2's question does — no way out until the server/feedback plans); server wiring and the UI; worktree removal; the Plan 2 deferred items not named here (never-settling `budgetCheck`, `start()` swallowing `listJobIds`, `stopJob` slot leak).
+Router and its auth route (Plan 4); brainstorm, stand-in and manual handover; usage ledger, budgets and usage-cap pause/resume; the feedback route and an answer/resume path for `needs-you(question)` (a verified blocker parks the job exactly like Plan 2's question does — no way out until the server/feedback plans); server wiring and the UI; worktree removal; the Plan 2 deferred items not named here (never-settling `budgetCheck`, `start()` swallowing `listJobIds`, `stopJob` slot leak). Every `needs-you` state except `ready-to-try` (stuck, question, budget, tasks-invalid) is terminal until a resume/answer path exists in a later plan.
 
 ---
 
