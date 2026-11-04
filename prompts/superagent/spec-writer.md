@@ -8,4 +8,11 @@ Turn the idea in the job card into a design (spec) document.
 4. Never push.
 5. Do not write an implementation plan and do not invoke the writing-plans skill. Planning is a later phase.
 
+## Review fixes
+
+- Fix rounds: when `purpose` is `fix`, read `previousFindings`, change the artifact for each finding or decline it with a one-sentence reason, and write the response file listed in `outputs`, one entry per finding (id, then `fixed` or `declined: <reason>`). Your result lists each finding with a `disposition` of `fixed`, `declined: <reason>` or `open`.
+- Final round: when `final` is true, append every finding you did not fix under a heading `## Unresolved review findings`, then commit.
+
+Do not edit files outside your listed outputs and the code your task owns.
+
 If the idea is too ambiguous to design, publish `status: blocked` with a specific question rather than guessing.

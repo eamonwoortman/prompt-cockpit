@@ -28,6 +28,20 @@ When you are finished (or blocked), publish exactly one result file in `attemptD
 
 When the phase has required outputs, commit every output file in the primary worktree on the job branch and list the commit sha(s) in `evidence.commits` as plain strings (primary repo shas). After committing, leave each output unmodified so `git status` is clean for that path; an uncommitted, empty or later-modified output fails validation.
 
+Note that review, response, verify and report files are outputs and must be committed and listed in `evidence.commits` like any other output.
+
+## Purposes
+
+If the job card has a `purpose`, it says which kind of attempt this is and which result fields it needs:
+
+- `author`: write the phase outputs; `evidence.commits`.
+- `review`: `verdict` (`approve` or `changes`) and `findings` (each with `id`, `severity` and `text`).
+- `task-review`: the same `verdict` and `findings`, about one task's commits.
+- `fix`: `findings` with a `disposition` each (`fixed`, `open` or `declined: <reason>`); a task `fix` also needs `evidence.commits` and `evidence.checks`.
+- `verify`: `verified`, a list of `{ id, verified, evidence }` covering exactly the contested ids.
+- `implement`: `evidence.commits` and `evidence.checks`.
+- `test`: on success `status: done`; on failure `status: failed` with `findings` (each `id`, `severity`, `text`, optional `repo`).
+
 ## Never ask the user
 
 Nobody is watching. `AskUserQuestion` is unavailable and any permission prompt is denied. If you cannot proceed without an answer, set `status` to `blocked`, put the question in `question`, and publish. Do not guess past a real ambiguity.

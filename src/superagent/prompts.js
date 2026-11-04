@@ -1,12 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { artifactPaths } from './results.js';
+import { artifactPaths, reviewPaths, requiredOutputs } from './results.js';
 
 export const UNATTENDED_DENY_MESSAGE = 'You are running unattended. Put your question in `result.json` with `status: blocked`.';
 export const RECOVERY_NOTE = 'check every worktree\'s git status and log, and the ledger, before repeating work; continue from `handoff.md` if present';
 
 const CONTRACT_FILE = 'contract.md';
+const REVIEW_PURPOSES = new Set(['review', 'task-review']);
+const WORK_PURPOSES = new Set(['implement', 'fix']);
 
 export function templatesDir() {
   return fileURLToPath(new URL('../../prompts/superagent/', import.meta.url));
@@ -45,6 +47,65 @@ export async function hasTemplate(role, { projectDir }) {
   }
 }
 
+function keyedOutputs(job, phase, purpose, round, task) {
+  const list = requiredOutputs(job, { phase, purpose, round, task });
+  if (purpose === 'author' || purpose === 'test') return Object.fromEntries((phase.outputs ?? []).map((key, i) => [key, list[i]]));
+  const paths = reviewPaths(job, { phase: phase.phase, round, taskId: task });
+  const key = Object.keys(paths).find((k) => paths[k] === list[0]);
+  return { [key]: list[0] };
+}
+
+function purposeFields(job, phase, attempt) {
+  const { purpose } = attempt;
+  const round = attempt.round ?? null;
+  const task = attempt.task ?? null;
+  const done = job.attempts.filter((a) => a.outcome === 'done' && a.phase === (attempt.phase ?? phase.phase) && (a.task ?? null) === task);
+  const reviewFile = (r) => {
+    const paths = reviewPaths(job, { phase: phase.phase, round: r, taskId: task });
+    return task != null ? paths.taskReview : paths.review;
+  };
+
+  let previousFindings = null;
+  if (purpose === 'fix') previousFindings = reviewFile(round);
+  else if (REVIEW_PURPOSES.has(purpose) && round > 1) previousFindings = reviewFile(round - 1);
+
+  let taskCommits = null;
+  if (purpose === 'task-review') {
+    const seen = new Set();
+    taskCommits = [];
+    for (const a of done) {
+      if (!WORK_PURPOSES.has(a.purpose)) continue;
+      for (const { repo, sha } of a.commits ?? []) {
+        if (seen.has(`${repo}:${sha}`)) continue;
+        seen.add(`${repo}:${sha}`);
+        taskCommits.push({ repo, sha });
+      }
+    }
+  }
+
+  let contested = null;
+  if (purpose === 'verify') {
+    const lastReview = done.filter((a) => REVIEW_PURPOSES.has(a.purpose)).at(-1);
+    const finalFix = done.filter((a) => a.purpose === 'fix' && a.final).at(-1);
+    const findings = new Map((lastReview?.findings ?? []).map((f) => [f.id, f]));
+    const dispositions = new Map((finalFix?.findings ?? []).map((f) => [f.id, f.disposition]));
+    contested = (attempt.contested ?? []).map((id) => ({ id, text: findings.get(id)?.text ?? null, disposition: dispositions.get(id) ?? null }));
+  }
+
+  const target = (purpose === 'review' || purpose === 'fix') && task == null && phase.target ? (artifactPaths(job)[phase.target] ?? null) : null;
+  return {
+    purpose,
+    round,
+    final: attempt.final ?? false,
+    target,
+    outputs: keyedOutputs(job, phase, purpose, round, task),
+    task: attempt.taskDef ?? (task != null ? (job.tasks ?? []).find((t) => t.id === task) ?? null : null),
+    taskCommits,
+    previousFindings,
+    contested,
+  };
+}
+
 export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir }) {
   const template = await loadRoleTemplate(role, projectDir);
   if (template == null) throw Object.assign(new Error(`superagent: no prompt template for role ${JSON.stringify(role)}`), { code: 'ERR_NO_TEMPLATE' });
@@ -72,6 +133,8 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
     previousFindings: null,
     recoveryNote: attempt.recovery ? RECOVERY_NOTE : null,
     previousAttemptDir: previous?.dir ?? null,
+    ...(attempt.purpose ? purposeFields(job, phase, attempt) : {}),
+    ...(job.tasks ? { effectiveTasks: job.tasks.map(({ id, title, repos, acceptance, verify, origin }) => ({ id, title, repos, acceptance, verify, origin })) } : {}),
   };
   return {
     system: `${template.trimEnd()}\n\n${contract}`,

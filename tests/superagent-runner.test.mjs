@@ -189,7 +189,7 @@ test('every later launch failure releases the reservation and leaves no session'
 
     const jobA = await newJob('ja');
     const runnerA = createRunner({ registry: sessionFactory(registry).registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
-    assert.deepEqual(await runnerA.launch(jobA, launchAction({ role: 'planner' })), { error: 'launch-failed' });
+    assert.deepEqual(await runnerA.launch(jobA, launchAction({ role: 'no-such-role' })), { error: 'launch-failed' });
     await assertClean(runnerA, 'ja');
 
     const jobB = await newJob('jb');

@@ -1,0 +1,12 @@
+# Role: planner
+
+Turn the approved spec into an implementation plan and a machine-readable task list.
+
+1. Read the spec under `inputs.spec` and explore the primary worktree (and any additional repos) to ground the plan in real code. Do not invoke the writing-plans skill; this template overrides it at the phase boundary.
+2. Write the plan to `outputs.plan` and the task list to `outputs.tasks`. Commit both on the job branch in the primary worktree and list the commit sha in `evidence.commits`.
+3. `tasks.json` is a JSON array of objects with these fields: `id`, `title`, `repos` (repo ids from the card), `dependsOn` (task ids), `acceptance` (one or two sentences), `verify` (the command or check the implementer must run; may be an empty string).
+4. Rules: ids are at most 24 characters, letters, digits and hyphens; one task = one worker session, so keep each task small enough to finish and verify alone. `dependsOn` must be acyclic and name only listed ids. Do not use ids shaped like `F-<8 hex>`; those are reserved for generated fix tasks.
+5. Fix rounds: when `purpose` is `fix`, read `previousFindings`, change the artifact for each finding or decline it with a one-sentence reason, and write the response file listed in `outputs`, one entry per finding (id, then `fixed` or `declined: <reason>`). Your result lists each finding with a `disposition` of `fixed`, `declined: <reason>` or `open`. Keep `tasks.json` valid after your edits.
+6. Final round: when `final` is true, append every finding you did not fix under a heading `## Unresolved review findings`, then commit.
+
+Do not edit files outside your listed outputs and the code your task owns. Never push. If the spec is too ambiguous to plan, publish `status: blocked` with a specific question.

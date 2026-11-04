@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { tempDir, provisionedEvents } from './superagent-helpers.mjs';
 import { deriveJob } from '../src/superagent/store.js';
-import { artifactPaths } from '../src/superagent/results.js';
+import { artifactPaths, reviewPaths, requiredOutputs } from '../src/superagent/results.js';
+import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import { RECOVERY_NOTE, templatesDir, hasTemplate, buildWorkerPrompt, nudgeText } from '../src/superagent/prompts.js';
 
 const IDEA = 'Line one of the idea.\n\n  Indented line two with "quotes" and \ backslash.\nLast line';
@@ -98,8 +99,8 @@ test('the job card inputs and outputs follow the current phase', async () => {
 
 test('a missing role template fails and a project override wins', async () => {
   const { job, phase, attempt, emptyDir } = await fixture();
-  await assert.rejects(buildWorkerPrompt({ role: 'planner', job, phase, attempt, projectDir: emptyDir }), { code: 'ERR_NO_TEMPLATE' });
-  assert.equal(await hasTemplate('planner', { projectDir: emptyDir }), false);
+  await assert.rejects(buildWorkerPrompt({ role: 'no-such-role', job, phase, attempt, projectDir: emptyDir }), { code: 'ERR_NO_TEMPLATE' });
+  assert.equal(await hasTemplate('no-such-role', { projectDir: emptyDir }), false);
   assert.equal(await hasTemplate('spec-writer', { projectDir: emptyDir }), true);
 
   const overrides = path.join(emptyDir, '.superpowers', 'superagent', 'prompts');
@@ -116,4 +117,133 @@ test('nudge texts name the attempt directory and ask for handoff.md on a turn ca
   assert.ok(r.includes(a.dir) && r.includes('result.json'));
   const t = nudgeText('turn-cap', a);
   assert.ok(t.includes('handoff.md') && t.includes(a.dir) && t.includes('result.json'));
+});
+
+const TASK_DEF = { id: 'T1', title: 'Add hello', repos: ['primary'], dependsOn: [], acceptance: 'hello exists', verify: 'npm test', origin: 'plan' };
+const FIX_DEF = { id: 'F-0123abcd', title: 'Fix greeting', repos: ['primary'], dependsOn: [], acceptance: 'greeting is polite', verify: '', origin: 'test-failure' };
+
+function started(attemptId, phase, purpose, over = {}) {
+  return { type: 'attempt-started', attemptId, phase, task: null, role: 'x', model: 'm', n: 1, dir: `/d/${attemptId}`, purpose, round: null, final: false, ...over };
+}
+const ended = (attemptId, over = {}) => ({ type: 'attempt-ended', attemptId, outcome: 'done', ...over });
+
+async function m2(extra = []) {
+  const emptyDir = await tempDir('sa-prompts2-');
+  const job = deriveJob([...provisionedEvents({ jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', idea: IDEA, pipeline: MILESTONE_2_PIPELINE }), ...extra]);
+  const phaseOf = (id) => job.pipeline.find((p) => p.phase === id);
+  const card = async (role, phaseId, attempt) => parseCard((await buildWorkerPrompt({ role, job, phase: phaseOf(phaseId), attempt: { attemptId: 'cur', phase: phaseId, task: null, n: 1, recovery: false, previousAttemptId: null, dir: '/d/cur', ...attempt }, projectDir: emptyDir })).card);
+  return { job, card, phaseOf };
+}
+
+test('every role in milestone-2 has a template', async () => {
+  const projectDir = await tempDir('sa-prompts-');
+  const roles = new Set(['task-reviewer', 'verifier']);
+  for (const p of MILESTONE_2_PIPELINE) { if (p.role) roles.add(p.role); if (p.taskReview) roles.add(p.taskReview); }
+  for (const role of roles) assert.equal(await hasTemplate(role, { projectDir }), true, role);
+});
+
+test('with no purpose the card equals the Plan 2 card', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const c = parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir })).card);
+  assert.deepEqual(c, {
+    jobId: job.jobId, phaseId: phase.phase, taskId: null, attemptId: 'a2', title: job.title, mode: job.mode, idea: IDEA,
+    repos: [{ id: 'primary', worktree: job.repos[0].worktree, branch: job.branch }],
+    inputs: {}, outputs: { spec: artifactPaths(job).spec }, attemptDir: attempt.dir, round: null, previousFindings: null, recoveryNote: null, previousAttemptDir: null,
+  });
+});
+
+test('the card carries purpose, round, final and the required outputs list when purpose is set', async () => {
+  const { job, card, phaseOf } = await m2();
+  const c = await card('spec-reviewer', 'spec-review', { purpose: 'review', round: 1, final: false });
+  assert.equal(c.purpose, 'review');
+  assert.equal(c.round, 1);
+  assert.equal(c.final, false);
+  const want = requiredOutputs(job, { phase: phaseOf('spec-review'), purpose: 'review', round: 1 });
+  assert.deepEqual(Object.values(c.outputs), want);
+  const a = await card('spec-writer', 'spec', { purpose: 'author' });
+  assert.deepEqual(a.outputs, { spec: artifactPaths(job).spec });
+  const f = await card('spec-writer', 'spec-review', { purpose: 'fix', round: 2, final: true });
+  assert.equal(f.final, true);
+});
+
+test('a review card has target and previousFindings null in round 1, the previous review path in round 2', async () => {
+  const { job, card } = await m2();
+  const r1 = await card('spec-reviewer', 'spec-review', { purpose: 'review', round: 1 });
+  assert.equal(r1.target, artifactPaths(job).spec);
+  assert.equal(r1.previousFindings, null);
+  const r2 = await card('spec-reviewer', 'spec-review', { purpose: 'review', round: 2 });
+  assert.equal(r2.previousFindings, reviewPaths(job, { phase: 'spec-review', round: 1 }).review);
+});
+
+test('a fix card has previousFindings pointing at the round review file', async () => {
+  const { job, card } = await m2();
+  const c = await card('spec-writer', 'spec-review', { purpose: 'fix', round: 1 });
+  assert.equal(c.previousFindings, reviewPaths(job, { phase: 'spec-review', round: 1 }).review);
+  assert.equal(c.target, artifactPaths(job).spec);
+  assert.deepEqual(Object.values(c.outputs), [reviewPaths(job, { phase: 'spec-review', round: 1 }).response]);
+});
+
+test('a task-review card lists cumulative taskCommits: round 2 after a fix includes the original implementation commit and the corrective commit', async () => {
+  const events = [
+    { type: 'tasks-loaded', tasks: [TASK_DEF] },
+    started('i1', 'implement', 'implement', { task: 'T1' }), ended('i1', { commits: [{ repo: 'primary', sha: 'aaaa111' }] }),
+    started('r1', 'implement', 'task-review', { task: 'T1', round: 1 }), ended('r1', { verdict: 'changes', findings: [{ id: 'F1', severity: 'major', text: 'bad' }] }),
+    started('x1', 'implement', 'fix', { task: 'T1', round: 1 }), ended('x1', { commits: [{ repo: 'primary', sha: 'bbbb222' }, { repo: 'primary', sha: 'aaaa111' }] }),
+    started('o1', 'implement', 'implement', { task: 'T2' }), ended('o1', { commits: [{ repo: 'primary', sha: 'cccc333' }] }),
+  ];
+  const { card } = await m2(events);
+  const c = await card('task-reviewer', 'implement', { purpose: 'task-review', round: 2, task: 'T1', taskDef: TASK_DEF });
+  assert.deepEqual(c.taskCommits, [{ repo: 'primary', sha: 'aaaa111' }, { repo: 'primary', sha: 'bbbb222' }]);
+  assert.deepEqual(c.task, TASK_DEF);
+  assert.equal(c.taskId, 'T1');
+  assert.equal(c.target, null);
+  assert.ok(c.previousFindings.endsWith('T1-review-r1.md'));
+  const impl = await card('implementer', 'implement', { purpose: 'implement', task: 'T1', taskDef: TASK_DEF });
+  assert.equal(impl.taskCommits, null);
+});
+
+test('a verify card lists contested findings', async () => {
+  const events = [
+    started('r3', 'plan-review', 'review', { round: 3 }),
+    ended('r3', { verdict: 'changes', findings: [{ id: 'B1', severity: 'blocker', text: 'no rollback' }, { id: 'B2', severity: 'blocker', text: 'no tests' }, { id: 'M1', severity: 'minor', text: 'nit' }] }),
+    started('x3', 'plan-review', 'fix', { round: 3, final: true }),
+    ended('x3', { findings: [{ id: 'B1', severity: 'blocker', text: 'no rollback', disposition: 'declined: out of scope' }, { id: 'B2', severity: 'blocker', text: 'no tests', disposition: 'open' }] }),
+  ];
+  const { card } = await m2(events);
+  const c = await card('verifier', 'plan-review', { purpose: 'verify', contested: ['B1', 'B2'] });
+  assert.deepEqual(c.contested, [
+    { id: 'B1', text: 'no rollback', disposition: 'declined: out of scope' },
+    { id: 'B2', text: 'no tests', disposition: 'open' },
+  ]);
+  assert.equal(c.round, null);
+  const other = await card('spec-reviewer', 'plan-review', { purpose: 'review', round: 1 });
+  assert.equal(other.contested, null);
+});
+
+test('a tester card carries effectiveTasks including a generated fix task acceptance criteria', async () => {
+  const { card } = await m2([{ type: 'tasks-loaded', tasks: [{ ...TASK_DEF, fromAttemptId: null }, { ...FIX_DEF, fromAttemptId: 'tt1' }] }]);
+  const c = await card('tester', 'test', { purpose: 'test' });
+  assert.deepEqual(c.effectiveTasks.map((t) => t.id), ['T1', 'F-0123abcd']);
+  assert.equal(c.effectiveTasks[1].acceptance, 'greeting is polite');
+  assert.deepEqual(Object.keys(c.effectiveTasks[0]).sort(), ['acceptance', 'id', 'origin', 'repos', 'title', 'verify']);
+  const early = await (await m2()).card('spec-writer', 'spec', { purpose: 'author' });
+  assert.ok(!('effectiveTasks' in early));
+});
+
+test('prompt surface: pinned strings in the pipeline templates and the contract', async () => {
+  const read = (f) => fs.readFile(path.join(templatesDir(), f), 'utf8');
+  const has = async (f, ...needles) => { const t = (await read(f)).replace(/Do not edit/g, "do not edit"); for (const n of needles) assert.ok(t.includes(n), `${f}: missing ${n}`); };
+  const fixRule = ['when `purpose` is `fix`, read `previousFindings`, change the artifact for each finding or decline it with a one-sentence reason, and write the response file', 'when `final` is true, append every finding you did not fix under a heading `## Unresolved review findings`'];
+  await has('spec-writer.md', ...fixRule, '## Unresolved review findings');
+  await has('planner.md', ...fixRule, '## Unresolved review findings', '`id`', '`title`', '`repos`', '`dependsOn`', '`acceptance`', '`verify`', 'ids are at most 24 characters, letters, digits and hyphens', 'one task = one worker session');
+  for (const f of ['spec-reviewer.md', 'plan-reviewer.md']) await has(f, 'read-only', '`approve` only if there is no open blocker', 'blocker', 'major', 'minor', 'commit your review file and list its commit');
+  await has('implementer.md', 'evidence.checks', 'exit code', 'check `git status` and `git log` before repeating work');
+  await has('task-reviewer.md', 'taskCommits', 'git show', 'read-only');
+  await has('tester.md', 'effectiveTasks', 'How to try it', 'status: failed', '`repo`', 'never edit code');
+  await has('verifier.md', 'contested', 'verified', 'read-only');
+  for (const f of ['planner', 'spec-reviewer', 'plan-reviewer', 'implementer', 'task-reviewer', 'tester', 'verifier', 'spec-writer']) await has(`${f}.md`, 'do not edit files outside your listed outputs and the code your task owns');
+  const contract = await read('contract.md');
+  assert.ok(contract.includes('Purposes'));
+  for (const p of ['author', 'review', 'fix', 'verify', 'implement', 'task-review', 'test']) assert.ok(contract.includes(`\`${p}\``), `contract: ${p}`);
+  assert.ok(contract.includes('review, response, verify and report files are outputs'));
 });
