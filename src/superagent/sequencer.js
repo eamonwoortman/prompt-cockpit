@@ -228,17 +228,22 @@ function authorAction(job, phase, { now, liveSessions, maxConcurrentSessions }) 
     if (route) return { type: 'route-test-failure', ...route };
   }
 
-  const guard = retryGuard(attempts, limits, now, stuck);
+  // A routed tester failure was handed to a fix task, not left for a retry:
+  // it still counts toward the cap above, but not toward repeated-error,
+  // back-off or recovery.
+  const routed = new Set(isTest ? (job.tasks ?? []).map((t) => t.fromAttemptId).filter(Boolean) : []);
+  const guard = retryGuard(attempts.filter((a) => !routed.has(a.attemptId)), limits, now, stuck);
   if (guard) return guard;
 
   if (liveSessions >= maxConcurrentSessions) return { type: 'wait', until: null, why: 'concurrency' };
 
+  const retry = last != null && !routed.has(last.attemptId);
   return launch(job, {
     phase,
     role: phase.role,
     attempts,
-    recovery: last != null,
-    previousAttemptId: last?.attemptId ?? null,
+    recovery: retry,
+    previousAttemptId: retry ? last.attemptId : null,
     purpose: isTest ? 'test' : 'author',
   });
 }
@@ -259,6 +264,7 @@ function scopeAction(job, phase, { now, liveSessions, maxConcurrentSessions }, {
   const stuck = (why) => stuckAction(phase, task?.id ?? null, why, last);
   if (loop.type === 'stuck') return stuck(loop.why);
 
+  // Repeated-error reads Plan 2's consecutive window over the scope's consuming attempts.
   const guard = retryGuard(attempts, job.limits, now, stuck);
   if (guard) return guard;
 

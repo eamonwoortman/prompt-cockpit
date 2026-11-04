@@ -441,13 +441,64 @@ test('nextAction: test phase with a routable failure returns route-test-failure;
   assert.deepEqual(nextAction(failed, ctx()), { type: 'route-test-failure', attemptId: 't1', findings: TF });
   const cycle = (id, visit) => [...testFail(id, TF), ev.testRouted(id, buildFixTask(failed, id, TF)), ev.phaseCompleted('implement', visit)];
   const back = atTest(...cycle('t1', 2));
-  assert.deepEqual(nextAction(back, ctx({ now: T0 + 10 * MIN })), launchOf(back, 'tester', { phase: 'test', purpose: 'test', n: 2, recovery: true, previousAttemptId: 't1' }));
+  assert.deepEqual(nextAction(back, ctx({ now: T0 + 10 * MIN })), launchOf(back, 'tester', { phase: 'test', purpose: 'test', n: 2 }));
   const capped = atTest(...cycle('t1', 2), ...cycle('t2', 3), ...testFail('t3', TF));
   const action = nextAction(capped, ctx({ now: T0 + 60 * MIN }));
   assert.equal(action.type, 'needs-you');
   assert.equal(action.reason, 'stuck');
   assert.equal(action.detail.phase, 'test');
   assert.equal(action.detail.why, 'attempt-cap');
+});
+
+test('nextAction: routed tester failures with the same signature neither trip repeated-error nor back-off nor recovery; the cap still counts them', () => {
+  const sig = 'failed|# tests failed';
+  const failed = atTest(...testFail('t1', TF, sig));
+  const cycle = (id, visit) => [...testFail(id, TF, sig), ev.testRouted(id, buildFixTask(failed, id, TF)), ev.phaseCompleted('implement', visit)];
+  const twice = atTest(...cycle('t1', 2), ...cycle('t2', 3));
+  assert.equal(twice.phaseId, 'test');
+  assert.deepEqual(nextAction(twice, ctx({ now: T0 })), launchOf(twice, 'tester', { phase: 'test', purpose: 'test', n: 3 }));
+  const third = atTest(...cycle('t1', 2), ...cycle('t2', 3), ...testFail('t3', TF, sig));
+  const action = nextAction(third, ctx({ now: T0 + 60 * MIN }));
+  assert.equal(action.type, 'needs-you');
+  assert.equal(action.reason, 'stuck');
+  assert.equal(action.detail.why, 'attempt-cap');
+});
+
+test('nextAction: un-routed failed tester attempts keep Plan 2 repeated-error, back-off and recovery', () => {
+  const sig = 'failed|# tests failed';
+  const once = atTest(...testFail('t1', null, sig));
+  assert.deepEqual(nextAction(once, ctx({ now: T0 + 1 })), { type: 'wait', until: T0 + MIN, why: 'backoff' });
+  assert.deepEqual(nextAction(once, ctx({ now: T0 + MIN })), launchOf(once, 'tester', { phase: 'test', purpose: 'test', n: 2, recovery: true, previousAttemptId: 't1' }));
+  const twice = atTest(...testFail('t1', null, sig), ...testFail('t2', null, sig));
+  const action = nextAction(twice, ctx({ now: T0 + 60 * MIN }));
+  assert.equal(action.type, 'needs-you');
+  assert.equal(action.reason, 'stuck');
+  assert.equal(action.detail.why, 'repeated-error');
+  assert.equal(action.detail.signature, sig);
+});
+
+test('nextAction: a task review that hits the cap with a contested blocker launches the verifier; disputed completes tagged with the task; verified needs you', () => {
+  const T1 = taskCreated('T1');
+  const capped = forTask('T1', [
+    { purpose: 'implement' },
+    trev(1, 'changes', [F('b1', 'blocker')]), fix(1, { b1: 'fixed' }),
+    trev(2, 'changes', [F('b1', 'blocker')]), fix(2, { b1: 'declined: works as intended' }, true),
+  ]);
+  const verifying = atImplement([T1], ...capped);
+  assert.deepEqual(nextAction(verifying, ctx()), launchOf(verifying, 'verifier', { phase: 'implement', task: 'T1', purpose: 'verify', n: 6, contested: ['b1'], taskDef: T1 }));
+  const disputed = atImplement([T1], ...capped, ...forTask('T1', [ver([{ id: 'b1', verified: false, evidence: 'behaves as specified' }])]));
+  const done = nextAction(disputed, ctx());
+  assert.equal(done.type, 'complete-phase');
+  assert.equal(done.phase, 'implement');
+  assert.deepEqual(done.verification, [{ id: 'b1', verified: false, evidence: 'behaves as specified', task: 'T1' }]);
+  assert.deepEqual(done.unresolved, [{ ...F('b1', 'blocker'), status: 'disputed-not-verified', task: 'T1' }]);
+  const confirmed = atImplement([T1], ...capped, ...forTask('T1', [{ ...ver([{ id: 'b1', verified: true, evidence: 'crashes on empty input' }]), id: 'tv1' }]));
+  const asked = nextAction(confirmed, ctx());
+  assert.equal(asked.type, 'needs-you');
+  assert.equal(asked.reason, 'question');
+  assert.equal(asked.detail.task, 'T1');
+  assert.equal(asked.detail.attemptId, 'tv1');
+  assert.match(asked.detail.evidence, /crashes on empty input/);
 });
 
 test('nextAction: author phases of milestone-2 launch as in Plan 2 with purpose author', () => {
