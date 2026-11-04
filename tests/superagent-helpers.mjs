@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +17,9 @@ export async function initRepo(dir, { ignoreLocalSettings = true } = {}) {
   const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
   await fs.mkdir(dir, { recursive: true });
   git('init', '-q');
+  // A machine-wide core.fsmonitor=true starts a daemon per repo that outlives
+  // the test; worktrees share this setting.
+  git('config', 'core.fsmonitor', 'false');
   git('config', 'user.email', 'test@example.com');
   git('config', 'user.name', 'Test');
   await fs.writeFile(path.join(dir, 'README.md'), '# test\n');
@@ -151,3 +155,100 @@ export const ev = {
   testRouted: (attemptId, task) => ({ type: 'test-routed', attemptId, task }),
   phaseCompleted: (phase, visit, unresolved = []) => ({ type: 'phase-completed', phase, visit, unresolved, verification: null }),
 };
+
+const CARD_HEADING = '# Superagent job card';
+// A handler returning HOLD leaves the turn running with no result.json.
+export const HOLD = Symbol('hold');
+
+export function parseCard(text) {
+  const match = /```json\n([\s\S]*?)\n```/.exec(text);
+  if (!text.startsWith(CARD_HEADING) || !match) throw new Error('scriptedWorker: not a job card');
+  return JSON.parse(match[1]);
+}
+
+// A fake worker behind sessionFactory's registry: the first sendInput of a
+// session is the job card; handlers[`${phaseId}:${purpose}`] (or
+// handlers[purpose]) returns the result body without identity fields, which
+// is published as result.json via result.json.tmp + rename before the turn
+// ends. Handler context:
+// - commit(files, message, repoId = 'primary') writes { relPath: text } into
+//   that repo's worktree, commits them on the job branch, returns the sha;
+// - publish(fields, { content, files }) writes every card output (content by
+//   output key overrides the default text) plus `files`, commits them, and
+//   returns a done body whose evidence lists that commit (and the task's
+//   verify command as a passing check).
+// Nudges (any later sendInput) are left unanswered.
+export function scriptedWorker({ factory, handlers }) {
+  const log = [];
+  const errors = [];
+  const original = factory.registry.sendInput;
+
+  function commit(card, files, message, repoId = 'primary') {
+    const repo = card.repos.find((r) => r.id === repoId);
+    if (!repo) throw new Error(`scriptedWorker: no repo ${repoId} on the card`);
+    const git = (...args) => execFileSync('git', args, { cwd: repo.worktree, encoding: 'utf8', timeout: 60_000 }).trim();
+    const rels = Object.keys(files);
+    for (const rel of rels) {
+      const file = path.join(repo.worktree, ...rel.split('/'));
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, files[rel]);
+    }
+    git('add', '--', ...rels);
+    git('commit', '-q', '-m', message);
+    return git('rev-parse', 'HEAD');
+  }
+
+  function publish(card, fields = {}, { content = {}, files = {} } = {}) {
+    const writes = {};
+    for (const [key, rel] of Object.entries(card.outputs ?? {})) {
+      writes[rel] = content[key] ?? `# ${card.phaseId} ${card.purpose} ${card.attemptId}\n`;
+    }
+    Object.assign(writes, files);
+    const sha = commit(card, writes, `${card.phaseId} ${card.purpose}${card.taskId ? ` ${card.taskId}` : ''}`);
+    const verify = card.task?.verify?.trim();
+    return {
+      status: 'done',
+      artifacts: Object.values(card.outputs ?? {}),
+      summary: `${card.purpose} for ${card.phaseId}${card.taskId ? ` ${card.taskId}` : ''}`,
+      question: null,
+      evidence: { commits: [{ repo: 'primary', sha }], ...(verify ? { checks: [{ cmd: verify, exit: 0 }] } : {}) },
+      ...fields,
+    };
+  }
+
+  async function writeResult(card, body) {
+    const result = { ...body, jobId: card.jobId, phaseId: card.phaseId, taskId: card.taskId, attemptId: card.attemptId };
+    const tmp = path.join(card.attemptDir, 'result.json.tmp');
+    await fs.mkdir(card.attemptDir, { recursive: true });
+    await fs.writeFile(tmp, JSON.stringify(result, null, 2));
+    await fs.rename(tmp, path.join(card.attemptDir, 'result.json'));
+  }
+
+  factory.registry.sendInput = async (id, text) => {
+    await original(id, text);
+    if (!String(text).startsWith(CARD_HEADING)) return;
+    const card = parseCard(text);
+    const entry = { card, body: null };
+    log.push(entry);
+    try {
+      const handler = handlers[`${card.phaseId}:${card.purpose}`] ?? handlers[card.purpose];
+      if (!handler) throw new Error(`scriptedWorker: no handler for ${card.phaseId}:${card.purpose}`);
+      const body = await handler({
+        card,
+        commit: (files, message, repoId) => commit(card, files, message, repoId),
+        publish: (fields, opts) => publish(card, fields, opts),
+      });
+      if (body === HOLD) return;
+      entry.body = body;
+      await writeResult(card, body);
+    } catch (err) {
+      errors.push(err);
+      throw err;
+    }
+    const impl = factory.impls.get(id);
+    impl.emitMessage({ type: 'result', subtype: 'success' });
+    impl.emitState('idle');
+  };
+
+  return { log, errors, cards: () => log.map((e) => e.card) };
+}

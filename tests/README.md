@@ -385,8 +385,11 @@ that cannot be faked without testing the fake instead:
 | `sequencer.js` | `superagent-sequencer.test.mjs` |
 | `runner.js` | `superagent-runner.test.mjs` |
 | `index.js` (`createSuperagent`) | `superagent.test.mjs` |
+| `milestone-2` pipeline end to end (Plan 3) | `superagent-pipeline.test.mjs` |
 
 The runner and end-to-end tests use the real `session-registry.js` with one `fakeStartSession` per session (`sessionFactory` in `superagent-helpers.mjs`, which spreads the real registry and overrides only `createSession`) and real `git` in temp repos. No model, no network, no cost.
+
+`superagent-pipeline.test.mjs` drives `createSuperagent` with `tick()` and `scriptedWorker` (`superagent-helpers.mjs`): a fake worker that reads the job card from a session's first `sendInput`, runs a per-purpose handler that commits real files in the job's worktrees, and publishes `result.json`. Only the happy path runs every phase with workers; the other scenarios fast-forward the earlier phases through the store and run just the loop under test. About 70s, nearly all of it git process spawns. `initRepo` sets `core.fsmonitor false`, because a machine-wide `core.fsmonitor=true` leaves one daemon running per temp repo.
 
 **Not covered by unit tests, hand-verified only (not yet run):** all three are observed by `tests/superagent-two-phase.manual.mjs`, which needs the user's approval to run (floor estimate about $0.50; Plan 1's probes cost 10-30x their header estimates).
 
