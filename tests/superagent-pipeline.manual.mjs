@@ -4,8 +4,11 @@
 // NOT run by npm test and NOT run by the implementers of Plan 3. The controller runs it by hand after the final review:
 //   node tests/superagent-pipeline.manual.mjs
 // There is NO cost cap: only the 40-minute wall-clock deadline and the attempt limits bound spend (limits.attemptsPerPhase 2,
-// limits.taskReviewRounds 1). Models are the defaults from defaultConfig(): Opus 5.5 for spec-writer, planner, spec-reviewer,
-// plan-reviewer and the verifier; Sonnet 5.5 for implementer, tester and task-reviewer. Worst case is 3 review rounds per review phase
+// limits.taskReviewRounds 1). Models: the installed SDK's bundled Claude Code (2.1.231) rejects claude-opus-5-5 with an API 400
+// ("version 2.1.280 or newer is required"), so by default this probe runs every role whose default is claude-opus-5-5 (spec-writer,
+// planner, spec-reviewer, plan-reviewer, verifier, brainstormer, stand-in) on claude-sonnet-5-5 via a projects[<repo>].models override
+// (provider and maxTurns are kept; the router stays claude-haiku-5-5). Implementer, tester and task-reviewer are Sonnet 5.5 already, so
+// every worker is Sonnet 5.5. Set PROBE_KEEP_MODELS=1 to skip the override. Worst case is 3 review rounds per review phase
 // (maxRounds is frozen at 3 in the fixture), each possibly followed by a fix and a verifier attempt.
 // maxRounds for spec-review and plan-review is a field on the frozen MILESTONE_2_PIPELINE phases (src/superagent/config.js) and a
 // fixture job uses that pipeline as is, so config.json cannot override it: this probe runs with the real default of 3 review rounds.
@@ -40,7 +43,7 @@ process.env.COCKPIT_RUNTIME_FILE = path.join(home, 'runtime.json');
 const realRegistry = await import('../src/session-registry.js');
 const { createSuperagent } = await import('../src/superagent/index.js');
 const { createSuperagentStore } = await import('../src/superagent/store.js');
-const { createSuperagentConfig } = await import('../src/superagent/config.js');
+const { createSuperagentConfig, defaultConfig } = await import('../src/superagent/config.js');
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -55,6 +58,12 @@ const registry = {
     });
   },
 };
+
+const modelOverride = process.env.PROBE_KEEP_MODELS === '1' ? null : Object.fromEntries(
+  Object.entries(defaultConfig().models)
+    .filter(([, m]) => m.model === 'claude-opus-5-5')
+    .map(([role, m]) => [role, { ...m, model: 'claude-sonnet-5-5' }]),
+);
 
 const repo = path.join(home, 'toy');
 const configFile = path.join(home, 'superagent', 'config.json');
@@ -89,7 +98,7 @@ function printNew(job) {
   for (const a of job.attempts) {
     if (a.outcome == null || printed.has(a.attemptId)) continue;
     printed.add(a.attemptId);
-    console.log(`ATTEMPT phase=${a.phase} task=${a.task ?? '-'} purpose=${a.purpose} round=${a.round ?? '-'} role=${a.role} n=${a.n} outcome=${a.outcome} verdict=${a.verdict ?? '-'} verified=${JSON.stringify(a.verified)} summary=${clip(a.summary)}`);
+    console.log(`ATTEMPT phase=${a.phase} task=${a.task ?? '-'} purpose=${a.purpose} round=${a.round ?? '-'} role=${a.role} model=${a.model} n=${a.n} outcome=${a.outcome} verdict=${a.verdict ?? '-'} verified=${JSON.stringify(a.verified)} summary=${clip(a.summary)}`);
     if (a.outcome !== 'done') console.log(`  FAILED REASON: ${a.reason ?? '(none recorded)'}`);
   }
 }
@@ -137,8 +146,9 @@ async function main() {
 
   mkdirSync(path.dirname(configFile), { recursive: true });
   writeFileSync(configFile, JSON.stringify({
-    projects: { [repo]: { limits: { attemptsPerPhase: 2, taskReviewRounds: 1 } } },
+    projects: { [repo]: { limits: { attemptsPerPhase: 2, taskReviewRounds: 1 }, ...(modelOverride ? { models: modelOverride } : {}) } },
   }));
+  console.log('model override:', JSON.stringify(modelOverride));
   const config = createSuperagentConfig({ filePath: configFile });
   await config.load();
   const store = createSuperagentStore({ rootDir: jobsRoot });
@@ -184,7 +194,7 @@ async function main() {
 
   console.log('\n=== all attempts ===');
   for (const a of job?.attempts ?? []) {
-    console.log(`phase=${a.phase} task=${a.task ?? '-'} purpose=${a.purpose} round=${a.round ?? '-'} role=${a.role} outcome=${a.outcome ?? 'running'} summary=${clip(a.summary)}${a.outcome && a.outcome !== 'done' ? ` REASON=${a.reason ?? ''}` : ''}`);
+    console.log(`phase=${a.phase} task=${a.task ?? '-'} purpose=${a.purpose} round=${a.round ?? '-'} role=${a.role} model=${a.model} outcome=${a.outcome ?? 'running'} summary=${clip(a.summary)}${a.outcome && a.outcome !== 'done' ? ` REASON=${a.reason ?? ''}` : ''}`);
   }
   printEvents(created.jobId);
 
