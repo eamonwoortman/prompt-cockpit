@@ -69,10 +69,35 @@ test('the system prompt tells retry and retry-alternate apart and names the trig
   assert.ok(ROUTER_SYSTEM_PROMPT.includes('the trigger\'s model is the model of the attempt that just failed'));
 });
 
-test('estimateTokens counts UTF-8 bytes', () => {
+test('estimateTokens counts ASCII / 3 plus 2 per non-ASCII code point', () => {
   assert.equal(estimateTokens('abc'), 1);
-  assert.equal(estimateTokens('漢字漢'), 3);
+  assert.equal(estimateTokens('abcd'), 2);
+  assert.equal(estimateTokens('漢字漢'), 6);
   assert.equal(estimateTokens('😀'), 2);
+  assert.equal(estimateTokens('a漢'), 3);
+});
+
+test('the CJK worst-case card estimates above its measured size', () => {
+  const cjkWords = (n, word) => Array.from({ length: n }, () => word).join(' ');
+  const phases = ['spec', 'spec-review', 'plan', 'plan-review', 'implement', 'test', 'verify'];
+  const job = {
+    title: 'Add a dark mode toggle to the settings page',
+    mode: 'automatic',
+    phaseIndex: phases.length,
+    phaseId: 'accept',
+    pipeline: [...phases.map((phase) => ({ phase, kind: 'author' })), { phase: 'accept', kind: 'author' }],
+    attempts: phases.map((phase) => ({ phase, outcome: 'done', summary: cjkWords(60, '概要') })),
+    routerDecisions: Array.from({ length: 5 }, (_, i) => ({ action: 'retry', note: `${i} ${cjkWords(25, '概要')}` })),
+  };
+  const t = {
+    attemptId: 'a-probe', phase: 'accept', task: null, role: 'implementer', model: 'claude-sonnet-5-5', reason: 'invalid-result', status: null,
+    summary: cjkWords(120, '詳細'), question: null, signature: 'results.js:394 evidence.checks[0].cmd mismatch', attemptsUsed: 2, attemptsLeft: 1,
+    allowed: ['retry', 'escalate'], resultPath: '/tmp/result.json',
+  };
+  const r = buildRouterRequest(job, t, { maxInputTokens: 6000 });
+  assert.equal(r.ok, true);
+  assert.ok(r.estimatedTokens >= 3274, String(r.estimatedTokens));
+  assert.ok(r.estimatedTokens <= 6000, String(r.estimatedTokens));
 });
 
 test('the card carries title, mode, phase, completed phases, last 5 decisions and the trigger', () => {

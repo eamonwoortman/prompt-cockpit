@@ -198,3 +198,11 @@ diagnostic, all six variants: one assistant message id, num_turns 1
 - Haiku 5.5 thinks regardless of options, and thinking counts toward `output_tokens`. **Confirmed.** `routerMaxOutputTokens` now limits the ANSWER, `output_tokens - output_tokens_details.thinking_tokens` of `result.usage`.
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is a hard API max: exceeding it fails the call. **Confirmed.** **Suspected:** the CLI retries the request (output tokens were exactly 5x the cap in both failing calls). With a 300 cap, thinking plus answer sits at or over 300, so ordinary calls failed. The env cap is now `routerMaxOutputTokens + ROUTER_THINKING_ALLOWANCE` (1000; observed thinking at most 194 over 7 calls), which keeps a hard per-request bound without failing ordinary calls. If wrong, an unusually long think fails the call (stuck) and the CLI may retry it a few times at Haiku prices.
 - Not re-run after the fix wave: the probe now has four calls (the fourth, `thinkingAllowance: 0`, should show the API error at a 50-token cap) and gates on `usage.requestInputTokens`.
+
+### S4c addendum: estimator under-counts CJK (2026-11-05)
+
+Controller probe at 645b17c (`node tests/superagent-router.manual.mjs`):
+- ascii-worst-case: request input (result.usage) 2,367 <= estimate 2,743 -> PASS.
+- cjk-worst-case (same card, every summary/note word replaced by 2-character CJK words '概要'/'詳細'): request input 3,274 > estimate 2,739 -> FAIL.
+
+That is about 1.18 real tokens per CJK character, while `Math.ceil(Buffer.byteLength(text, 'utf8') / 3)` counts 1 per CJK character. New formula: `estimateTokens(text) = Math.ceil(asciiCount / 3) + 2 * nonAsciiCodePoints`, counted by code point (a surrogate pair counts once).

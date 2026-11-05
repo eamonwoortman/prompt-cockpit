@@ -47,8 +47,16 @@ export const ROUTER_SYSTEM_PROMPT = [
   '{"action":"<allowed action>","note":"<= 30 words"}',
 ].join('\n');
 
+// ASCII code points cost 1 token per 3; every non-ASCII code point (a surrogate pair counts once) costs 2.
+// The old UTF-8 bytes / 3 counted a CJK character as 1, under the probe's measured ~1.18.
 export function estimateTokens(text) {
-  return Math.ceil(Buffer.byteLength(text, 'utf8') / 3);
+  let ascii = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (ch.codePointAt(0) <= 0x7f) ascii += 1;
+    else other += 1;
+  }
+  return Math.ceil(ascii / 3) + 2 * other;
 }
 
 export function allowedActions({ model, alternate, handoffExists }) {

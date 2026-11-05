@@ -4,7 +4,7 @@
 //   node tests/superagent-router.manual.mjs
 // Calls, all with allowed ['retry', 'escalate']:
 //   1. worst-case ASCII card (7 completed phases, 5 decisions, a 120-word summary);
-//   2. the same card with every summary in CJK characters (the estimate counts UTF-8 bytes, so this is the adversarial input);
+//   2. the same card with every summary in CJK characters (the estimate counts ASCII / 3 plus 2 per non-ASCII code point, so this is the adversarial input);
 //   3. answer-limit check (default thinking allowance): the trigger summary asks for a 600-word note and maxOutputTokens is 50.
 //      routerMaxOutputTokens limits the ANSWER (result.usage output_tokens less thinking_tokens); the expected error is
 //      over-length or note-too-long (informational, never fails the run).
