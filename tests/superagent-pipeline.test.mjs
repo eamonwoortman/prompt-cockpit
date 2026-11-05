@@ -11,11 +11,12 @@ import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as registry from '../src/session-registry.js';
-import { HOLD, MIN, T0, ev, initRepo, scriptedWorker, sessionFactory, tempDir } from './superagent-helpers.mjs';
+import { HOLD, MIN, T0, deferred, ev, initRepo, scriptedWorker, sessionFactory, tempDir } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
 import { createSuperagentConfig } from '../src/superagent/config.js';
 import { artifactPaths } from '../src/superagent/results.js';
 import { createSuperagent } from '../src/superagent/index.js';
+import { ROUTER_SYSTEM_PROMPT } from '../src/superagent/router.js';
 
 const quiet = () => {};
 // The slowest test takes about 10s; a hung git call fails the test instead of the suite.
@@ -52,16 +53,17 @@ function handlersWith(over = {}) {
   };
 }
 
-async function harness({ handlers = handlersWith(), limits = null } = {}) {
+async function harness({ handlers = handlersWith(), limits = null, defaults = {}, router: firstRouter, budgetCheck } = {}) {
   registry._reset();
   const root = await fs.mkdtemp(path.join(shared.root, 'h-'));
   const configFile = path.join(root, 'config.json');
-  await fs.writeFile(configFile, JSON.stringify(limits ? { defaults: { limits } } : {}));
+  const fileDefaults = { ...defaults, ...(limits ? { limits } : {}) };
+  await fs.writeFile(configFile, JSON.stringify(Object.keys(fileDefaults).length > 0 ? { defaults: fileDefaults } : {}));
   const jobsRoot = path.join(root, 'jobs');
   const worktreesRoot = path.join(shared.root, 'worktrees');
   const clock = { t: T0 };
 
-  async function build() {
+  async function build(router = firstRouter) {
     const store = createSuperagentStore({ rootDir: jobsRoot, now: () => clock.t, logImpl: quiet });
     const config = createSuperagentConfig({ filePath: configFile });
     await config.load();
@@ -78,6 +80,8 @@ async function harness({ handlers = handlersWith(), limits = null } = {}) {
       stopTickDeadlineMs: 20,
       logImpl: quiet,
       platform: 'linux',
+      ...(router === undefined ? {} : { router }),
+      ...(budgetCheck === undefined ? {} : { budgetCheck }),
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     const h = {
@@ -96,9 +100,9 @@ async function harness({ handlers = handlersWith(), limits = null } = {}) {
         const tail = events(jobId).slice(-6).map((e) => JSON.stringify(e)).join('\n');
         throw new Error(`job ${jobId} did not reach the expected state in ${maxTicks} ticks; worker errors: ${worker.errors.map(String).join('; ')}\n${tail}`);
       },
-      async restart() {
+      async restart({ router } = {}) {
         registry._reset();
-        return build();
+        return build(router);
       },
     };
     return h;
@@ -617,6 +621,411 @@ test('stopJob mid-review-loop closes the live attempt and launches nothing more'
     assert.equal(h.events(job.jobId).length, count, 'nothing appended after the stop');
     assert.deepEqual(loopSteps(h.started(job.jobId)), [['review', 1, false], ['fix', 1, false]]);
     assert.equal(registry.list().length, 0);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+// --- Plan 4: the supervisor's routing step (a fake router, scripted workers) ---
+
+const INVALID = { status: 'maybe', artifacts: [], summary: 'not sure what happened', question: null };
+const decision = (action, note = `router says ${action}`) => ({ ok: true, action, note, usage: { inputTokens: 900, outputTokens: 12, totalInputTokens: 900 }, latencyMs: 5, apiKeySource: 'none' });
+// The first call of a handler answers `first`, every later one `rest`.
+const firstThen = (first, rest = HOLD) => {
+  let n = 0;
+  return (ctx) => {
+    const pick = ++n === 1 ? first : rest;
+    if (pick === HOLD) return HOLD;
+    return typeof pick === 'function' ? pick(ctx) : pick;
+  };
+};
+const routerEvents = (h, jobId) => h.events(jobId).filter((e) => e.type === 'router-decided');
+const tickOnce = async (h) => {
+  h.clock.t += 6 * MIN;
+  await h.sa.tick();
+};
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const cardOf = (req) => JSON.parse(req.card);
+
+// Records every request; `answer` is a decide result or (req, n) => result.
+function fakeRouter(answer = decision('retry')) {
+  const requests = [];
+  return {
+    requests,
+    decide(req) {
+      requests.push(req);
+      return Promise.resolve(typeof answer === 'function' ? answer(req, requests.length) : answer);
+    },
+  };
+}
+
+// Every call stays pending until resolved by hand; like the real router it
+// settles { ok: false, error: 'aborted' } once its signal aborts.
+function heldRouter() {
+  const requests = [];
+  const calls = [];
+  return {
+    requests,
+    calls,
+    decide(req) {
+      requests.push(req);
+      const d = deferred();
+      req.signal.addEventListener('abort', () => d.resolve({ ok: false, error: 'aborted', usage: null, latencyMs: 1, apiKeySource: null }), { once: true });
+      calls.push({ req, resolve: d.resolve });
+      return d.promise;
+    },
+  };
+}
+
+const specStarts = (n) => (j, events) => events.filter((e) => e.type === 'attempt-started' && e.phase === 'spec').length === n;
+
+test('router: a failed attempt is routed, then retried as decided', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = fakeRouter(decision('retry'));
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID, ({ publish }) => publish()) }) });
+    const job = await createJob(h);
+    const got = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual([got.state, got.reason], ['needs-you', 'ready-to-try']);
+
+    const specs = h.started(job.jobId, 'spec');
+    assert.equal(specs.length, 2);
+    assert.deepEqual([endOf(h, job.jobId, specs[0].attemptId).reason, specs[1].recovery, specs[1].previousAttemptId], ['invalid-result', true, specs[0].attemptId]);
+    const decided = routerEvents(h, job.jobId);
+    assert.equal(decided.length, 1);
+    assert.deepEqual(
+      [decided[0].forAttemptId, decided[0].ok, decided[0].action, decided[0].note, decided[0].error, decided[0].model, decided[0].latencyMs],
+      [specs[0].attemptId, true, 'retry', 'router says retry', null, 'claude-haiku-5-5', 5],
+    );
+    assert.ok(decided[0].request.estimatedTokens > 0);
+    assert.deepEqual(decided[0].request.truncated, []);
+    assert.deepEqual(decided[0].usage, decision('retry').usage);
+    assert.ok(decided[0].seq < specs[1].seq);
+
+    assert.equal(router.requests.length, 1);
+    const [req] = router.requests;
+    assert.deepEqual(req.allowed, ['retry', 'escalate']);
+    assert.deepEqual([req.model, req.maxOutputTokens, req.allowlist, req.system], ['claude-haiku-5-5', 300, ['claude-haiku-5-5'], ROUTER_SYSTEM_PROMPT]);
+    assert.ok(req.signal instanceof AbortSignal);
+    assert.deepEqual(cardOf(req).allowed, ['retry', 'escalate']);
+    assert.equal(cardOf(req).trigger.attemptId, specs[0].attemptId);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: retry-alternate launches the implementer on its alternate model', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = fakeRouter(decision('retry-alternate'));
+    const h = await harness({ router, handlers: handlersWith({ implement: firstThen(INVALID) }) });
+    const job = await createJob(h);
+    await fastForward(h, job, 'implement', { tasks: [task('T1')] });
+    await h.drive(job.jobId, (j, events) => events.filter((e) => e.type === 'attempt-started' && e.purpose === 'implement').length === 2);
+    assert.deepEqual(h.worker.errors, []);
+
+    const impls = h.started(job.jobId, 'implement');
+    assert.deepEqual(impls.map((e) => [e.task, e.model]), [['T1', 'claude-sonnet-5-5'], ['T1', 'claude-opus-5-5']]);
+    assert.deepEqual(router.requests.map((r) => r.allowed), [['retry', 'retry-alternate', 'escalate']]);
+    assert.deepEqual([cardOf(router.requests[0]).trigger.task, cardOf(router.requests[0]).trigger.role], ['T1', 'implementer']);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: retry-handoff is offered only when handoff.md exists and passes it on', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const writeHandoff = async ({ card }) => {
+      await fs.mkdir(card.attemptDir, { recursive: true });
+      await fs.writeFile(path.join(card.attemptDir, 'handoff.md'), '# where I stopped\n');
+      return INVALID;
+    };
+    const router = fakeRouter(decision('retry-handoff'));
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(writeHandoff) }) });
+    const job = await createJob(h);
+    await h.drive(job.jobId, specStarts(2));
+    assert.deepEqual(h.worker.errors, []);
+    const specs = h.started(job.jobId, 'spec');
+    assert.deepEqual(router.requests.map((r) => r.allowed), [['retry', 'retry-handoff', 'escalate']]);
+    const handoff = path.join(specs[0].dir, 'handoff.md');
+    assert.deepEqual([specs[0].handoff, specs[1].handoff], [null, handoff]);
+    assert.equal(h.worker.cards().at(-1).handoff, handoff);
+    await h.sa.stop();
+
+    const bare = fakeRouter(decision('escalate'));
+    const h2 = await harness({ router: bare, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job2 = await createJob(h2);
+    await h2.drive(job2.jobId);
+    assert.deepEqual(bare.requests.map((r) => r.allowed), [['retry', 'escalate']]);
+    await h2.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: escalate stops the job as stuck with the note', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = fakeRouter(decision('escalate', 'the idea needs a human decision'));
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job = await createJob(h);
+    const got = await h.drive(job.jobId);
+    assert.deepEqual([got.state, got.reason], ['needs-you', 'stuck']);
+    assert.deepEqual([got.detail.phase, got.detail.why, got.detail.note, got.detail.lastReason], ['spec', 'router-escalated', 'the idea needs a human decision', 'invalid-result']);
+    assert.equal(h.started(job.jobId, 'spec').length, 1);
+    assert.equal(router.requests.length, 1);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: a router failure escalates the job as stuck with the error, also when decide rejects', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const failures = [
+      { decide: () => Promise.resolve({ ok: false, error: 'Not logged in · Please run /login', usage: null, latencyMs: 40, apiKeySource: 'none' }) },
+      { decide: () => Promise.reject(new Error('Not logged in · Please run /login (thrown)')) },
+    ];
+    for (const router of failures) {
+      const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+      const job = await createJob(h);
+      const got = await h.drive(job.jobId);
+      assert.deepEqual([got.state, got.reason, got.detail.why], ['needs-you', 'stuck', 'router-failed']);
+      assert.match(got.detail.error, /Not logged in/);
+      const [decided] = routerEvents(h, job.jobId);
+      assert.deepEqual([decided.ok, decided.action, decided.note], [false, 'escalate', null]);
+      assert.match(decided.error, /Not logged in/);
+      assert.equal(h.started(job.jobId, 'spec').length, 1);
+      await h.sa.stop();
+    }
+  } finally { registry._reset(); }
+});
+
+test('router: an over-limit request makes no call and is stuck', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = fakeRouter();
+    const h = await harness({ router, defaults: { routerMaxInputTokens: 700 }, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job = await createJob(h);
+    assert.equal(job.router.maxInputTokens, 700);
+    const got = await h.drive(job.jobId);
+    assert.equal(router.requests.length, 0);
+    const decided = routerEvents(h, job.jobId);
+    assert.equal(decided.length, 1);
+    assert.deepEqual([decided[0].ok, decided[0].action, decided[0].note, decided[0].usage, decided[0].latencyMs, decided[0].model], [false, 'escalate', null, null, 0, 'claude-haiku-5-5']);
+    assert.match(decided[0].error, /^over-limit: estimated \d+ tokens > 700$/);
+    assert.ok(decided[0].request.estimatedTokens > 700);
+    assert.deepEqual([got.state, got.reason, got.detail.why], ['needs-you', 'stuck', 'router-failed']);
+    assert.match(got.detail.error, /^over-limit/);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: the card built by the supervisor carries status and question', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const blocked = { status: 'blocked', artifacts: [], summary: 'the idea contradicts the README', question: null };
+    const router = fakeRouter(decision('escalate'));
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(blocked) }) });
+    const job = await createJob(h);
+    await h.drive(job.jobId);
+    const [spec] = h.started(job.jobId, 'spec');
+    const { trigger } = cardOf(router.requests[0]);
+    assert.deepEqual(
+      [trigger.attemptId, trigger.phase, trigger.task, trigger.role, trigger.reason, trigger.status, trigger.question, trigger.summary],
+      [spec.attemptId, 'spec', null, 'spec-writer', 'blocked', 'blocked', null, blocked.summary],
+    );
+    assert.deepEqual([trigger.attemptsUsed, trigger.attemptsLeft, trigger.resultPath], [1, 2, path.join(spec.dir, 'result.json')]);
+    assert.deepEqual(trigger.allowed, ['retry', 'escalate']);
+    await h.sa.stop();
+
+    // No result at all: the session goes away before result.json exists.
+    const router2 = fakeRouter(decision('escalate'));
+    const h2 = await harness({ router: router2, handlers: handlersWith({ 'spec:author': () => HOLD }) });
+    const job2 = await createJob(h2);
+    const live = await h2.drive(job2.jobId, (j) => j.attempts.some((a) => a.sessionId));
+    registry.closeSession(live.attempts[0].sessionId);
+    await h2.sa.drain();
+    await h2.drive(job2.jobId);
+    const t2 = cardOf(router2.requests[0]).trigger;
+    assert.deepEqual([t2.reason, t2.status, t2.question, t2.summary], ['no-result', null, null, null]);
+    await h2.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: the tick does not wait on the router', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = heldRouter();
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job = await createJob(h);
+    await h.drive(job.jobId, () => router.requests.length === 1);
+    const count = h.events(job.jobId).length;
+    await tickOnce(h);
+    await tickOnce(h);
+    assert.equal(h.events(job.jobId).length, count, 'nothing launched or appended while the router call is pending');
+    assert.equal(router.requests.length, 1, 'decide is not called again');
+
+    router.calls[0].resolve(decision('retry'));
+    await h.sa.drain();
+    assert.equal(routerEvents(h, job.jobId).length, 1);
+    await tickOnce(h);
+    assert.equal(h.started(job.jobId, 'spec').length, 2);
+    assert.equal(router.requests.length, 1);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: stop aborts an in-flight router call and records nothing', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = heldRouter();
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job = await createJob(h);
+    await h.drive(job.jobId, () => router.requests.length === 1);
+    const count = h.events(job.jobId).length;
+    await h.sa.stop();
+    assert.equal(router.requests[0].signal.aborted, true);
+    await settle();
+    assert.equal(h.events(job.jobId).length, count);
+    assert.equal(routerEvents(h, job.jobId).length, 0);
+  } finally { registry._reset(); }
+});
+
+test('router: stopJob during a router call leaves no router-decided', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = heldRouter();
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job = await createJob(h);
+    await h.drive(job.jobId, () => router.requests.length === 1);
+    const stopping = h.sa.stopJob(job.jobId);
+    assert.equal(router.requests[0].signal.aborted, true, 'aborted synchronously');
+    const stopped = await stopping;
+    assert.equal(stopped.state, 'stopped');
+    await h.sa.drain();
+    await tickOnce(h);
+    assert.equal(routerEvents(h, job.jobId).length, 0);
+    assert.equal(h.events(job.jobId).at(-1).type, 'job-stopped');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: stopping one job leaves another job\'s router call intact', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = heldRouter();
+    let specRuns = 0;
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': () => (++specRuns <= 2 ? INVALID : HOLD) }) });
+    const a = await createJob(h, { title: 'Add hello' });
+    const b = await createJob(h, { title: 'Add goodbye' });
+    for (let i = 0; i < 20 && router.requests.length < 2; i++) await tickOnce(h);
+    assert.equal(router.requests.length, 2);
+    const attemptOf = (job) => h.started(job.jobId, 'spec')[0].attemptId;
+    const callOf = (job) => router.calls.find((c) => cardOf(c.req).trigger.attemptId === attemptOf(job));
+
+    await h.sa.stopJob(a.jobId);
+    assert.deepEqual([callOf(a).req.signal.aborted, callOf(b).req.signal.aborted], [true, false]);
+    callOf(b).resolve(decision('retry'));
+    await h.sa.drain();
+    assert.deepEqual([routerEvents(h, a.jobId).length, routerEvents(h, b.jobId).length], [0, 1]);
+    await tickOnce(h);
+    assert.equal(h.started(b.jobId, 'spec').length, 2);
+    assert.equal(h.started(a.jobId, 'spec').length, 1);
+    assert.equal(h.store.get(a.jobId).state, 'stopped');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+// Ticks without awaiting until the route's budget check is pending, stops,
+// then lets the check pass.
+async function stopDuringRouteBudgetCheck({ defaults } = {}) {
+  const gate = deferred();
+  let routeChecks = 0;
+  const budgetCheck = ({ action }) => {
+    if (action.type !== 'route') return { allow: true };
+    routeChecks += 1;
+    return gate.promise;
+  };
+  const router = fakeRouter();
+  const h = await harness({ router, budgetCheck, defaults, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+  const job = await createJob(h);
+  await h.drive(job.jobId, (j) => j.attempts[0]?.outcome === 'failed');
+  h.clock.t += 6 * MIN;
+  const ticking = h.sa.tick();
+  for (let i = 0; i < 100 && routeChecks === 0; i++) await settle();
+  assert.equal(routeChecks, 1);
+  const count = h.events(job.jobId).length;
+  await h.sa.stop();
+  gate.resolve({ allow: true });
+  await ticking;
+  await h.sa.drain();
+  assert.equal(router.requests.length, 0);
+  assert.equal(h.events(job.jobId).length, count);
+  assert.equal(routerEvents(h, job.jobId).length, 0);
+}
+
+test('router: stop during a pending budget check starts no call and appends nothing, also when over-limit', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    await stopDuringRouteBudgetCheck();
+    await stopDuringRouteBudgetCheck({ defaults: { routerMaxInputTokens: 700 } });
+  } finally { registry._reset(); }
+});
+
+test('router: a rejected decision append is retried without a second call', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const unhandled = [];
+  const spy = (err) => unhandled.push(err);
+  process.on('unhandledRejection', spy);
+  try {
+    for (const mode of ['before-write', 'after-write']) {
+      const router = fakeRouter(decision('retry'));
+      const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+      const original = h.store.append;
+      let failing = true;
+      h.store.append = (jobId, event) => {
+        if (event.type !== 'router-decided' || !failing) return original(jobId, event);
+        failing = false;
+        if (mode === 'before-write') return Promise.reject(new Error('disk full'));
+        return original(jobId, event).then(() => { throw new Error('fsync reported failure'); });
+      };
+      const job = await createJob(h);
+      await h.drive(job.jobId, specStarts(2));
+      assert.equal(failing, false, `${mode}: the append was attempted`);
+      assert.equal(router.requests.length, 1, `${mode}: decide is called once`);
+      assert.equal(routerEvents(h, job.jobId).length, 1, `${mode}: one router-decided`);
+      const specs = h.started(job.jobId, 'spec');
+      assert.equal(specs[1].previousAttemptId, specs[0].attemptId);
+      await h.sa.stop();
+    }
+    await settle();
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', spy);
+    registry._reset();
+  }
+});
+
+test('router: restart after a decision launches without calling the router', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = heldRouter();
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job = await createJob(h);
+    await h.drive(job.jobId, () => router.requests.length === 1);
+    router.calls[0].resolve(decision('retry'));
+    await h.sa.drain();
+    await h.sa.stop();
+    assert.equal(h.events(job.jobId).at(-1).type, 'router-decided');
+
+    const freshRouter = fakeRouter();
+    const fresh = await h.restart({ router: freshRouter });
+    await fresh.sa.start();
+    await fresh.sa.tick();
+    assert.equal(fresh.started(job.jobId, 'spec').length, 2);
+    assert.equal(freshRouter.requests.length, 0);
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('router: the budget check runs before a router call', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = fakeRouter();
+    const checked = [];
+    const budgetCheck = ({ action }) => {
+      checked.push(action.type);
+      return action.type === 'route' ? { allow: false, reason: 'job budget spent' } : { allow: true };
+    };
+    const h = await harness({ router, budgetCheck, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job = await createJob(h);
+    const got = await h.drive(job.jobId);
+    assert.deepEqual([got.state, got.reason, got.detail], ['needs-you', 'question', { kind: 'budget', text: 'job budget spent' }]);
+    assert.deepEqual(checked, ['launch', 'route']);
+    assert.equal(router.requests.length, 0);
+    assert.equal(routerEvents(h, job.jobId).length, 0);
     await h.sa.stop();
   } finally { registry._reset(); }
 });
