@@ -151,3 +151,25 @@ The probe's own per-message sums are unreliable: top-level assistant messages wi
 - Ledger field: **`result.modelUsage`**, recorded as the per-model delta (`costUSD`, token fields) from the previous result of the same session; `total_cost_usd` is a usable cross-check. Note that `contextWindow` and `maxOutputTokens` are 0 in the delta, so subtract only the numeric spend fields. Resumed sessions and `/clear` reset the running total per the SDK comment (not tested). Per the same comment (`sdk.d.ts:4499`), `modelUsage` excludes internal helper calls outside the query pipeline, such as the permission classifier and token-count probes, so it can undercount spend for `auto`-mode workers (S1).
 
 **Impact on design.** The usage ledger reads `result.modelUsage` as a per-session, per-model delta, never `result.usage` and never per-message sums. That `modelUsage` includes subagent spend rests on the SDK doc comment (`sdk.d.ts:4499`) plus the larger-than-`usage` observation, not on an isolated measurement, and the ledger undercounts classifier and token-count calls. Plan 2 should keep the previous `modelUsage` per session row and treat a decrease as a reset.
+
+## S4b router auth route (2026-11-05)
+
+**Question.** Which auth route keeps the S4 isolation and still authenticates, and what does an isolated router request actually cost in input tokens?
+
+**Probe.** `tests/superagent-router-isolation-probe.manual.mjs`, SDK 0.3.318 (Claude Code 2.1.318), `claude-haiku-5-5`, `maxTurns: 1`. New runs: `isolated-helper` (the S4 isolated options plus `settings: { apiKeyHelper }`, the helper string read from `~/.claude/settings.json`), `isolated-helper-nomem` (the same plus `autoMemoryEnabled: false`) and `isolated-helper-full-card` (a 1,623-char system prompt and a 5,416-char worst-case card: 7 completed-phase lines of 60 words, 5 decisions of 30 words, a 120-word event summary). Select runs with `PROBE_RUNS`, override the cwd with `PROBE_CWD`. Positive control not re-run.
+
+**Observed.**
+```
+isolated-helper (hostile temp cwd): apiKeySource "apiKeyHelper", tools [], mcp_servers [], reply {"action":"retry","note":"probe"}
+  usage: input_tokens=465 ... output_tokens=17   totalInput = 465  latencyMs = 3669
+isolated-helper-full-card (hostile temp cwd): totalInput = 2427 (cache_creation 2425)  latencyMs = 3847
+isolated-helper (cwd C:\workspace\git\prompt-cockpit): totalInput = 648, init memory_paths.auto = ...\projects\C--workspace-git-prompt-cockpit\memory\
+isolated-helper-nomem (same cwd): totalInput = 443, no memory_paths in init
+```
+`plugins` still lists four built-ins (`cc-plugin-sec-default`, `cc-plugin-agents-md`, `cc-plugin-privacy`, `cc-plugin-plugin-authoring`); built-in skills and agents still appear in `init`, as in S4. PINEAPPLE never appeared (the signal stays non-discriminating).
+
+**Conclusion.**
+- Auth route A works: `settingSources: []` plus the inline `settings: { apiKeyHelper }` (the `--settings` flag layer) authenticates while tools, MCP servers and user plugins stay empty. **Confirmed** (one run each).
+- Auto-memory leaks through `settingSources: []`: in a cwd with a project memory directory the request grew by 205 tokens until `autoMemoryEnabled: false` was set. **Confirmed.** The router sets it and runs from its own neutral cwd.
+- Baseline: about 443-465 input tokens for an empty card; about 2,427 for a worst-case card. The 6000 `routerMaxInputTokens` default is comfortable. A chars/3 estimate plus a 600-token overhead over-estimates the full card (2,947 vs 2,427), so it is a safe pre-send bound.
+- Not tested: a machine without `apiKeyHelper` (OAuth login or `ANTHROPIC_API_KEY`); the route then passes `settings` without the helper.
