@@ -19,7 +19,8 @@
 //   (d) does `auto` mode let workers commit (earlier probe: canUseTool is skipped for Bash in auto);
 //   (e) how long a full pipeline takes.
 // Plan 4: the real isolated router is injected (createRouter()), so failed attempts are routed; each router-decided is printed with
-// its action, note, request.estimatedTokens, usage.inputTokens and latencyMs.
+// its action, note, request.estimatedTokens, usage.requestInputTokens (the router's own request, result.usage), usage.totalInputTokens and
+// usage.costUsd (the spend, modelUsage) and latencyMs.
 // Prints per-attempt purpose/round/role/outcome/summary (and the reason of every failed attempt), phase-completed, test-routed and
 // router-decided events, job state transitions, the final state and reason, the worktree `git log --oneline`, and which artifact paths exist.
 // Uses a temp COCKPIT_HOME, operator file and toy repo, so cockpit state stays under the temp home; the Claude SDK still writes its
@@ -108,7 +109,7 @@ function printNew(job) {
     const key = `router:${d.forAttemptId}`;
     if (printed.has(key)) continue;
     printed.add(key);
-    console.log(`ROUTER forAttempt=${d.forAttemptId} action=${d.action} ok=${d.ok} note=${clip(d.note)} estimatedTokens=${d.request?.estimatedTokens} inputTokens=${d.usage?.inputTokens} latencyMs=${d.latencyMs}${d.error ? ` error=${d.error}` : ''}`);
+    console.log(`ROUTER forAttempt=${d.forAttemptId} action=${d.action} ok=${d.ok} note=${clip(d.note)} estimatedTokens=${d.request?.estimatedTokens} requestInputTokens=${d.usage?.requestInputTokens} totalInputTokens=${d.usage?.totalInputTokens} costUsd=${d.usage?.costUsd} latencyMs=${d.latencyMs}${d.error ? ` error=${d.error}` : ''}`);
   }
 }
 
