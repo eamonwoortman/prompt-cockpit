@@ -15,6 +15,8 @@
 export const CONSUMING_OUTCOMES = new Set(['done', 'failed', 'question']);
 // createJob's gate (index.js).
 export const RUNNABLE_KINDS = new Set(['author', 'review', 'per-task', 'human']);
+export const ROUTER_ACTIONS = ['retry', 'retry-alternate', 'retry-handoff', 'escalate'];
+export const ROUTED_REASONS = new Set(['no-result', 'invalid-result', 'turn-cap', 'stalled', 'failed', 'blocked']);
 
 const REVIEW_PURPOSES = new Set(['review', 'task-review']);
 const DEFAULT_REVIEW_ROUNDS = 3;
