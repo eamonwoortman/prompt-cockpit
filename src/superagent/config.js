@@ -14,6 +14,8 @@ import { CLAUDE_EFFORTS } from '../provider-registry.js';
 export const PHASE_KINDS = ['author', 'review', 'per-task', 'human'];
 export const WORKER_PERMISSION_MODES = ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk'];
 const MODES = ['automatic', 'manual'];
+// The router's answer limit; its generation cap adds a thinking allowance on top.
+export const ROUTER_MAX_OUTPUT_TOKENS_CAP = 4000;
 
 const freezePhase = (p) => Object.freeze({
   ...p,
@@ -245,6 +247,9 @@ function checkScalars(d, errors) {
   }
   for (const key of ['routerMaxInputTokens', 'routerMaxOutputTokens']) {
     if (!isPositiveInt(d[key])) errors.push({ path: key, message: `${key} must be a positive integer` });
+  }
+  if (isPositiveInt(d.routerMaxOutputTokens) && d.routerMaxOutputTokens > ROUTER_MAX_OUTPUT_TOKENS_CAP) {
+    errors.push({ path: 'routerMaxOutputTokens', message: `routerMaxOutputTokens must be at most ${ROUTER_MAX_OUTPUT_TOKENS_CAP}` });
   }
   if (!isPositiveInt(d.maxConcurrentSessions)) errors.push({ path: 'maxConcurrentSessions', message: 'must be a positive integer' });
   if (!isPlainObject(d.limits)) {

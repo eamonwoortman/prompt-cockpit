@@ -575,9 +575,22 @@ const routeOf = (over) => ({
 test('route: an eligible failure with no decision returns route', () => {
   const job = build(...authorFail('a1', 'invalid-result'));
   assert.deepEqual(nextAction(job, routing()), routeOf({
-    forAttemptId: 'a1', phase: 'spec', role: 'spec-writer', purpose: 'author', model: 'claude-opus-5-5',
+    forAttemptId: 'a1', phase: 'spec', role: 'spec-writer', purpose: 'author', model: 'claude-opus-5-5', lastModel: 'claude-opus-5-5',
     reason: 'invalid-result', signature: 'invalid-result|x', attemptsUsed: 1, attemptsLeft: 2,
   }));
+});
+
+test('route: lastModel is the failed attempt\'s own model, not the role default', () => {
+  const job = m2(...upTo('implement'), ev.tasksLoaded([taskCreated('T1')]),
+    { type: 'attempt-started', attemptId: 'i1', phase: 'implement', task: 'T1', role: 'implementer', model: 'claude-opus-5-5', n: 1, purpose: 'implement', dir: '/d' },
+    { type: 'attempt-ended', attemptId: 'i1', outcome: 'failed', reason: 'turn-cap', signature: 'turn-cap|', at: T0 });
+  const action = nextAction(job, routing());
+  assert.deepEqual([action.type, action.model, action.alternate, action.lastModel], ['route', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-5-5']);
+});
+
+test('hasAlternate is the one alternate predicate', () => {
+  assert.equal(sequencer.hasAlternate('a', 'b'), true);
+  for (const alt of ['a', '', null, undefined]) assert.equal(sequencer.hasAlternate('a', alt), false);
 });
 
 test('route: status is mapped from the reason', () => {
@@ -597,7 +610,7 @@ const reviewFail = (purpose, round, id, reason = 'invalid-result') => ({ purpose
 test('route: review scopes count failed attempts only', () => {
   const reviewer = atReview(rev(1, 'changes', [F('m1')]), fix(1, { m1: 'fixed' }), reviewFail('review', 2, 'r2'));
   assert.deepEqual(nextAction(reviewer, routing()), routeOf({
-    forAttemptId: 'r2', phase: 'spec-review', role: 'spec-reviewer', purpose: 'review', round: 2, model: 'claude-opus-5-5',
+    forAttemptId: 'r2', phase: 'spec-review', role: 'spec-reviewer', purpose: 'review', round: 2, model: 'claude-opus-5-5', lastModel: 'm',
     reason: 'invalid-result', signature: 'invalid-result|r2', attemptsUsed: 1, attemptsLeft: 2,
   }));
 
@@ -607,7 +620,7 @@ test('route: review scopes count failed attempts only', () => {
   const T1 = taskCreated('T1');
   const taskReviewer = nextAction(atImplement([T1], ...forTask('T1', [{ purpose: 'implement' }, reviewFail('task-review', 1, 'tr1', 'stalled')])), routing());
   assert.deepEqual(taskReviewer, routeOf({
-    forAttemptId: 'tr1', phase: 'implement', task: 'T1', role: 'task-reviewer', purpose: 'task-review', round: 1, model: 'claude-sonnet-5-5',
+    forAttemptId: 'tr1', phase: 'implement', task: 'T1', role: 'task-reviewer', purpose: 'task-review', round: 1, model: 'claude-sonnet-5-5', lastModel: 'm',
     reason: 'stalled', signature: 'stalled|tr1', attemptsUsed: 1, attemptsLeft: 1,
   }));
 
@@ -659,6 +672,23 @@ test('route: cap, repeated-error and back-off win over routing', () => {
   const reviewCap = nextAction(atReview(reviewFail('review', 1, 'r1'), reviewFail('review', 1, 'r2'), reviewFail('review', 1, 'r3')), routing());
   assert.deepEqual([reviewCap.type, reviewCap.detail.why], ['needs-you', 'attempt-cap']);
   assert.deepEqual(nextAction(atReview(reviewFail('review', 1, 'r1')), routing({ now: T0 + 1 })), { type: 'wait', until: T0 + MIN, why: 'backoff' });
+});
+
+test('route: the per-task cap wins over routing', () => {
+  assert.equal(limits.attemptsPerTask, 2);
+  const T1 = taskCreated('T1');
+  const job = atImplement([T1], ...forTask('T1', [
+    { purpose: 'implement', id: 'i1', outcome: 'failed', reason: 'turn-cap', signature: 'turn-cap|one' },
+    { purpose: 'implement', id: 'i2', outcome: 'failed', reason: 'stalled', signature: 'stalled|two' },
+  ]));
+  const action = nextAction(job, routing());
+  assert.deepEqual([action.type, action.reason, action.detail.why, action.detail.task], ['needs-you', 'stuck', 'attempt-cap', 'T1']);
+});
+
+test('route: a review scope\'s repeated error wins over routing', () => {
+  const job = atReview({ ...reviewFail('review', 1, 'r1'), signature: 'invalid-result|same' }, { ...reviewFail('review', 1, 'r2'), signature: 'invalid-result|same' });
+  const action = nextAction(job, routing());
+  assert.deepEqual([action.type, action.reason, action.detail.why, action.detail.phase], ['needs-you', 'stuck', 'repeated-error', 'spec-review']);
 });
 
 test('route: route is returned before the concurrency wait', () => {
@@ -718,7 +748,7 @@ test('route: a per-task scope routes the implementer and applies retry, retry-al
   const failedImpl = forTask('T1', [{ purpose: 'implement', id: 'i1', outcome: 'failed', reason: 'turn-cap', signature: 'turn-cap|' }]);
   const job = atImplement([T1], ...failedImpl);
   assert.deepEqual(nextAction(job, routing()), routeOf({
-    forAttemptId: 'i1', phase: 'implement', task: 'T1', role: 'implementer', purpose: 'implement', model: 'claude-sonnet-5-5', alternate: 'claude-opus-5-5',
+    forAttemptId: 'i1', phase: 'implement', task: 'T1', role: 'implementer', purpose: 'implement', model: 'claude-sonnet-5-5', alternate: 'claude-opus-5-5', lastModel: 'm',
     reason: 'turn-cap', signature: 'turn-cap|', attemptsUsed: 1, attemptsLeft: 1,
   }));
   const applied = (action) => nextAction(implementWith([T1], failedImpl, decided('i1', action)), routing());

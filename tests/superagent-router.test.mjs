@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  ROUTER_ACTIONS, ROUTED_REASONS, ROUTER_OVERHEAD_TOKENS, NOTE_MAX_WORDS, ROUTER_SYSTEM_PROMPT,
+  ROUTER_ACTIONS, ROUTED_REASONS, ROUTER_OVERHEAD_TOKENS, NOTE_MAX_WORDS, ROUTER_SYSTEM_PROMPT, ROUTER_THINKING_ALLOWANCE,
   estimateTokens, allowedActions, buildRouterRequest, validateRouterOutput,
   readUserApiKeyHelper, createRouter,
 } from '../src/superagent/router.js';
@@ -51,6 +51,22 @@ test('allowedActions offers alternate and handoff only when available', () => {
   assert.deepEqual(allowedActions({ model: 'a', alternate: null, handoffExists: false }), ['retry', 'escalate']);
   assert.deepEqual(allowedActions({ model: 'a', alternate: 'a' }), ['retry', 'escalate']);
   assert.deepEqual(allowedActions({ model: 'a', alternate: 'b', handoffExists: true }), ROUTER_ACTIONS);
+  assert.deepEqual(allowedActions({ model: 'a', alternate: '' }), ['retry', 'escalate']);
+});
+
+test('one alternate predicate, owned by the sequencer', () => {
+  const { hasAlternate } = sequencer;
+  assert.equal(hasAlternate('a', 'b'), true);
+  for (const alt of ['a', '', null, undefined, 5]) assert.equal(hasAlternate('a', alt), false, String(alt));
+  for (const [model, alternate] of [['a', 'b'], ['a', 'a'], ['a', null]]) {
+    assert.equal(allowedActions({ model, alternate }).includes('retry-alternate'), hasAlternate(model, alternate));
+  }
+});
+
+test('the system prompt tells retry and retry-alternate apart and names the trigger model', () => {
+  assert.ok(ROUTER_SYSTEM_PROMPT.includes('retry: run the role again on its default model'));
+  assert.ok(ROUTER_SYSTEM_PROMPT.includes('retry-alternate: run it on its alternate model'));
+  assert.ok(ROUTER_SYSTEM_PROMPT.includes('the trigger\'s model is the model of the attempt that just failed'));
 });
 
 test('estimateTokens counts UTF-8 bytes', () => {
@@ -123,13 +139,35 @@ test('over the limit after every step: no call, over-limit', () => {
 test('adversarial job text stays bounded', () => {
   const job = makeJob({ phaseWords: 500 });
   job.title = 'x'.repeat(5000);
-  const r = buildRouterRequest(job, trigger({ summary: '漢'.repeat(2000) }), { maxInputTokens: 6000 });
-  if (r.ok) {
-    assert.ok(r.estimatedTokens <= 6000);
-    assert.equal(JSON.parse(r.card).job.title.length, 200);
-  } else {
-    assert.equal(r.error, 'over-limit');
-  }
+  const t = trigger({ summary: '漢'.repeat(2000) });
+  const roomy = buildRouterRequest(job, t, { maxInputTokens: 6000 });
+  assert.equal(roomy.ok, true);
+  assert.ok(roomy.estimatedTokens <= 6000);
+  assert.equal(JSON.parse(roomy.card).job.title.length, 200);
+
+  // A space-free summary is one word, so only the character cap can cut it.
+  const tight = buildRouterRequest(job, t, { maxInputTokens: 2000 });
+  assert.equal(tight.ok, true);
+  assert.ok(tight.truncated.includes('summary'));
+  assert.ok(tight.estimatedTokens <= 2000);
+  assert.equal(JSON.parse(tight.card).trigger.summary, `${'漢'.repeat(149)}… (full result: /tmp/result.json)`);
+});
+
+test('space-free phase summaries and decision notes are cut by characters', () => {
+  const job = makeJob();
+  job.attempts[1].summary = 'a'.repeat(1000);
+  job.routerDecisions = [{ action: 'retry', note: 'n'.repeat(1000) }];
+  const card = JSON.parse(buildRouterRequest(job, trigger(), { maxInputTokens: 100000 }).card);
+  assert.equal(card.phases[0], `spec: done - ${'a'.repeat(399)}…`);
+  assert.equal(card.decisions[0].note, `${'n'.repeat(199)}…`);
+
+  const bare = { ...job, phaseIndex: 0 };
+  const short = trigger({ summary: 'short' });
+  const full = buildRouterRequest(bare, short, { maxInputTokens: 100000 });
+  const notes = buildRouterRequest(bare, short, { maxInputTokens: full.estimatedTokens - 1 });
+  assert.equal(notes.ok, true);
+  assert.deepEqual(notes.truncated, ['notes']);
+  assert.equal(JSON.parse(notes.card).decisions[0].note, `${'n'.repeat(59)}…`);
 });
 
 const limits = { allowed: ['retry', 'escalate'], maxOutputTokens: 300, outputTokens: 20 };
@@ -151,7 +189,18 @@ test('validateRouterOutput rejects bad output', () => {
   assert.equal(validateRouterOutput(`{"action":"retry","note":"${w(30)}"}`, limits).ok, true);
   const ok = '{"action":"retry","note":"x"}';
   assert.equal(bad(ok, { outputTokens: 301 }), 'over-length');
-  for (const v of [undefined, NaN, Infinity]) assert.equal(bad(ok, { outputTokens: v }), 'usage-missing');
+  for (const v of [undefined, NaN, Infinity, -1]) assert.equal(bad(ok, { outputTokens: v }), 'usage-missing');
+  assert.equal(bad(`{"action":"retry","note":"${'n'.repeat(301)}"}`), 'note-too-long');
+  assert.equal(bad(`{"action":"retry","note":"${'漢'.repeat(301)}"}`), 'note-too-long');
+  assert.equal(validateRouterOutput(`{"action":"retry","note":"${'漢'.repeat(300)}"}`, limits).ok, true);
+});
+
+test('validateRouterOutput refuses a limit it cannot check', () => {
+  const ok = '{"action":"retry","note":"x"}';
+  for (const v of [undefined, null, NaN, Infinity, '300', 0, -5, 1.5]) {
+    const r = validateRouterOutput(ok, { ...limits, maxOutputTokens: v });
+    assert.deepEqual(r, { ok: false, error: 'bad-limit: maxOutputTokens' }, String(v));
+  }
 });
 
 const MODEL = 'claude-haiku-5-5';
@@ -164,9 +213,17 @@ const init = (over = {}) => ({
   apiKeySource: 'apiKeyHelper', ...over,
 });
 const assistant = (text) => ({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+// Shaped like the 2026-11-05 probe: result.usage is the router's own request
+// (2 + 2,438 cached input, thinking inside output_tokens); modelUsage adds a
+// hidden ~2,951-in / 21-out request and is the billed spend.
+const REQUEST_USAGE = {
+  input_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 2438,
+  output_tokens: 190, output_tokens_details: { thinking_tokens: 150 },
+};
 const resultMsg = (over = {}) => ({
   type: 'result', subtype: 'success', is_error: false, result: '',
-  modelUsage: { [MODEL]: { inputTokens: 2, outputTokens: 17, cacheReadInputTokens: 0, cacheCreationInputTokens: 2425, costUSD: 0.0004937 } },
+  usage: REQUEST_USAGE,
+  modelUsage: { [MODEL]: { inputTokens: 2953, outputTokens: 211, cacheReadInputTokens: 0, cacheCreationInputTokens: 2438, costUSD: 0.0004937 } },
   ...over,
 });
 const goodReply = (text = '{"action":"retry","note":"n"}') => [init(), assistant(text), resultMsg()];
@@ -211,10 +268,70 @@ test('decide passes exactly the isolation options', async () => {
     model: MODEL, maxTurns: 1, tools: [], settingSources: [], mcpServers: {}, strictMcpConfig: true,
     systemPrompt: 'sys', settings: { autoMemoryEnabled: false, apiKeyHelper: 'helper-cmd' },
     persistSession: false, thinking: { type: 'disabled' }, cwd, abortController: options.abortController,
-    env: { A: '1', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '300' },
+    env: { A: '1', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1300' },
   });
   assert.ok((await fs.stat(cwd)).isDirectory());
   assert.equal(q.closed.length, 1);
+});
+
+test('the generation cap is the answer limit plus the thinking allowance', async () => {
+  assert.equal(ROUTER_THINKING_ALLOWANCE, 1000);
+  const q = fakeQuery();
+  await makeRouter(q.impl, { thinkingAllowance: 0 }).decide(decideArgs());
+  assert.equal(q.calls[0].options.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, '300');
+  const q2 = fakeQuery();
+  await makeRouter(q2.impl, { thinkingAllowance: 50 }).decide(decideArgs({ maxOutputTokens: 120 }));
+  assert.equal(q2.calls[0].options.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, '170');
+  for (const bad of [-1, 1.5, NaN, '1000', null]) {
+    assert.throws(() => makeRouter(fakeQuery().impl, { thinkingAllowance: bad }), /thinkingAllowance/, String(bad));
+  }
+});
+
+test('a maxOutputTokens that is not a positive integer is refused before any I/O', async () => {
+  for (const bad of [undefined, null, 0, -1, 1.5, '300', NaN, Infinity]) {
+    const q = fakeQuery();
+    const made = [];
+    const r = await makeRouter(q.impl, { mkdirImpl: async (d) => { made.push(d); } }).decide(decideArgs({ maxOutputTokens: bad }));
+    assert.equal(r.ok, false, String(bad));
+    assert.equal(r.error, 'bad-limit: maxOutputTokens');
+    assert.deepEqual([q.calls.length, made.length], [0, 0]);
+  }
+});
+
+const replyWith = (over) => [init(), assistant('{"action":"retry","note":"n"}'), resultMsg(over)];
+const decideWith = (over) => makeRouter(fakeQuery(replyWith(over)).impl).decide(decideArgs());
+const requestUsage = (output, thinking) => {
+  const { output_tokens_details: _, ...input } = REQUEST_USAGE;
+  return { ...input, output_tokens: output, output_tokens_details: thinking === undefined ? {} : { thinking_tokens: thinking } };
+};
+
+test('the output limit applies to the answer: output tokens less thinking tokens', async () => {
+  const wide = (r) => r.ok || r.error;
+  assert.equal(wide(await decideWith({ usage: requestUsage(290, 250) })), true, 'thinking 250 + answer 40 under a 300 limit');
+  assert.equal(wide(await decideWith({ usage: requestUsage(551, 250) })), 'over-length', 'answer 301');
+  assert.equal(wide(await decideWith({ usage: requestUsage(300) })), true, 'no thinking_tokens: all output is answer');
+  assert.equal(wide(await decideWith({ usage: requestUsage(300, null) })), true, 'thinking_tokens null: all output is answer');
+  assert.equal(wide(await decideWith({ usage: requestUsage(301) })), 'over-length', 'no thinking_tokens: 301 answer');
+  const { output_tokens_details: _, ...noDetails } = requestUsage(301);
+  assert.equal(wide(await decideWith({ usage: noDetails })), 'over-length', 'no output_tokens_details');
+  assert.equal(wide(await decideWith({ usage: undefined })), 'usage-missing', 'result.usage absent');
+  assert.equal(wide(await decideWith({ usage: requestUsage(10, 20) })), 'usage-missing', 'negative answer');
+  assert.equal(wide(await decideWith({ usage: requestUsage(undefined, 0) })), 'usage-missing', 'no output_tokens');
+  assert.equal(wide(await decideWith({ usage: requestUsage(290, '250') })), 'usage-missing', 'non-numeric thinking');
+});
+
+test('usage keeps the request (result.usage) apart from the spend (modelUsage)', async () => {
+  const r = await decideWith({});
+  assert.equal(r.ok, true);
+  assert.equal(r.usage.requestInputTokens, 2440);
+  assert.equal(r.usage.totalInputTokens, 5391);
+  assert.deepEqual([r.usage.requestOutputTokens, r.usage.thinkingTokens, r.usage.outputTokens], [190, 150, 211]);
+
+  const noThinking = await decideWith({ usage: requestUsage(40) });
+  assert.equal(noThinking.usage.thinkingTokens, 0);
+
+  const other = await decideWith({ modelUsage: { 'claude-opus-5-5': { inputTokens: 1, outputTokens: 1, costUSD: 1 } } });
+  assert.deepEqual([other.ok, other.error, other.usage], [false, 'usage-missing', null]);
 });
 
 test('no helper or unreadable settings: settings carry only autoMemoryEnabled', async () => {
@@ -251,7 +368,10 @@ test('a good reply resolves ok with usage and latency', async () => {
   const r = await makeRouter(fakeQuery().impl, { now: () => (t += 5) }).decide(decideArgs());
   assert.deepEqual(r, {
     ok: true, action: 'retry', note: 'n',
-    usage: { inputTokens: 2, outputTokens: 17, cacheReadInputTokens: 0, cacheCreationInputTokens: 2425, totalInputTokens: 2427, costUsd: 0.0004937 },
+    usage: {
+      inputTokens: 2953, outputTokens: 211, cacheReadInputTokens: 0, cacheCreationInputTokens: 2438, totalInputTokens: 5391, costUsd: 0.0004937,
+      requestInputTokens: 2440, requestOutputTokens: 190, thinkingTokens: 150,
+    },
     latencyMs: 5, apiKeySource: 'apiKeyHelper',
   });
 });
@@ -271,7 +391,7 @@ test('an error result fails', async () => {
   const a = await makeRouter(fakeQuery([init(), errResult]).impl).decide(decideArgs());
   assert.equal(a.ok, false);
   assert.match(a.error, /boom happened/);
-  assert.equal(a.usage.outputTokens, 17);
+  assert.equal(a.usage.outputTokens, 211);
 
   const b = await makeRouter(fakeQuery([], { throwError: new Error('Not logged in · Please run /login') }).impl)
     .decide(decideArgs());
@@ -305,6 +425,25 @@ test('an init listing a tool, an MCP server or a non-builtin plugin aborts as is
   const ok = await makeRouter(fakeQuery([builtins, assistant('{"action":"retry","note":"n"}'), resultMsg()]).impl)
     .decide(decideArgs());
   assert.equal(ok.ok, true);
+});
+
+test('isolation that cannot be shown fails closed: no init, or an init without a list', async () => {
+  const noInit = fakeQuery([assistant('{"action":"retry","note":"n"}'), resultMsg()]);
+  const r = await makeRouter(noInit.impl).decide(decideArgs());
+  assert.deepEqual([r.ok, r.error], [false, 'isolation-breach: no init']);
+  assert.equal(noInit.calls[0].options.abortController.signal.aborted, true);
+
+  const cases = [
+    [{ tools: undefined }, 'isolation-breach: tools missing'],
+    [{ mcp_servers: null }, 'isolation-breach: mcp_servers missing'],
+    [{ plugins: 'none' }, 'isolation-breach: plugins missing'],
+  ];
+  for (const [over, error] of cases) {
+    const q = fakeQuery([init(over), assistant('{"action":"retry","note":"n"}'), resultMsg()]);
+    const got = await makeRouter(q.impl).decide(decideArgs());
+    assert.deepEqual([got.ok, got.error], [false, error]);
+    assert.equal(q.calls[0].options.abortController.signal.aborted, true);
+  }
 });
 
 test('a call past the timeout fails with timeout', async () => {
@@ -362,6 +501,7 @@ test('invalid output fails with the validator\'s error', async () => {
   const r = await makeRouter(fakeQuery(goodReply('{"action":"retry-alternate","note":"n"}')).impl).decide(decideArgs());
   assert.equal(r.ok, false);
   assert.equal(r.error, 'action-not-allowed');
-  assert.equal(r.usage.totalInputTokens, 2427);
+  assert.equal(r.usage.totalInputTokens, 5391);
+  assert.equal(r.usage.requestInputTokens, 2440);
   assert.equal(r.apiKeySource, 'apiKeyHelper');
 });

@@ -729,6 +729,22 @@ test('router: retry-alternate launches the implementer on its alternate model', 
   } finally { registry._reset(); }
 });
 
+test('router: the trigger carries the failed attempt\'s own model', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const failedAgain = { status: 'failed', artifacts: [], summary: 'the build still breaks', question: null };
+    const router = fakeRouter((req, n) => decision(n === 1 ? 'retry-alternate' : 'escalate'));
+    const h = await harness({ router, limits: { attemptsPerTask: 3 }, handlers: handlersWith({ implement: firstThen(INVALID, failedAgain) }) });
+    const job = await createJob(h);
+    await fastForward(h, job, 'implement', { tasks: [task('T1')] });
+    const got = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual([got.state, got.reason, got.detail.why], ['needs-you', 'stuck', 'router-escalated']);
+    assert.deepEqual(h.started(job.jobId, 'implement').map((e) => e.model), ['claude-sonnet-5-5', 'claude-opus-5-5']);
+    assert.deepEqual(router.requests.map((r) => cardOf(r).trigger.model), ['claude-sonnet-5-5', 'claude-opus-5-5']);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('router: retry-handoff is offered only when handoff.md exists and passes it on', { timeout: TEST_TIMEOUT_MS }, async () => {
   try {
     const writeHandoff = async ({ card }) => {
@@ -789,6 +805,21 @@ test('router: a router failure escalates the job as stuck with the error, also w
       assert.equal(h.started(job.jobId, 'spec').length, 1);
       await h.sa.stop();
     }
+  } finally { registry._reset(); }
+});
+
+test('router: an "aborted" error the supervisor did not cause is recorded like any failure', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const router = fakeRouter({ ok: false, error: 'aborted', usage: null, latencyMs: 3, apiKeySource: null });
+    const h = await harness({ router, handlers: handlersWith({ 'spec:author': firstThen(INVALID) }) });
+    const job = await createJob(h);
+    const got = await h.drive(job.jobId);
+    assert.deepEqual([got.state, got.reason, got.detail.why, got.detail.error], ['needs-you', 'stuck', 'router-failed', 'aborted']);
+    const decided = routerEvents(h, job.jobId);
+    assert.equal(decided.length, 1);
+    assert.deepEqual([decided[0].ok, decided[0].action, decided[0].error], [false, 'escalate', 'aborted']);
+    assert.equal(router.requests.length, 1);
+    await h.sa.stop();
   } finally { registry._reset(); }
 });
 

@@ -289,7 +289,9 @@ export function createSuperagent({
       } catch (err) {
         result = { ok: false, error: messageOf(err), usage: null, latencyMs: 0 };
       }
-      if (result?.error === 'aborted' || controller.signal.aborted || stopping) return;
+      // Only an abort this supervisor caused is dropped; an 'aborted' error
+      // from anywhere else is a router failure and is recorded as one.
+      if (controller.signal.aborted || stopping) return;
       const event = decisionEvent(job, action, request, result);
       await withJob(jobId, async () => {
         if (routeStale(jobId, controller, action)) return;
@@ -328,6 +330,7 @@ export function createSuperagent({
         phase: action.phase,
         task: action.task,
         role: action.role,
+        model: action.lastModel ?? null,
         reason: action.reason,
         status: action.status,
         summary: action.summary,

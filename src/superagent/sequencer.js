@@ -25,6 +25,12 @@ export const RUNNABLE_KINDS = new Set(['author', 'review', 'per-task', 'human'])
 export const ROUTER_ACTIONS = ['retry', 'retry-alternate', 'retry-handoff', 'escalate'];
 export const ROUTED_REASONS = new Set(['no-result', 'invalid-result', 'turn-cap', 'stalled', 'failed', 'blocked']);
 
+// The one alternate-model predicate: the router offers retry-alternate and the
+// sequencer applies it under the same rule.
+export function hasAlternate(model, alternate) {
+  return typeof alternate === 'string' && alternate !== '' && alternate !== model;
+}
+
 const REVIEW_PURPOSES = new Set(['review', 'task-review']);
 const DEFAULT_REVIEW_ROUNDS = 3;
 
@@ -243,6 +249,7 @@ function routeOrApply(job, ctx, { last, role, launchArgs, stuck }) {
       round,
       model,
       alternate,
+      lastModel: last.model,
       previousDir: last.dir,
       reason: last.reason,
       status: TRIGGER_STATUS[last.reason] ?? null,
@@ -259,7 +266,7 @@ function routeOrApply(job, ctx, { last, role, launchArgs, stuck }) {
     case 'escalate': return stuck('router-escalated', { note: decision.note });
     case 'retry': return null;
     case 'retry-alternate':
-      if (typeof alternate !== 'string' || alternate === '' || alternate === model) return failed(`retry-alternate: role ${role} has no alternate model`);
+      if (!hasAlternate(model, alternate)) return failed(`retry-alternate: role ${role} has no alternate model`);
       return { model: alternate };
     case 'retry-handoff':
       if (typeof last.dir !== 'string') return failed(`retry-handoff: attempt ${last.attemptId} has no directory`);

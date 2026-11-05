@@ -271,6 +271,14 @@ test('routerMaxInputTokens and routerMaxOutputTokens must be positive integers',
   }
 });
 
+test('routerMaxOutputTokens is at most 4000', () => {
+  const d = defaultConfig();
+  d.routerMaxOutputTokens = 4000;
+  assert.equal(hasError(validateDefaults(d), 'routerMaxOutputTokens'), false);
+  d.routerMaxOutputTokens = 4001;
+  assert.ok(hasError(validateDefaults(d), 'routerMaxOutputTokens'));
+});
+
 test('routerModelAllowlist must be a non-empty array of strings', () => {
   for (const bad of [[], [1]]) {
     const d = defaultConfig();
