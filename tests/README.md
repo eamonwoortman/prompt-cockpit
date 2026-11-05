@@ -397,7 +397,7 @@ The runner and end-to-end tests use the real `session-registry.js` with one `fak
 - **`maxTurns` semantics.** Whether it counts per prompt or per session in streaming input, and the real `error_max_turns` subtype.
 - **PreCompact through `sdkOptions.hooks`.** Whether a real firing reaches `events.jsonl` as a `precompact` line.
 
-Not built (as of Plan 3): router, brainstorm/stand-in, usage ledger and caps, UI, an answer/resume path for needs-you questions, server wiring, worktree removal.
+Not built (as of Plan 4: the router now exists, see below): brainstorm/stand-in, usage ledger and caps, UI, an answer/resume path for needs-you questions, server wiring, worktree removal.
 
 ## Superagent pipeline (Plan 3)
 
@@ -414,3 +414,18 @@ Only observed by the manual probe `tests/superagent-pipeline.manual.mjs` (not ye
 - Whether the real implementer reports the `verify` check.
 - Whether `auto` mode lets workers commit in every phase.
 - How long a full pipeline takes.
+
+## Superagent router (Plan 4)
+
+Unit tested (no model, no network; the router's `query` is always injected):
+
+- `superagent-router.test.mjs` (`router.js`): the pure parts (`estimateTokens`, `allowedActions`, `buildRouterRequest` with its truncation order and over-limit refusal, `validateRouterOutput` including the output cap and missing usage) and `createRouter().decide` against a fake `query` (isolation options, `apiKeyHelper` passthrough, allowlist, timeout, abort, isolation-breach guard, usage totals).
+- Sequencer routing (`superagent-sequencer.test.mjs`): the `route` action for eligible failures after the attempt cap, repeated-error and back-off checks, and applying a `router-decided` decision (`retry`, `retry-alternate`, `retry-handoff`, `escalate`, stuck why `router-escalated` / `router-failed`).
+- Supervisor routing (`superagent.test.mjs`): non-blocking per-job routing, per-job cancellation on `stopJob`/`stop`, confirmed decision appends with retry and no second model call, and no router injected keeps the code-only retries.
+
+Only observed by the manual probes (not yet run; they spend real money):
+
+- `tests/superagent-router.manual.mjs` makes three real Haiku calls through `createRouter().decide`: a worst-case ASCII card, the same in CJK, and a 50-token output cap. It checks that the real total input stays at or below the pre-send estimate and under 6000, and whether `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is honoured (unverified at SDK 0.3.318; the post-call check stays either way).
+- `tests/superagent-pipeline.manual.mjs` now injects `createRouter()` and prints each `router-decided` (action, note, estimated vs real input tokens, latency), which shows whether a real router picks sensible actions in a full job.
+
+Why manual: the real SDK call, the CLI's auth and the real tokenizer are not injectable. The notification-text router call is not built.

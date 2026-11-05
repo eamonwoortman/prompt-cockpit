@@ -337,6 +337,8 @@ SDK `query()` with: `settingSources: []` (no user/project/local settings and no 
 
 **Authentication caveat (revision 3).** The spike showed `settingSources: []` removes the user's `apiKeyHelper` (`apiKeySource: "none"`), so the isolated call failed with "Not logged in". The router therefore needs an auth route that keeps isolation: credentials passed through `env`, or a setting source that carries the helper while excluding project sources. Neither is tested yet; the router plan (milestone 2) picks one and re-measures. Built-in skills and agents still appear in the isolated `init`; their prompt cost is unmeasured. The empty-card baseline `totalInput` is **inconclusive** (no isolated usage was measured; the unisolated control used about 50,191 input tokens), so the 6000 `routerMaxInputTokens` default is unvalidated until re-measured.
 
+**Plan 4 outcome (2026-11-05).** Spike S4b (`docs/superpowers/spikes/2026-11-03-superagent-spikes.md`, "S4b router auth route") settled the route: `settingSources: []` plus an inline `settings: { apiKeyHelper, autoMemoryEnabled: false }` (the user's helper string, read from `~/.claude/settings.json`), run from the router's own neutral cwd. The measured baseline is about 443-465 input tokens for an empty card and about 2,427 for a worst-case card, so the 6000 default holds. The token measurement is a pre-send estimate (UTF-8 bytes / 3 plus a fixed overhead), not a tokenizer count; each call logs it next to the real total input.
+
 ## Feedback and sub-plans [Decided: three routes; Author's call: mechanics]
 
 At `accept`, the "Needs you" entry shows the tester's "how to try it", the stand-in's assumptions, and two actions: **Accept** and **Give feedback**.

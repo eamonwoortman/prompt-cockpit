@@ -18,8 +18,10 @@
 //   (c) does the real implementer report the verify check;
 //   (d) does `auto` mode let workers commit (earlier probe: canUseTool is skipped for Bash in auto);
 //   (e) how long a full pipeline takes.
-// Prints per-attempt purpose/round/role/outcome/summary (and the reason of every failed attempt), phase-completed and test-routed
-// events, job state transitions, the final state and reason, the worktree `git log --oneline`, and which artifact paths exist.
+// Plan 4: the real isolated router is injected (createRouter()), so failed attempts are routed; each router-decided is printed with
+// its action, note, request.estimatedTokens, usage.inputTokens and latencyMs.
+// Prints per-attempt purpose/round/role/outcome/summary (and the reason of every failed attempt), phase-completed, test-routed and
+// router-decided events, job state transitions, the final state and reason, the worktree `git log --oneline`, and which artifact paths exist.
 // Uses a temp COCKPIT_HOME, operator file and toy repo, so cockpit state stays under the temp home; the Claude SDK still writes its
 // own session transcripts under the real ~/.claude. The home is a SHORT path (PROBE_HOME if set, else <drive root>\sa-XXXXXX), because
 // under the default os.tmpdir() the longest attempt path exceeds createJob's win32 limit and it refuses with ERR_PATH_TOO_LONG.
@@ -43,6 +45,7 @@ process.env.COCKPIT_RUNTIME_FILE = path.join(home, 'runtime.json');
 const realRegistry = await import('../src/session-registry.js');
 const { createSuperagent } = await import('../src/superagent/index.js');
 const { createSuperagentStore } = await import('../src/superagent/store.js');
+const { createRouter } = await import('../src/superagent/router.js');
 const { createSuperagentConfig, defaultConfig } = await import('../src/superagent/config.js');
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -101,6 +104,12 @@ function printNew(job) {
     console.log(`ATTEMPT phase=${a.phase} task=${a.task ?? '-'} purpose=${a.purpose} round=${a.round ?? '-'} role=${a.role} model=${a.model} n=${a.n} outcome=${a.outcome} verdict=${a.verdict ?? '-'} verified=${JSON.stringify(a.verified)} summary=${clip(a.summary)}`);
     if (a.outcome !== 'done') console.log(`  FAILED REASON: ${a.reason ?? '(none recorded)'}`);
   }
+  for (const d of job.routerDecisions ?? []) {
+    const key = `router:${d.forAttemptId}`;
+    if (printed.has(key)) continue;
+    printed.add(key);
+    console.log(`ROUTER forAttempt=${d.forAttemptId} action=${d.action} ok=${d.ok} note=${clip(d.note)} estimatedTokens=${d.request?.estimatedTokens} inputTokens=${d.usage?.inputTokens} latencyMs=${d.latencyMs}${d.error ? ` error=${d.error}` : ''}`);
+  }
 }
 
 function printEvents(jobId) {
@@ -108,7 +117,7 @@ function printEvents(jobId) {
   console.log('\n=== phase-completed / test-routed events ===');
   if (!existsSync(eventsFile)) return;
   for (const line of readFileSync(eventsFile, 'utf8').split('\n').filter(Boolean)) {
-    if (/"type":"(phase-completed|test-routed)"/.test(line)) console.log(line);
+    if (/"type":"(phase-completed|test-routed|router-decided)"/.test(line)) console.log(line);
   }
 }
 
@@ -152,7 +161,7 @@ async function main() {
   const config = createSuperagentConfig({ filePath: configFile });
   await config.load();
   const store = createSuperagentStore({ rootDir: jobsRoot });
-  sa = createSuperagent({ registry, store, config, worktreesRoot: path.join(home, 'superagent', 'worktrees') });
+  sa = createSuperagent({ registry, store, config, router: createRouter(), worktreesRoot: path.join(home, 'superagent', 'worktrees') });
 
   console.log('home:', home, '\nrepo:', repo);
   const startedAt = Date.now();
