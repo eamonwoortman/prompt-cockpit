@@ -282,3 +282,9 @@ test('store.append accepts the new event types and persists them across load', a
   assert.equal(job.tasks.length, 1);
   assert.equal(job.phaseId, 'spec-review');
 });
+
+test('deriveJob keeps the router snapshot and defaults it for older logs', () => {
+  const router = { allowlist: ['m'], maxInputTokens: 10, maxOutputTokens: 5 };
+  assert.deepEqual(deriveJob(stamp([jobCreated({ router })])).router, router);
+  assert.deepEqual(deriveJob(stamp([jobCreated()])).router, { allowlist: ['claude-haiku-5-5'], maxInputTokens: 6000, maxOutputTokens: 300 });
+});

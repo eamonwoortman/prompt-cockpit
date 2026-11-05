@@ -254,3 +254,36 @@ test('taskReviewRounds defaults to 2 and rejects 0', () => {
   d.limits.taskReviewRounds = 0;
   assert.ok(hasError(validateDefaults(d), 'limits.taskReviewRounds'));
 });
+
+test('router maxTurns must be 1', () => {
+  const d = defaultConfig();
+  d.models.router.maxTurns = 2;
+  assert.ok(hasError(validateDefaults(d), 'models.router.maxTurns'));
+});
+
+test('routerMaxInputTokens and routerMaxOutputTokens must be positive integers', () => {
+  for (const field of ['routerMaxInputTokens', 'routerMaxOutputTokens']) {
+    for (const bad of [0, -1, 1.5, '6000']) {
+      const d = defaultConfig();
+      d[field] = bad;
+      assert.ok(hasError(validateDefaults(d), field), `${field}=${JSON.stringify(bad)}`);
+    }
+  }
+});
+
+test('routerModelAllowlist must be a non-empty array of strings', () => {
+  for (const bad of [[], [1]]) {
+    const d = defaultConfig();
+    d.routerModelAllowlist = bad;
+    assert.ok(hasError(validateDefaults(d), 'routerModelAllowlist'), JSON.stringify(bad));
+  }
+});
+
+test('alternate must be a non-empty string different from model', () => {
+  for (const bad of ['', 'claude-sonnet-5-5']) {
+    const d = defaultConfig();
+    d.models.implementer.alternate = bad;
+    assert.ok(hasError(validateDefaults(d), 'models.implementer.alternate'), JSON.stringify(bad));
+  }
+  assert.deepEqual(validateDefaults(defaultConfig()).errors, []);
+});

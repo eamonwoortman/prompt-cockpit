@@ -431,6 +431,7 @@ export function createSuperagent({
       pipeline,
       models: resolved.models,
       limits: resolved.limits,
+      router: { allowlist: resolved.routerModelAllowlist, maxInputTokens: resolved.routerMaxInputTokens, maxOutputTokens: resolved.routerMaxOutputTokens },
       workerPermissionMode: resolved.workerPermissionMode,
       copyLocalClaudeSettings: resolved.copyLocalClaudeSettings,
     };

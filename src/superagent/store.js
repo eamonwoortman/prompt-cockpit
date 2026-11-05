@@ -18,11 +18,16 @@ import { mkdir, open, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { writeJsonAtomic } from '../json-store.js';
 import { isSafeSessionId } from '../safe-id.js';
-import { defaultSuperagentRoot } from './config.js';
+import { defaultConfig, defaultSuperagentRoot } from './config.js';
 
 export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed'];
 
 const NEWLINE = 0x0a;
+
+function routerDefaults() {
+  const d = defaultConfig();
+  return { allowlist: d.routerModelAllowlist, maxInputTokens: d.routerMaxInputTokens, maxOutputTokens: d.routerMaxOutputTokens };
+}
 
 export function deriveJob(events) {
   const first = events[0];
@@ -40,6 +45,7 @@ export function deriveJob(events) {
     pipeline: structuredClone(first.pipeline ?? []),
     models: structuredClone(first.models ?? {}),
     limits: structuredClone(first.limits ?? {}),
+    router: structuredClone(first.router ?? routerDefaults()),
     workerPermissionMode: first.workerPermissionMode,
     copyLocalClaudeSettings: first.copyLocalClaudeSettings,
     state: 'provisioning',

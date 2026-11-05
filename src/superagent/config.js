@@ -221,10 +221,19 @@ function checkModels(d, errors, warnings) {
     if (entry.effort !== undefined && !CLAUDE_EFFORTS.includes(entry.effort)) {
       errors.push({ path: `${base}.effort`, message: `effort must be one of ${CLAUDE_EFFORTS.join(', ')}` });
     }
+    if (entry.alternate !== undefined && (!isNonEmptyString(entry.alternate) || entry.alternate === entry.model)) {
+      errors.push({ path: `${base}.alternate`, message: 'alternate must be a non-empty string different from model' });
+    }
+  }
+  if (!Array.isArray(d.routerModelAllowlist) || d.routerModelAllowlist.length === 0 || !d.routerModelAllowlist.every(isNonEmptyString)) {
+    errors.push({ path: 'routerModelAllowlist', message: 'routerModelAllowlist must be a non-empty array of strings' });
   }
   if (!isPlainObject(d.models.router)) {
     errors.push({ path: 'models.router', message: 'a router model is required' });
-  } else if (!Array.isArray(d.routerModelAllowlist) || !d.routerModelAllowlist.includes(d.models.router.model)) {
+  } else if (d.models.router.maxTurns !== 1) {
+    errors.push({ path: 'models.router.maxTurns', message: 'router maxTurns must be 1' });
+  }
+  if (isPlainObject(d.models.router) && (!Array.isArray(d.routerModelAllowlist) || !d.routerModelAllowlist.includes(d.models.router.model))) {
     errors.push({ path: 'models.router.model', message: 'router model must be in routerModelAllowlist' });
   }
 }
@@ -233,6 +242,9 @@ function checkScalars(d, errors) {
   if (!MODES.includes(d.mode)) errors.push({ path: 'mode', message: `mode must be one of ${MODES.join(', ')}` });
   if (!WORKER_PERMISSION_MODES.includes(d.workerPermissionMode)) {
     errors.push({ path: 'workerPermissionMode', message: `workerPermissionMode must be one of ${WORKER_PERMISSION_MODES.join(', ')}` });
+  }
+  for (const key of ['routerMaxInputTokens', 'routerMaxOutputTokens']) {
+    if (!isPositiveInt(d[key])) errors.push({ path: key, message: `${key} must be a positive integer` });
   }
   if (!isPositiveInt(d.maxConcurrentSessions)) errors.push({ path: 'maxConcurrentSessions', message: 'must be a positive integer' });
   if (!isPlainObject(d.limits)) {
