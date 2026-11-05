@@ -11,6 +11,13 @@
 // which is evaluated BEFORE any launch guard and caps only failed attempts, so
 // reviewer 1 -> fix 1 -> reviewer 2 is never stopped by a count of done
 // attempts. Author phases and `test` keep Plan 2's consuming-attempt cap.
+//
+// Plan 4 (docs/superpowers/plans/2026-11-05-superagent-p4-router.md,
+// Decisions 3, 11 and 12): with ctx.routing, a retry of a router-eligible
+// failure first returns a `route` action, then applies the recorded
+// router-decided for that attempt. Cap, repeated-error and back-off are
+// evaluated before it; concurrency after it.
+import path from 'node:path';
 
 export const CONSUMING_OUTCOMES = new Set(['done', 'failed', 'question']);
 // createJob's gate (index.js).
@@ -166,14 +173,14 @@ export function buildFixTask(job, attemptId, rawFindings) {
   };
 }
 
-function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null }) {
+function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null, model: modelOverride = null, handoff = null }) {
   const model = job.models[role];
   return {
     type: 'launch',
     phase: phase.phase,
     task,
     role,
-    model: model.model,
+    model: modelOverride ?? model.model,
     effort: model.effort ?? null,
     maxTurns: model.maxTurns,
     n: attempts.filter((a) => CONSUMING_OUTCOMES.has(a.outcome)).length + 1,
@@ -185,13 +192,14 @@ function launch(job, { phase, task = null, role, attempts, recovery, previousAtt
     taskDef,
     reviewFindings,
     contested,
+    handoff,
   };
 }
 
-const stuckAction = (phase, task, why, last) => ({
+const stuckAction = (phase, task, why, last, extra = {}) => ({
   type: 'needs-you',
   reason: 'stuck',
-  detail: { phase: phase.phase, task, why, lastReason: last?.reason ?? null, signature: last?.signature ?? null },
+  detail: { phase: phase.phase, task, why, lastReason: last?.reason ?? null, signature: last?.signature ?? null, ...extra },
 });
 
 // Plan 2's repeated-error and back-off rules over one scope's attempts.
@@ -213,7 +221,55 @@ function retryGuard(attempts, limits, now, onStuck) {
   return null;
 }
 
-function authorAction(job, phase, { now, liveSessions, maxConcurrentSessions }) {
+const TRIGGER_STATUS = { blocked: 'blocked', failed: 'failed' };
+
+// Returns null (plain launch), a `route` action, a stuck action, or launch-arg
+// overrides ({ model } or { handoff }) from the recorded decision.
+function routeOrApply(job, ctx, { last, role, launchArgs, stuck }) {
+  if (!ctx.routing || last?.outcome !== 'failed' || !ROUTED_REASONS.has(last.reason)) return null;
+  const { model, alternate = null } = job.models[role];
+  const decision = (job.routerDecisions ?? []).find((d) => d.forAttemptId === last.attemptId);
+  if (!decision) {
+    const { phase, task, attempts, purpose, round } = launchArgs;
+    const byFailed = phase.kind !== 'author';
+    const used = attempts.filter((a) => (byFailed ? a.outcome === 'failed' : CONSUMING_OUTCOMES.has(a.outcome))).length;
+    return {
+      type: 'route',
+      forAttemptId: last.attemptId,
+      phase: phase.phase,
+      task,
+      role,
+      purpose,
+      round,
+      model,
+      alternate,
+      previousDir: last.dir,
+      reason: last.reason,
+      status: TRIGGER_STATUS[last.reason] ?? null,
+      summary: last.summary,
+      question: last.question,
+      signature: last.signature,
+      attemptsUsed: used,
+      attemptsLeft: attemptCap(job.limits, task) - used,
+    };
+  }
+  const failed = (error) => stuck('router-failed', { error });
+  if (!decision.ok) return failed(decision.error);
+  switch (decision.action) {
+    case 'escalate': return stuck('router-escalated', { note: decision.note });
+    case 'retry': return null;
+    case 'retry-alternate':
+      if (typeof alternate !== 'string' || alternate === '' || alternate === model) return failed(`retry-alternate: role ${role} has no alternate model`);
+      return { model: alternate };
+    case 'retry-handoff':
+      if (typeof last.dir !== 'string') return failed(`retry-handoff: attempt ${last.attemptId} has no directory`);
+      return { handoff: path.join(last.dir, 'handoff.md') };
+    default: return failed(`unknown router action ${JSON.stringify(decision.action)}`);
+  }
+}
+
+function authorAction(job, phase, ctx) {
+  const { now, liveSessions, maxConcurrentSessions } = ctx;
   const attempts = attemptsFor(job, phase.phase);
   if (attempts.some((a) => !a.outcome)) return { type: 'none' };
 
@@ -223,7 +279,7 @@ function authorAction(job, phase, { now, liveSessions, maxConcurrentSessions }) 
   }
 
   const limits = job.limits;
-  const stuck = (why) => stuckAction(phase, null, why, last);
+  const stuck = (why, extra) => stuckAction(phase, null, why, last, extra);
   const used = attempts.filter((a) => CONSUMING_OUTCOMES.has(a.outcome));
   if (used.length >= attemptCap(limits, null)) return stuck('attempt-cap');
 
@@ -240,22 +296,28 @@ function authorAction(job, phase, { now, liveSessions, maxConcurrentSessions }) 
   const guard = retryGuard(attempts.filter((a) => !routed.has(a.attemptId)), limits, now, stuck);
   if (guard) return guard;
 
-  if (liveSessions >= maxConcurrentSessions) return { type: 'wait', until: null, why: 'concurrency' };
-
   const retry = last != null && !routed.has(last.attemptId);
-  return launch(job, {
+  const launchArgs = {
     phase,
+    task: null,
     role: phase.role,
     attempts,
     recovery: retry,
     previousAttemptId: retry ? last.attemptId : null,
     purpose: isTest ? 'test' : 'author',
-  });
+    round: null,
+  };
+  const override = retry ? routeOrApply(job, ctx, { last, role: phase.role, launchArgs, stuck }) : null;
+  if (override?.type) return override;
+
+  if (liveSessions >= maxConcurrentSessions) return { type: 'wait', until: null, why: 'concurrency' };
+  return launch(job, { ...launchArgs, ...override });
 }
 
 // Guard order for one review scope (a review phase, or one task): in-flight,
-// loop state, failed-attempt cap, repeated error, back-off, concurrency.
-function scopeAction(job, phase, { now, liveSessions, maxConcurrentSessions }, { attempts, loop, task, roles, onComplete }) {
+// loop state, failed-attempt cap, repeated error, back-off, routing, concurrency.
+function scopeAction(job, phase, ctx, { attempts, loop, task, roles, onComplete }) {
+  const { now, liveSessions, maxConcurrentSessions } = ctx;
   if (loop.type === 'pending') return { type: 'none' };
   if (loop.type === 'complete') return onComplete(loop);
   if (loop.type === 'question' || loop.type === 'question-open') {
@@ -266,20 +328,19 @@ function scopeAction(job, phase, { now, liveSessions, maxConcurrentSessions }, {
     };
   }
   const last = attempts[attempts.length - 1];
-  const stuck = (why) => stuckAction(phase, task?.id ?? null, why, last);
+  const stuck = (why, extra) => stuckAction(phase, task?.id ?? null, why, last, extra);
   if (loop.type === 'stuck') return stuck(loop.why);
 
   // Repeated-error reads Plan 2's consecutive window over the scope's consuming attempts.
   const guard = retryGuard(attempts, job.limits, now, stuck);
   if (guard) return guard;
 
-  if (liveSessions >= maxConcurrentSessions) return { type: 'wait', until: null, why: 'concurrency' };
-
+  const role = roles[loop.side];
   const recovery = last != null && last.outcome !== 'done';
-  return launch(job, {
+  const launchArgs = {
     phase,
     task: task?.id ?? null,
-    role: roles[loop.side],
+    role,
     attempts,
     recovery,
     previousAttemptId: recovery ? last.attemptId : null,
@@ -289,7 +350,12 @@ function scopeAction(job, phase, { now, liveSessions, maxConcurrentSessions }, {
     taskDef: task ?? null,
     reviewFindings: loop.reviewFindings,
     contested: loop.contested,
-  });
+  };
+  const override = recovery ? routeOrApply(job, ctx, { last, role, launchArgs, stuck }) : null;
+  if (override?.type) return override;
+
+  if (liveSessions >= maxConcurrentSessions) return { type: 'wait', until: null, why: 'concurrency' };
+  return launch(job, { ...launchArgs, ...override });
 }
 
 const completePhase = (job, phase, unresolved, verification) => ({

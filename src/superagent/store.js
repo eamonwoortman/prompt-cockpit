@@ -20,7 +20,7 @@ import { writeJsonAtomic } from '../json-store.js';
 import { isSafeSessionId } from '../safe-id.js';
 import { defaultConfig, defaultSuperagentRoot } from './config.js';
 
-export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed'];
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided'];
 
 const NEWLINE = 0x0a;
 
@@ -57,6 +57,7 @@ export function deriveJob(events) {
     tasks: null,
     visits: {},
     completions: [],
+    routerDecisions: [],
     lastSeq: first.seq ?? null,
   };
   const attempt = (id) => job.attempts.find((a) => a.attemptId === id);
@@ -91,6 +92,7 @@ export function deriveJob(events) {
           recovery: ev.recovery ?? false,
           previousAttemptId: ev.previousAttemptId ?? null,
           dir: ev.dir ?? null,
+          handoff: ev.handoff ?? null,
           sessionId: null,
           startedAt: ev.at ?? null,
           endedAt: null,
@@ -158,6 +160,22 @@ export function deriveJob(events) {
         job.phaseIndex++;
         break;
       }
+      case 'router-decided':
+        // A rejected append that landed may be replayed: the first decision wins.
+        if (job.routerDecisions.some((d) => d.forAttemptId === ev.forAttemptId)) break;
+        job.routerDecisions.push({
+          forAttemptId: ev.forAttemptId,
+          action: ev.action,
+          note: ev.note ?? null,
+          ok: ev.ok === true,
+          error: ev.error ?? null,
+          model: ev.model ?? null,
+          request: structuredClone(ev.request ?? null),
+          usage: structuredClone(ev.usage ?? null),
+          latencyMs: ev.latencyMs ?? null,
+          at: ev.at ?? null,
+        });
+        break;
       default:
         break;
     }

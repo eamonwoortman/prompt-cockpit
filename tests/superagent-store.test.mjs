@@ -288,3 +288,34 @@ test('deriveJob keeps the router snapshot and defaults it for older logs', () =>
   assert.deepEqual(deriveJob(stamp([jobCreated({ router })])).router, router);
   assert.deepEqual(deriveJob(stamp([jobCreated()])).router, { allowlist: ['claude-haiku-5-5'], maxInputTokens: 6000, maxOutputTokens: 300 });
 });
+
+test('router-decided is derived once per failed attempt', () => {
+  const decided = (action, over = {}) => ({
+    type: 'router-decided', forAttemptId: 'a1', action, note: `${action} note`, ok: true, error: null,
+    model: 'claude-haiku-5-5', request: { estimatedTokens: 900, truncated: [] }, usage: { inputTokens: 800 }, latencyMs: 12, ...over,
+  });
+  assert.deepEqual(deriveJob(m2()).routerDecisions, []);
+  const job = deriveJob(m2(started('a1', 'spec'), ended('a1', 'failed', { reason: 'no-result' }), decided('retry'), decided('escalate')));
+  assert.equal(job.routerDecisions.length, 1);
+  assert.deepEqual(job.routerDecisions[0], {
+    forAttemptId: 'a1', action: 'retry', note: 'retry note', ok: true, error: null, model: 'claude-haiku-5-5',
+    request: { estimatedTokens: 900, truncated: [] }, usage: { inputTokens: 800 }, latencyMs: 12, at: 1004,
+  });
+  const failed = deriveJob(m2(decided('escalate', { forAttemptId: 'a2', ok: false, error: 'timeout: no answer', note: null, usage: null })));
+  assert.deepEqual([failed.routerDecisions[0].ok, failed.routerDecisions[0].error], [false, 'timeout: no answer']);
+});
+
+test('attempt-started handoff is kept', () => {
+  const job = deriveJob(m2(started('a1', 'spec', { handoff: '/x/handoff.md' }), started('a2', 'spec')));
+  assert.equal(job.attempts[0].handoff, '/x/handoff.md');
+  assert.equal(job.attempts[1].handoff, null);
+});
+
+test('store.append accepts router-decided', async () => {
+  const rootDir = await tempDir('sa-store-');
+  const store = createSuperagentStore({ rootDir, logImpl: quiet });
+  for (const e of provisionedEvents()) await store.append('j1', e);
+  await store.append('j1', { type: 'router-decided', forAttemptId: 'a1', action: 'retry', note: 'go', ok: true, error: null, model: 'm', request: { estimatedTokens: 1, truncated: [] }, usage: null, latencyMs: 1 });
+  await store.flush();
+  assert.equal((await createSuperagentStore({ rootDir, logImpl: quiet }).load('j1')).routerDecisions[0].action, 'retry');
+});

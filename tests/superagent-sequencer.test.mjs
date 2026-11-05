@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { deriveJob } from '../src/superagent/store.js';
 import { outcomeForResult } from '../src/superagent/results.js';
 import * as sequencer from '../src/superagent/sequencer.js';
@@ -12,7 +13,7 @@ const { reviewLoop, pickTask, taskStatus, routeTestFailure, buildFixTask } = seq
 const T0 = 1_000_000;
 const ctx = (over = {}) => ({ now: T0, liveSessions: 0, maxConcurrentSessions: 3, ...over });
 const limits = jobCreated().limits;
-const AUTHOR_EXTRAS = { purpose: 'author', round: null, final: false, taskDef: null, reviewFindings: null, contested: null };
+const AUTHOR_EXTRAS = { purpose: 'author', round: null, final: false, taskDef: null, reviewFindings: null, contested: null, handoff: null };
 
 const started = (id, n, over = {}) => ({ type: 'attempt-started', attemptId: id, phase: 'spec', task: null, role: 'spec-writer', model: 'claude-opus-5-5', n, recovery: n > 1, previousAttemptId: n > 1 ? `a${n - 1}` : null, dir: '/d', ...over });
 const ended = (id, outcome, over = {}) => ({ type: 'attempt-ended', attemptId: id, outcome, ...over });
@@ -272,7 +273,7 @@ test('reviewLoop: injected failures - two failed reviewers before the first succ
 const atReview = (...specs) => m2(...upTo('spec-review'), ...specs.flatMap(attempt));
 const launchOf = (job, role, over) => ({
   type: 'launch', task: null, role, model: job.models[role].model, effort: job.models[role].effort ?? null, maxTurns: job.models[role].maxTurns,
-  n: 1, recovery: false, previousAttemptId: null, round: null, final: false, taskDef: null, reviewFindings: null, contested: null, ...over,
+  n: 1, recovery: false, previousAttemptId: null, round: null, final: false, taskDef: null, reviewFindings: null, contested: null, handoff: null, ...over,
 });
 
 test('nextAction: with defaults (attemptsPerPhase 3) reviewer 1, fix 1, reviewer 2 is NOT stopped by the cap', () => {
@@ -556,4 +557,173 @@ test('buildFixTask tolerates malformed findings: a null entry or a string is ign
   assert.equal(task.acceptance, 'login fails');
   assert.deepEqual(task.repos, ['primary']);
   assert.doesNotThrow(() => buildFixTask(job, 'abcdef1234', [null]));
+});
+
+// Plan 4: route eligible failures to the router and apply its recorded decision.
+
+const { ROUTED_REASONS } = sequencer;
+const routing = (over = {}) => ctx({ now: T0 + 10 * MIN, routing: true, ...over });
+const authorFail = (id, reason, over = {}) => [started(id, 1), ended(id, 'failed', { reason, signature: `${reason}|x`, at: T0, ...over })];
+const decided = (forAttemptId, action, over = {}) => ({
+  type: 'router-decided', forAttemptId, action, note: `${action} because`, ok: true, error: null,
+  model: 'claude-haiku-5-5', request: { estimatedTokens: 900, truncated: [] }, usage: null, latencyMs: 10, ...over,
+});
+const routeOf = (over) => ({
+  type: 'route', task: null, round: null, alternate: null, previousDir: '/d', status: null, summary: null, question: null, ...over,
+});
+
+test('route: an eligible failure with no decision returns route', () => {
+  const job = build(...authorFail('a1', 'invalid-result'));
+  assert.deepEqual(nextAction(job, routing()), routeOf({
+    forAttemptId: 'a1', phase: 'spec', role: 'spec-writer', purpose: 'author', model: 'claude-opus-5-5',
+    reason: 'invalid-result', signature: 'invalid-result|x', attemptsUsed: 1, attemptsLeft: 2,
+  }));
+});
+
+test('route: status is mapped from the reason', () => {
+  const statusOf = (reason) => nextAction(build(...authorFail('a1', reason, { summary: `${reason} summary` })), routing());
+  const blocked = statusOf('blocked');
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.summary, 'blocked summary');
+  assert.equal(statusOf('failed').status, 'failed');
+  assert.equal(statusOf('turn-cap').status, null);
+});
+
+// atReview/atImplement turn every argument into an attempt; these append raw events after the attempts.
+const reviewWith = (specs, ...events) => m2(...upTo('spec-review'), ...specs.flatMap(attempt), ...events);
+const implementWith = (tasks, specs, ...events) => m2(...upTo('implement'), ev.tasksLoaded(tasks), ...specs.flatMap(attempt), ...events);
+const reviewFail = (purpose, round, id, reason = 'invalid-result') => ({ purpose, round, id, outcome: 'failed', reason, signature: `${reason}|${id}` });
+
+test('route: review scopes count failed attempts only', () => {
+  const reviewer = atReview(rev(1, 'changes', [F('m1')]), fix(1, { m1: 'fixed' }), reviewFail('review', 2, 'r2'));
+  assert.deepEqual(nextAction(reviewer, routing()), routeOf({
+    forAttemptId: 'r2', phase: 'spec-review', role: 'spec-reviewer', purpose: 'review', round: 2, model: 'claude-opus-5-5',
+    reason: 'invalid-result', signature: 'invalid-result|r2', attemptsUsed: 1, attemptsLeft: 2,
+  }));
+
+  const fixer = nextAction(atReview(rev(1, 'changes', [F('m1')]), reviewFail('fix', 1, 'f1', 'failed')), routing());
+  assert.deepEqual([fixer.type, fixer.role, fixer.purpose, fixer.round, fixer.status], ['route', 'spec-writer', 'fix', 1, 'failed']);
+
+  const T1 = taskCreated('T1');
+  const taskReviewer = nextAction(atImplement([T1], ...forTask('T1', [{ purpose: 'implement' }, reviewFail('task-review', 1, 'tr1', 'stalled')])), routing());
+  assert.deepEqual(taskReviewer, routeOf({
+    forAttemptId: 'tr1', phase: 'implement', task: 'T1', role: 'task-reviewer', purpose: 'task-review', round: 1, model: 'claude-sonnet-5-5',
+    reason: 'stalled', signature: 'stalled|tr1', attemptsUsed: 1, attemptsLeft: 1,
+  }));
+
+  const capped = [rev(1, 'changes', [F('b1', 'blocker')]), fix(1, { b1: 'open' }), rev(2, 'changes', [F('b1', 'blocker')]), fix(2, { b1: 'open' }), rev(3, 'changes', [F('b1', 'blocker')]), fix(3, { b1: 'declined: no' }, true)];
+  const verifier = nextAction(atReview(...capped, reviewFail('verify', null, 'v1', 'no-result')), routing());
+  assert.deepEqual(
+    [verifier.type, verifier.role, verifier.purpose, verifier.round, verifier.alternate, verifier.attemptsUsed, verifier.attemptsLeft],
+    ['route', 'verifier', 'verify', null, null, 1, 2],
+  );
+});
+
+test('route: routing off keeps Plan 3 behaviour', () => {
+  const job = build(...authorFail('a1', 'invalid-result'));
+  assert.deepEqual(nextAction(job, routing({ routing: false })), nextAction(job, ctx({ now: T0 + 10 * MIN })));
+  assert.equal(nextAction(job, routing({ routing: false })).type, 'launch');
+  const reviewer = atReview(reviewFail('review', 1, 'r1'));
+  assert.equal(nextAction(reviewer, routing({ routing: false })).type, 'launch');
+});
+
+test('route: launch-failed, interrupted and a routed test failure are not routed', () => {
+  assert.equal(nextAction(build(...authorFail('a1', 'launch-failed')), routing()).type, 'launch');
+  assert.equal(nextAction(build(started('a1', 1), ended('a1', 'interrupted', { at: T0 })), routing()).type, 'launch');
+  assert.equal(nextAction(atReview(reviewFail('review', 1, 'r1', 'launch-failed')), routing()).type, 'launch');
+  assert.equal(nextAction(atReview({ purpose: 'review', round: 1, outcome: 'interrupted' }), routing()).type, 'launch');
+  const failed = atTest(...testFail('t1', TF));
+  assert.equal(nextAction(failed, routing()).type, 'route-test-failure');
+  const back = atTest(...testFail('t1', TF), ev.testRouted('t1', buildFixTask(failed, 't1', TF)), ev.phaseCompleted('implement', 2));
+  const relaunch = nextAction(back, routing());
+  assert.equal(relaunch.type, 'launch');
+  assert.equal(relaunch.recovery, false);
+});
+
+test('route: each of the six reasons is routed', () => {
+  assert.equal(ROUTED_REASONS.size, 6);
+  for (const reason of ROUTED_REASONS) {
+    const action = nextAction(build(...authorFail('a1', reason)), routing());
+    assert.equal(action.type, 'route', reason);
+    assert.equal(action.reason, reason);
+  }
+});
+
+test('route: cap, repeated-error and back-off win over routing', () => {
+  const capped = build(...failedAt('a1', 1, T0, 's1'), ...failedAt('a2', 2, T0, 's2'), ...failedAt('a3', 3, T0, 's3'));
+  const cap = nextAction(capped, routing());
+  assert.deepEqual([cap.type, cap.reason, cap.detail.why], ['needs-you', 'stuck', 'attempt-cap']);
+  const repeated = nextAction(build(...failedAt('a1', 1, T0, 'same'), ...failedAt('a2', 2, T0, 'same')), routing());
+  assert.deepEqual([repeated.type, repeated.reason, repeated.detail.why], ['needs-you', 'stuck', 'repeated-error']);
+  assert.deepEqual(nextAction(build(...failedAt('a1', 1, T0, 's1')), routing({ now: T0 + 1 })), { type: 'wait', until: T0 + MIN, why: 'backoff' });
+  const reviewCap = nextAction(atReview(reviewFail('review', 1, 'r1'), reviewFail('review', 1, 'r2'), reviewFail('review', 1, 'r3')), routing());
+  assert.deepEqual([reviewCap.type, reviewCap.detail.why], ['needs-you', 'attempt-cap']);
+  assert.deepEqual(nextAction(atReview(reviewFail('review', 1, 'r1')), routing({ now: T0 + 1 })), { type: 'wait', until: T0 + MIN, why: 'backoff' });
+});
+
+test('route: route is returned before the concurrency wait', () => {
+  assert.equal(nextAction(build(...authorFail('a1', 'no-result')), routing({ liveSessions: 3 })).type, 'route');
+  assert.equal(nextAction(atReview(reviewFail('review', 1, 'r1')), routing({ liveSessions: 3 })).type, 'route');
+  const applied = build(...authorFail('a1', 'no-result'), decided('a1', 'retry'));
+  assert.deepEqual(nextAction(applied, routing({ liveSessions: 3 })), { type: 'wait', until: null, why: 'concurrency' });
+});
+
+test('route: a recorded decision is applied, not re-routed', () => {
+  const head = authorFail('a1', 'invalid-result', { summary: 'half done' });
+  const retried = nextAction(build(...head, decided('a1', 'retry')), routing());
+  assert.deepEqual(retried, {
+    type: 'launch', phase: 'spec', task: null, role: 'spec-writer', model: 'claude-opus-5-5', effort: null, maxTurns: 60, n: 2,
+    recovery: true, previousAttemptId: 'a1', ...AUTHOR_EXTRAS,
+  });
+  const handoff = nextAction(build(...head, decided('a1', 'retry-handoff')), routing());
+  assert.equal(handoff.type, 'launch');
+  assert.equal(handoff.handoff, path.join('/d', 'handoff.md'));
+  assert.equal(handoff.model, 'claude-opus-5-5');
+
+  const escalated = nextAction(build(...head, decided('a1', 'escalate', { note: 'the spec needs a human call' })), routing());
+  assert.deepEqual(escalated, {
+    type: 'needs-you', reason: 'stuck',
+    detail: { phase: 'spec', task: null, why: 'router-escalated', lastReason: 'invalid-result', signature: 'invalid-result|x', note: 'the spec needs a human call' },
+  });
+  const failed = nextAction(build(...head, decided('a1', 'escalate', { ok: false, note: null, error: 'timeout: no answer in 30s' })), routing());
+  assert.deepEqual(failed, {
+    type: 'needs-you', reason: 'stuck',
+    detail: { phase: 'spec', task: null, why: 'router-failed', lastReason: 'invalid-result', signature: 'invalid-result|x', error: 'timeout: no answer in 30s' },
+  });
+
+  const reviewer = nextAction(reviewWith([reviewFail('review', 1, 'r1')], decided('r1', 'escalate', { note: 'reviewer keeps crashing' })), routing());
+  assert.deepEqual([reviewer.detail.why, reviewer.detail.phase, reviewer.detail.note], ['router-escalated', 'spec-review', 'reviewer keeps crashing']);
+  const reviewRetry = nextAction(reviewWith([reviewFail('review', 1, 'r1')], decided('r1', 'retry')), routing());
+  assert.deepEqual([reviewRetry.type, reviewRetry.role, reviewRetry.recovery, reviewRetry.handoff], ['launch', 'spec-reviewer', true, null]);
+});
+
+test('route: only the decision for the last attempt applies, and the first per attempt wins', () => {
+  const older = build(...authorFail('a1', 'no-result'), decided('a1', 'retry'), started('a2', 2), ended('a2', 'failed', { reason: 'stalled', signature: 'stalled|y', at: T0 }));
+  const action = nextAction(older, routing());
+  assert.deepEqual([action.type, action.forAttemptId, action.attemptsUsed, action.attemptsLeft], ['route', 'a2', 2, 1]);
+  const twice = build(...authorFail('a1', 'no-result'), decided('a1', 'retry'), decided('a1', 'escalate'));
+  assert.equal(nextAction(twice, routing()).type, 'launch');
+});
+
+test('route: retry-alternate without an alternate is router-failed', () => {
+  const action = nextAction(build(...authorFail('a1', 'failed'), decided('a1', 'retry-alternate')), routing());
+  assert.equal(action.type, 'needs-you');
+  assert.equal(action.reason, 'stuck');
+  assert.equal(action.detail.why, 'router-failed');
+  assert.match(action.detail.error, /alternate/);
+});
+
+test('route: a per-task scope routes the implementer and applies retry, retry-alternate and retry-handoff', () => {
+  const T1 = taskCreated('T1');
+  const failedImpl = forTask('T1', [{ purpose: 'implement', id: 'i1', outcome: 'failed', reason: 'turn-cap', signature: 'turn-cap|' }]);
+  const job = atImplement([T1], ...failedImpl);
+  assert.deepEqual(nextAction(job, routing()), routeOf({
+    forAttemptId: 'i1', phase: 'implement', task: 'T1', role: 'implementer', purpose: 'implement', model: 'claude-sonnet-5-5', alternate: 'claude-opus-5-5',
+    reason: 'turn-cap', signature: 'turn-cap|', attemptsUsed: 1, attemptsLeft: 1,
+  }));
+  const applied = (action) => nextAction(implementWith([T1], failedImpl, decided('i1', action)), routing());
+  const base = { phase: 'implement', task: 'T1', purpose: 'implement', taskDef: T1, n: 2, recovery: true, previousAttemptId: 'i1' };
+  assert.deepEqual(applied('retry'), launchOf(job, 'implementer', base));
+  assert.deepEqual(applied('retry-alternate'), launchOf(job, 'implementer', { ...base, model: 'claude-opus-5-5' }));
+  assert.deepEqual(applied('retry-handoff'), launchOf(job, 'implementer', { ...base, handoff: path.join('/d', 'handoff.md') }));
 });
