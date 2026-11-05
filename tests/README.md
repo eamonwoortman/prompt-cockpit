@@ -421,7 +421,7 @@ Unit tested (no model, no network; the router's `query` is always injected):
 
 - `superagent-router.test.mjs` (`router.js`): the pure parts (`estimateTokens`, `allowedActions`, `buildRouterRequest` with its truncation order and over-limit refusal, `validateRouterOutput` including the output cap and missing usage) and `createRouter().decide` against a fake `query` (isolation options, `apiKeyHelper` passthrough, allowlist, timeout, abort, isolation-breach guard, usage totals).
 - Sequencer routing (`superagent-sequencer.test.mjs`): the `route` action for eligible failures after the attempt cap, repeated-error and back-off checks, and applying a `router-decided` decision (`retry`, `retry-alternate`, `retry-handoff`, `escalate`, stuck why `router-escalated` / `router-failed`).
-- Supervisor routing (`superagent.test.mjs`): non-blocking per-job routing, per-job cancellation on `stopJob`/`stop`, confirmed decision appends with retry and no second model call, and no router injected keeps the code-only retries.
+- Supervisor routing (`superagent-pipeline.test.mjs`): non-blocking per-job routing, per-job cancellation on `stopJob`/`stop`, confirmed decision appends with retry and no second model call, and no router injected keeps the code-only retries.
 
 Only observed by the manual probes (not yet run; they spend real money):
 
@@ -429,3 +429,13 @@ Only observed by the manual probes (not yet run; they spend real money):
 - `tests/superagent-pipeline.manual.mjs` now injects `createRouter()` and prints each `router-decided` (action, note, estimated vs real input tokens, latency), which shows whether a real router picks sensible actions in a full job.
 
 Why manual: the real SDK call, the CLI's auth and the real tokenizer are not injectable. The notification-text router call is not built.
+
+### Router after the 2026-11-05 probe (final fix wave)
+
+The first real run of `superagent-router.manual.mjs` failed; its findings are in `.superpowers/sdd/2026-11-05-superagent-p4-router/router-probe-findings.md`. What changed, and where it is tested:
+
+- `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is a hard API max, not a soft cap: a reply over it fails the call ("exceeded the N output token maximum"). Haiku 5.5 thinks on every call and thinking counts as output, so the env cap is now `routerMaxOutputTokens + ROUTER_THINKING_ALLOWANCE` (1000), and `routerMaxOutputTokens` (at most 4000, `superagent-config.test.mjs`) limits the ANSWER: `result.usage.output_tokens` less `output_tokens_details.thinking_tokens`, checked after the call (`superagent-router.test.mjs`).
+- `usage` keeps the router's own request (`requestInputTokens`, `requestOutputTokens`, `thinkingTokens`, from `result.usage`) apart from the spend (`inputTokens`, `outputTokens`, cache fields, `totalInputTokens`, `costUsd`, from `modelUsage[model]`, which folds in a hidden ~2,951-token request). The router probe's gate is on request input: `usage.requestInputTokens <= estimatedTokens <= 6000`.
+- Fail-closed additions in `superagent-router.test.mjs`: a non-positive-integer `maxOutputTokens` (`bad-limit: maxOutputTokens`, no call), a result before any `system/init` or an init without its `tools` / `mcp_servers` / `plugins` list (`isolation-breach`), character caps for space-free text (cards and the 300-character note limit).
+- `superagent-pipeline.test.mjs`: an `aborted` error the supervisor did not cause is recorded as a router failure, and the trigger's `model` is the failed attempt's own model. `superagent-sequencer.test.mjs`: the per-task cap and a review scope's repeated error win over routing.
+- The router probe now makes four calls; the fourth (`thinkingAllowance: 0`) shows the API failing at a 50-token env cap. Both new informational calls still never fail the run.

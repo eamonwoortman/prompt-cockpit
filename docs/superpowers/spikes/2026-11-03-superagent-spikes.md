@@ -173,3 +173,28 @@ isolated-helper-nomem (same cwd): totalInput = 443, no memory_paths in init
 - Auto-memory leaks through `settingSources: []`: in a cwd with a project memory directory the request grew by 205 tokens until `autoMemoryEnabled: false` was set. **Confirmed.** The router sets it and runs from its own neutral cwd.
 - Baseline: about 443-465 input tokens for an empty card; about 2,427 for a worst-case card. The 6000 `routerMaxInputTokens` default is comfortable. A chars/3 estimate plus a 600-token overhead over-estimates the full card (2,947 vs 2,427), so it is a safe pre-send bound.
 - Not tested: a machine without `apiKeyHelper` (OAuth login or `ANTHROPIC_API_KEY`); the route then passes `settings` without the helper.
+
+## S4c router output and usage (2026-11-05)
+
+**Question.** Does the real router stay inside its input estimate and its 300-token output limit, and does `CLAUDE_CODE_MAX_OUTPUT_TOKENS` act as the generation cap Plan 4 assumed?
+
+**Probe.** `node tests/superagent-router.manual.mjs` at 3ce6a3e (VERDICT: FAIL), then a scratch diagnostic logging every SDK message of one router call (the worst-case ASCII card, estimate 2,877) across six option variants: bare, `thinking: { type: 'disabled' }`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS=300`, no `persistSession`, `maxThinkingTokens: 0`, `effort: 'low'`. SDK 0.3.318, `claude-haiku-5-5`. Full notes: `.superpowers/sdd/2026-11-05-superagent-p4-router/router-probe-findings.md`.
+
+**Observed.**
+```
+ascii-worst-case: ok, action retry, estimatedTokens 2891, modelUsage totalInput 5428 (input 2973 + cacheCreation 2455), outputTokens 292 -> gate FAIL (total > estimate)
+cjk-worst-case:   ok:false, "API Error: Claude's response exceeded the 300 output token maximum. ..."; outputTokens 1500 (5 x 300), totalInput 17066
+output-cap (50):  the same API error for 50; outputTokens 250 (5 x 50)
+diagnostic, all six variants: one assistant message id, num_turns 1
+  result.usage: input 2 + cache 2,438 = 2,440 (under the 2,877 estimate)
+  modelUsage:   inputTokens 2,953 (2,951 more, uncached); outputTokens = result.usage.output_tokens + 21
+  thinking_tokens: 191 bare, 135 thinking disabled, 117 no persistSession, 126 maxThinkingTokens 0, 194 effort low, 148 cap 300
+  visible JSON answers: 148-176 characters (about 40-60 tokens)
+```
+
+**Conclusion.**
+- One API request per router call. **Confirmed.**
+- `result.usage` is the router's own request; `result.modelUsage[model]` adds a second, hidden request of about 2,951 input and 21 output tokens, constant across every option variant. **Confirmed.** Its origin is unknown (**Suspected:** a CLI-internal side call). The pre-send estimate is therefore compared with `result.usage` (input + cache read + cache creation), exposed as `usage.requestInputTokens`; `modelUsage` stays the spend record (`inputTokens`, `outputTokens`, cache fields, `totalInputTokens`, `costUsd`), since it is what is billed.
+- Haiku 5.5 thinks regardless of options, and thinking counts toward `output_tokens`. **Confirmed.** `routerMaxOutputTokens` now limits the ANSWER, `output_tokens - output_tokens_details.thinking_tokens` of `result.usage`.
+- `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is a hard API max: exceeding it fails the call. **Confirmed.** **Suspected:** the CLI retries the request (output tokens were exactly 5x the cap in both failing calls). With a 300 cap, thinking plus answer sits at or over 300, so ordinary calls failed. The env cap is now `routerMaxOutputTokens + ROUTER_THINKING_ALLOWANCE` (1000; observed thinking at most 194 over 7 calls), which keeps a hard per-request bound without failing ordinary calls. If wrong, an unusually long think fails the call (stuck) and the CLI may retry it a few times at Haiku prices.
+- Not re-run after the fix wave: the probe now has four calls (the fourth, `thinkingAllowance: 0`, should show the API error at a 50-token cap) and gates on `usage.requestInputTokens`.
