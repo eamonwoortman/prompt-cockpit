@@ -1,8 +1,13 @@
-// Superagent router, pure half: request builder (whole-request limit and
-// deterministic truncation) and output validation. The SDK call is added
-// separately; nothing here does I/O. Spec: docs/superpowers/specs/
-// 2026-11-03-superagent-design.md, "The router".
+// Superagent router: request builder (whole-request limit and deterministic
+// truncation), output validation, and the isolated single-turn SDK call
+// (createRouter). Spec: docs/superpowers/specs/2026-11-03-superagent-design.md,
+// "The router"; isolation options and auth route: spike S4b.
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { ROUTER_ACTIONS, ROUTED_REASONS } from './sequencer.js';
+import { defaultSuperagentRoot } from './config.js';
 
 export { ROUTER_ACTIONS, ROUTED_REASONS };
 
@@ -123,4 +128,124 @@ export function validateRouterOutput(text, { allowed, maxOutputTokens, outputTok
   if (!allowed.includes(parsed.action)) return { ok: false, error: 'action-not-allowed' };
   if (words(parsed.note).length > NOTE_MAX_WORDS) return { ok: false, error: 'note-too-long' };
   return { ok: true, action: parsed.action, note: parsed.note };
+}
+
+// `settingSources: []` drops the user's apiKeyHelper, so the router hands that
+// one key back inline (S4b). Read only; never throws.
+export async function readUserApiKeyHelper({
+  configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
+  readFileImpl = fs.readFile,
+} = {}) {
+  try {
+    const settings = JSON.parse(await readFileImpl(path.join(configDir, 'settings.json'), 'utf8'));
+    return typeof settings?.apiKeyHelper === 'string' ? settings.apiKeyHelper : null;
+  } catch {
+    return null;
+  }
+}
+
+function isolationLeaks(init) {
+  return [
+    ...(init.tools ?? []).map((t) => `tool ${t}`),
+    ...(init.mcp_servers ?? []).map((s) => `mcp server ${s?.name}`),
+    ...(init.plugins ?? []).filter((p) => p?.path !== 'builtin').map((p) => `plugin ${p?.source ?? p?.name}`),
+  ];
+}
+
+function usageFrom(result, model) {
+  const u = result.modelUsage?.[model];
+  if (!u) return null;
+  return {
+    inputTokens: u.inputTokens,
+    outputTokens: u.outputTokens,
+    cacheReadInputTokens: u.cacheReadInputTokens,
+    cacheCreationInputTokens: u.cacheCreationInputTokens,
+    totalInputTokens: (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0),
+    costUsd: u.costUSD ?? null,
+  };
+}
+
+function resultError(result) {
+  const detail = [...(result.errors ?? []), result.result].filter((s) => typeof s === 'string' && s !== '').join('; ');
+  if (result.subtype === 'success') return detail || 'error result';
+  return detail ? `${result.subtype}: ${detail}` : result.subtype;
+}
+
+export function createRouter({
+  queryImpl = query,
+  cwd = path.join(defaultSuperagentRoot(), 'router'),
+  apiKeyHelper = readUserApiKeyHelper,
+  timeoutMs = ROUTER_TIMEOUT_MS,
+  now = Date.now,
+  mkdirImpl = fs.mkdir,
+  baseEnv = process.env,
+} = {}) {
+  async function decide({ model, allowlist, system, card, allowed, maxOutputTokens, signal }) {
+    const started = now();
+    let usage = null;
+    let apiKeySource = null;
+    const settle = (o) => (o.ok
+      ? { ok: true, action: o.action, note: o.note, usage, latencyMs: now() - started, apiKeySource }
+      : { ok: false, error: o.error, usage, latencyMs: now() - started, apiKeySource });
+    if (!Array.isArray(allowlist) || !allowlist.includes(model)) return settle({ ok: false, error: `model-not-allowed: ${model}` });
+    if (signal?.aborted) return settle({ ok: false, error: 'aborted' });
+
+    const controller = new AbortController();
+    let q = null;
+    let timer;
+    let onAbort;
+    const stopped = new Promise((resolve) => {
+      timer = setTimeout(() => { controller.abort(); resolve({ ok: false, error: 'timeout' }); }, timeoutMs);
+      onAbort = () => { controller.abort(); resolve({ ok: false, error: 'aborted' }); };
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+
+    const call = async () => {
+      await mkdirImpl(cwd, { recursive: true });
+      const helper = await apiKeyHelper();
+      if (controller.signal.aborted) return { ok: false, error: 'aborted' };
+      q = queryImpl({
+        prompt: card,
+        options: {
+          model, maxTurns: 1, tools: [], settingSources: [], mcpServers: {}, strictMcpConfig: true,
+          systemPrompt: system,
+          settings: { autoMemoryEnabled: false, ...(helper ? { apiKeyHelper: helper } : {}) },
+          persistSession: false, thinking: { type: 'disabled' }, cwd, abortController: controller,
+          env: { ...baseEnv, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(maxOutputTokens) },
+        },
+      });
+      let text = '';
+      let result = null;
+      for await (const m of q) {
+        if (m.type === 'system' && m.subtype === 'init') {
+          apiKeySource = m.apiKeySource ?? null;
+          const leaks = isolationLeaks(m);
+          if (leaks.length > 0) {
+            controller.abort();
+            return { ok: false, error: `isolation-breach: ${leaks.join(', ')}` };
+          }
+        } else if (m.type === 'assistant') {
+          for (const b of m.message?.content ?? []) if (b.type === 'text') text += b.text;
+        } else if (m.type === 'result') {
+          result = m;
+          break;
+        }
+      }
+      if (!result) return { ok: false, error: 'no-result' };
+      usage = usageFrom(result, model);
+      if (result.subtype !== 'success' || result.is_error) return { ok: false, error: resultError(result) };
+      return validateRouterOutput(text, { allowed, maxOutputTokens, outputTokens: usage?.outputTokens });
+    };
+
+    try {
+      const failed = (err) => ({ ok: false, error: err?.message || String(err) });
+      return settle(await Promise.race([call().catch(failed), stopped]));
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      try { q?.close?.(); } catch { /* best effort */ }
+    }
+  }
+
+  return { decide };
 }
