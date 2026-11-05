@@ -166,6 +166,14 @@ test('contract.md mentions handoff', async () => {
   assert.ok(system.includes('read that file first'));
 });
 
+test('contract.md and planner.md require listing every commit that touched an output, including earlier attempts', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const { system } = await buildWorkerPrompt({ role: 'planner', job, phase, attempt, projectDir: emptyDir });
+  assert.ok(system.includes('Every output must appear in at least one commit you list'));
+  assert.ok(system.includes('an earlier attempt of this phase'));
+  assert.ok(system.includes('list every commit that touched them'));
+});
+
 test('the card carries purpose, round, final and the required outputs list when purpose is set', async () => {
   const { job, card, phaseOf } = await m2();
   const c = await card('spec-reviewer', 'spec-review', { purpose: 'review', round: 1, final: false });

@@ -175,6 +175,16 @@ test('done without its required output, or with an empty one, is invalid', async
   assert.equal(ok.ok, true, JSON.stringify(ok.errors));
 });
 
+test('an output committed earlier on the job branch counts once that commit is listed', async () => {
+  const f = await fixture();
+  const followUp = await f.commit('notes.txt', 'later\n', 'follow-up');
+  const onlyLast = await f.check(f.goodResult({ evidence: { commits: [followUp] } }));
+  assert.equal(onlyLast.ok, false);
+  assert.match(onlyLast.errors.join('\n'), /output not committed by a listed commit/);
+  const both = await f.check(f.goodResult({ evidence: { commits: [f.specSha, followUp] } }));
+  assert.equal(both.ok, true, JSON.stringify(both.errors));
+});
+
 test('an author phase\'s output must be committed by a listed commit', async () => {
   const a = await fixture({ commitSpec: false });
   const spec = path.join(a.worktree, ...artifactPaths(a.job).spec.split('/'));

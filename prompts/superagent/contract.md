@@ -28,6 +28,8 @@ When you are finished (or blocked), publish exactly one result file in `attemptD
 
 When the phase has required outputs, commit every output file in the primary worktree on the job branch and list the commit sha(s) in `evidence.commits` as a plain sha for the primary repo, or `{ "repo": "<id>", "sha": "<sha>" }` for an additional repo. After committing, leave each output unmodified so `git status` is clean for that path; an uncommitted, empty or later-modified output fails validation.
 
+Every output must appear in at least one commit you list. If you committed outputs more than once (for example a follow-up fix commit), list every commit that touched an output, not only the last one. If an output was already committed by an earlier attempt of this phase and you keep it, find that commit with `git log -- <path>` on the job branch and list it too.
+
 Note that review, response, verify and report files are outputs and must be committed and listed in `evidence.commits` like any other output.
 
 ## Purposes
