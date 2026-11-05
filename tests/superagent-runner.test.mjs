@@ -160,6 +160,25 @@ test('launch writes attempt-started before the session and passes explicit optio
   } finally { registry._reset(); }
 });
 
+test('launch records handoff on attempt-started', async () => {
+  registry._reset();
+  try {
+    const { store, job, events } = await setup();
+    const runner = createRunner({ registry: sessionFactory(registry).registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    await runner.launch(job, launchAction({ handoff: '/w/a1/handoff.md' }));
+    const started = (await events()).filter((e) => e.type === 'attempt-started');
+    assert.equal(started.at(-1).handoff, '/w/a1/handoff.md');
+  } finally { registry._reset(); }
+  registry._reset();
+  try {
+    const { store, job, events } = await setup();
+    const runner = createRunner({ registry: sessionFactory(registry).registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    await runner.launch(job, launchAction());
+    const started = (await events()).filter((e) => e.type === 'attempt-started');
+    assert.equal(started.at(-1).handoff, null);
+  } finally { registry._reset(); }
+});
+
 test('a failed attempt-started append creates no session', async () => {
   registry._reset();
   try {

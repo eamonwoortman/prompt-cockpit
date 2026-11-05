@@ -55,3 +55,5 @@ Do not start the next phase. Produce only the outputs named in the job card, and
 ## Recovery
 
 If the job card has a recovery note, an earlier attempt was interrupted. Follow the note: check each worktree's git status and log before repeating work, and continue from `handoff.md` in `previousAttemptDir` if it exists.
+
+If the job card's `handoff` is set, read that file first and continue from the state it describes; check the worktrees' git status before trusting it.

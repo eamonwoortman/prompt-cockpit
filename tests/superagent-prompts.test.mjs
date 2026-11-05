@@ -55,7 +55,7 @@ test('the job card carries every field and the recovery note only on retries', a
   const { job, phase, attempt, emptyDir } = await fixture();
   const { card } = await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir });
   const c = parseCard(card);
-  assert.deepEqual(Object.keys(c).sort(), ['attemptDir', 'attemptId', 'idea', 'inputs', 'jobId', 'mode', 'outputs', 'phaseId', 'previousAttemptDir', 'previousFindings', 'recoveryNote', 'repos', 'round', 'taskId', 'title'].sort());
+  assert.deepEqual(Object.keys(c).sort(), ['attemptDir', 'attemptId', 'idea', 'inputs', 'jobId', 'mode', 'outputs', 'handoff', 'phaseId', 'previousAttemptDir', 'previousFindings', 'recoveryNote', 'repos', 'round', 'taskId', 'title'].sort());
   assert.equal(c.jobId, job.jobId);
   assert.equal(c.phaseId, attempt.phase);
   assert.equal(c.taskId, null);
@@ -148,8 +148,22 @@ test('with no purpose the card equals the Plan 2 card', async () => {
   assert.deepEqual(c, {
     jobId: job.jobId, phaseId: phase.phase, taskId: null, attemptId: 'a2', title: job.title, mode: job.mode, idea: IDEA,
     repos: [{ id: 'primary', worktree: job.repos[0].worktree, branch: job.branch }],
-    inputs: {}, outputs: { spec: artifactPaths(job).spec }, attemptDir: attempt.dir, round: null, previousFindings: null, recoveryNote: null, previousAttemptDir: null,
+    inputs: {}, outputs: { spec: artifactPaths(job).spec }, attemptDir: attempt.dir, round: null, previousFindings: null, recoveryNote: null, previousAttemptDir: null, handoff: null,
   });
+});
+
+test('the card carries handoff', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const withHandoff = { ...attempt, handoff: '/w/a1/handoff.md' };
+  assert.equal(parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt: withHandoff, projectDir: emptyDir })).card).handoff, '/w/a1/handoff.md');
+  assert.equal(parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir })).card).handoff, null);
+});
+
+test('contract.md mentions handoff', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const { system } = await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir });
+  assert.ok(system.includes('`handoff`'));
+  assert.ok(system.includes('read that file first'));
 });
 
 test('the card carries purpose, round, final and the required outputs list when purpose is set', async () => {
