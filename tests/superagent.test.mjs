@@ -203,12 +203,9 @@ test('createJob refuses pipelines this plan cannot run', async () => {
     await assert.rejects(create(h), { code: 'ERR_INVALID_CONFIG' });
 
     const plain = await harness();
-    await assert.rejects(create(plain, { fixture: undefined }), { code: 'ERR_NO_TEMPLATE' });
     await assert.rejects(create(plain, { fixture: 'milestone-9' }), { code: 'ERR_UNKNOWN_FIXTURE' });
-    for (const jobsRoot of [h.jobsRoot, plain.jobsRoot]) {
-      const entries = await fs.readdir(jobsRoot).catch((err) => (err.code === 'ENOENT' ? [] : Promise.reject(err)));
-      assert.deepEqual(entries, []);
-    }
+    const entries = await fs.readdir(h.jobsRoot).catch((err) => (err.code === 'ENOENT' ? [] : Promise.reject(err)));
+    assert.deepEqual(entries, []);
     assert.deepEqual(plain.sa.listJobs(), []);
   } finally { registry._reset(); }
 });
@@ -591,15 +588,10 @@ test('createJob with the milestone-2 fixture provisions and validates', async ()
   } finally { registry._reset(); }
 });
 
-test('createJob rejects a pipeline whose role has no template with ERR_NO_TEMPLATE, and the default pipeline fails on brainstormer', async () => {
+test('createJob rejects a pipeline whose role has no template with ERR_NO_TEMPLATE, and the default pipeline passes the template check', async () => {
   try {
     const plain = await harness();
-    await assert.rejects(create(plain, { fixture: undefined }), (err) => {
-      assert.equal(err.code, 'ERR_NO_TEMPLATE');
-      assert.deepEqual(err.roles, ['brainstormer', 'stand-in']);
-      assert.match(err.message, /brainstormer/);
-      return true;
-    });
+    assert.equal((await create(plain, { fixture: undefined })).state, 'running');
 
     const ghost = { provider: 'claude', model: 'claude-opus-5-5', maxTurns: 10 };
     const pipeline = defaultConfig().pipeline.map((p) => {
@@ -610,10 +602,9 @@ test('createJob rejects a pipeline whose role has no template with ERR_NO_TEMPLA
     const h = await harness({ configJson: (repo) => ({ projects: { [repo]: { pipeline, models: { 'ghost-writer': ghost, 'ghost-reviewer': ghost } } } }) });
     await assert.rejects(create(h, { fixture: undefined }), (err) => {
       assert.equal(err.code, 'ERR_NO_TEMPLATE');
-      assert.deepEqual(err.roles, ['brainstormer', 'stand-in', 'ghost-writer', 'ghost-reviewer']);
+      assert.deepEqual(err.roles, ['ghost-writer', 'ghost-reviewer']);
       return true;
     });
-    await noJobDirs(plain.jobsRoot);
     await noJobDirs(h.jobsRoot);
     assert.deepEqual(h.sa.listJobs(), []);
   } finally { registry._reset(); }
@@ -624,8 +615,7 @@ test('a project override template satisfies the check', async () => {
     const h = await harness();
     const overrides = path.join(h.repo, '.superpowers', 'superagent', 'prompts');
     await fs.mkdir(overrides, { recursive: true });
-    await fs.writeFile(path.join(overrides, 'brainstormer.md'), '# Brainstormer\n');
-    await fs.writeFile(path.join(overrides, 'stand-in.md'), '# Stand-in\n');
+    await fs.writeFile(path.join(overrides, 'spec-writer.md'), '# Custom spec writer');
     const job = await create(h, { fixture: undefined });
     assert.equal(job.state, 'running');
     assert.equal(job.pipeline[0].role, 'brainstormer');

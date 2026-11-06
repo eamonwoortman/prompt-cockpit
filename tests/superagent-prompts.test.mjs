@@ -5,7 +5,9 @@ import path from 'node:path';
 import { tempDir, provisionedEvents } from './superagent-helpers.mjs';
 import { deriveJob } from '../src/superagent/store.js';
 import { artifactPaths, reviewPaths, requiredOutputs } from '../src/superagent/results.js';
-import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
+import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
+import { brainstormLog } from '../src/superagent/sequencer.js';
+import { ANSWER_TAGS, BRAINSTORM_BATCH } from '../src/superagent/results.js';
 import { READ_ONLY_ROLES, READ_ONLY_TOOLS, RECOVERY_NOTE, templatesDir, hasTemplate, buildWorkerPrompt, nudgeText } from '../src/superagent/prompts.js';
 
 const IDEA = 'Line one of the idea.\n\n  Indented line two with "quotes" and \ backslash.\nLast line';
@@ -214,7 +216,7 @@ test('a review card has target and previousFindings null in round 1, the previou
 });
 
 test('a fix card has previousFindings pointing at the round review file', async () => {
-  const { job, card } = await m2();
+  const { job, card } = await m2([started('r1', 'spec-review', 'review', { round: 1 }), ended('r1', { verdict: 'changes', findings: [] })]);
   const c = await card('spec-writer', 'spec-review', { purpose: 'fix', round: 1 });
   assert.equal(c.previousFindings, reviewPaths(job, { phase: 'spec-review', round: 1 }).review);
   assert.equal(c.target, artifactPaths(job).spec);
@@ -339,4 +341,120 @@ test('a phase verify card names the review target; a task verify card lists cumu
   const taskVerify = await card('verifier', 'implement', { purpose: 'verify', task: 'T1', taskDef: TASK_DEF, contested: ['B1'] });
   assert.deepEqual(taskVerify.taskCommits, [{ repo: 'primary', sha: 'aaaa111' }, { repo: 'primary', sha: 'bbbb222' }]);
   assert.equal(taskVerify.target, null);
+});
+
+test('an extra-round fix has no review at its round, so previousFindings is null', async () => {
+  const { card } = await m2([started('r1', 'spec-review', 'review', { round: 1 }), ended('r1', { verdict: 'changes', findings: [] })]);
+  const extra = await card('spec-writer', 'spec-review', { purpose: 'fix', round: 4, final: true, reviewFindings: REVIEW_FINDINGS });
+  assert.equal(extra.previousFindings, null);
+  assert.deepEqual(extra.reviewFindings, REVIEW_FINDINGS);
+});
+
+async function brainstormJob(extra = []) {
+  const emptyDir = await tempDir('sa-prompts-bs-');
+  const job = deriveJob([...provisionedEvents({ jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', idea: IDEA, pipeline: defaultConfig().pipeline }), ...extra]);
+  const phaseOf = (id) => job.pipeline.find((p) => p.phase === id);
+  const card = async (role, phaseId, attempt) => parseCard((await buildWorkerPrompt({ role, job, phase: phaseOf(phaseId), attempt: { attemptId: 'cur', phase: phaseId, task: null, n: 1, recovery: false, previousAttemptId: null, dir: '/d/cur', ...attempt }, projectDir: emptyDir })).card);
+  return { job, card, emptyDir, phaseOf };
+}
+
+const QS = [{ id: 'Q1', text: 'Which db?' }, { id: 'Q2', text: 'Which port?' }];
+const BRAINSTORM_EVENTS = [
+  started('b1', 'brainstorm', 'ask', { role: 'brainstormer' }), ended('b1', { questions: QS }),
+  started('s1', 'brainstorm', 'answer', { role: 'stand-in' }), ended('s1', { answers: [{ id: 'Q1', tag: 'from-idea', answer: 'sqlite', reason: 'idea says so' }, { id: 'Q2', tag: 'assumed', answer: '3000', reason: 'default' }] }),
+];
+
+test('ask card carries exchanges, maxQuestions and the brief output', async () => {
+  const { job, card } = await brainstormJob(BRAINSTORM_EVENTS);
+  const c = await card('brainstormer', 'brainstorm', { purpose: 'ask', final: true });
+  assert.deepEqual(c.outputs, { brief: artifactPaths(job).brief });
+  assert.equal(c.maxQuestions, BRAINSTORM_BATCH);
+  assert.equal(c.maxQuestions, 5);
+  assert.deepEqual(c.exchanges, brainstormLog(job));
+  assert.equal(c.exchanges.length, 2);
+  assert.equal(c.final, true);
+  assert.equal('userAnswers' in c, false);
+  const spec = await card('spec-writer', 'spec', { purpose: 'author' });
+  assert.equal('exchanges' in spec, false);
+  assert.equal('maxQuestions' in spec, false);
+});
+
+test('exchanges holds only entries settled before this attempt', async () => {
+  const { job, card } = await brainstormJob(BRAINSTORM_EVENTS);
+  const c = await card('brainstormer', 'brainstorm', { purpose: 'ask', attemptId: 's1' });
+  assert.deepEqual(c.exchanges, []);
+  assert.equal(brainstormLog(job).length, 2);
+});
+
+test('answer card carries open questions and resultVia', async () => {
+  const { card } = await brainstormJob(BRAINSTORM_EVENTS.slice(0, 2));
+  const open = [{ id: 'Q1', text: 'Which db?' }, { id: 'Q2', text: 'Which port?' }];
+  const c = await card('stand-in', 'brainstorm', { purpose: 'answer', openQuestions: open });
+  assert.deepEqual(c.openQuestions, open);
+  assert.equal(c.resultVia, 'final-message');
+  assert.deepEqual(c.outputs, {});
+  assert.deepEqual(c.exchanges, []);
+  assert.equal('maxQuestions' in c, false);
+});
+
+test('userAnswers reach every later card in the scope', async () => {
+  const specQ = [
+    started('w1', 'spec', 'author'), ended('w1', { outcome: 'question', question: 'Q?' }),
+    { type: 'needs-you', reason: 'question', detail: { attemptId: 'w1' } },
+    { type: 'question-answered', forAttemptId: 'w1', answer: 'A' },
+  ];
+  const { card } = await brainstormJob(specQ);
+  const spec = await card('spec-writer', 'spec', { purpose: 'author' });
+  assert.deepEqual(spec.userAnswers, [{ question: 'Q?', answer: 'A' }]);
+  const plan = await card('planner', 'plan', { purpose: 'author' });
+  assert.equal('userAnswers' in plan, false);
+
+  const verifierQ = [
+    started('r3', 'plan-review', 'review', { round: 3 }), ended('r3', { verdict: 'changes', findings: [{ id: 'B1', severity: 'blocker', text: 'x' }] }),
+    started('v1', 'plan-review', 'verify'), ended('v1', { outcome: 'question', question: 'V?' }),
+    { type: 'needs-you', reason: 'question', detail: { attemptId: 'v1' } },
+    { type: 'question-answered', forAttemptId: 'v1', answer: 'VA' },
+  ];
+  const v = await brainstormJob(verifierQ);
+  const want = [{ question: 'V?', answer: 'VA' }];
+  assert.deepEqual((await v.card('planner', 'plan-review', { purpose: 'fix', round: 4, final: true, reviewFindings: REVIEW_FINDINGS })).userAnswers, want);
+  assert.deepEqual((await v.card('plan-reviewer', 'plan-review', { purpose: 'review', round: 4 })).userAnswers, want);
+  assert.deepEqual((await v.card('verifier', 'plan-review', { purpose: 'verify', round: 4, contested: ['B1'] })).userAnswers, want);
+});
+
+test('templates exist and state the rules', async () => {
+  const read = (f) => fs.readFile(path.join(templatesDir(), f), 'utf8');
+  const has = async (f, ...needles) => { const t = await read(f); for (const n of needles) assert.ok(t.includes(n), `${f}: missing ${n}`); };
+  await has('brainstormer.md', 'brief', 'questions', '## Assumptions made for you', '## Your answers', 'question id', 'Do not write a design document');
+  await has('stand-in.md', ...ANSWER_TAGS, 'escalated', 'final message', 'When unsure whether');
+  await has('spec-writer.md', '## Assumptions made for you', '## Your answers');
+  for (const f of ['spec-reviewer', 'plan-reviewer', 'task-reviewer', 'verifier', 'planner', 'implementer', 'tester']) await has(`${f}.md`, '`userAnswers`');
+  for (const f of ['brainstormer.md', 'stand-in.md']) assert.ok((await read(f)).split('\n').length < 25);
+});
+
+test('the composed stand-in prompt never tells it to write result.json', async () => {
+  const { job, phaseOf, emptyDir } = await brainstormJob();
+  const { system } = await buildWorkerPrompt({ role: 'stand-in', job, phase: phaseOf('brainstorm'), attempt: { attemptId: 'cur', phase: 'brainstorm', purpose: 'answer', openQuestions: [], dir: '/d/cur' }, projectDir: emptyDir });
+  assert.ok(system.includes('resultVia') && system.includes('final message'));
+  const publishing = system.split('\n').filter((l) => l.includes('result.json.tmp'));
+  assert.equal(publishing.length, 1);
+  assert.ok(publishing[0].includes('Unless your card says `resultVia'));
+  assert.ok(!/result\.json/.test(await fs.readFile(path.join(templatesDir(), 'stand-in.md'), 'utf8')));
+});
+
+test('the contract documents ask and answer', async () => {
+  const { job, phaseOf, emptyDir } = await brainstormJob();
+  for (const role of ['brainstormer', 'stand-in']) {
+    const { system } = await buildWorkerPrompt({ role, job, phase: phaseOf('brainstorm'), attempt: { attemptId: 'cur', phase: 'brainstorm', purpose: role === 'stand-in' ? 'answer' : 'ask', dir: '/d/cur' }, projectDir: emptyDir });
+    for (const n of ['`questions`', '`maxQuestions`', 'Q<n>', '`answers`', '"id", "tag", "answer", "reason"', '`escalated`', '`question`', '`questions: []`']) assert.ok(system.includes(n), `${role}: missing ${n}`);
+    const blocked = system.split('\n').find((l) => l.includes('A `blocked` result needs none'));
+    assert.ok(blocked.includes('`answer`') && blocked.includes('`ask`'));
+  }
+});
+
+test('later workers treat the spec sections as the user decisions and reviewable defaults', async () => {
+  const { job, phaseOf, emptyDir } = await brainstormJob();
+  const { system, card } = await buildWorkerPrompt({ role: 'planner', job, phase: phaseOf('plan'), attempt: { attemptId: 'cur', phase: 'plan', purpose: 'author', dir: '/d/cur' }, projectDir: emptyDir });
+  assert.equal(parseCard(card).userAnswers, undefined);
+  assert.ok(system.includes('`## Your answers` are the user\'s decisions and `## Assumptions made for you` are reviewable defaults'));
 });

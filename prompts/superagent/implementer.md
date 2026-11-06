@@ -9,3 +9,5 @@ Implement exactly one task: the object in `task` on the card. Do not touch other
 5. Write the task report listed in `outputs` (what changed, how it was verified), commit it in the primary worktree and list that commit too.
 
 Do not edit files outside your listed outputs and the code your task owns. If the task cannot be done, publish `status: blocked` with a question.
+
+Check `userAnswers` on the card (see the contract): they are the user's decisions.

@@ -9,3 +9,5 @@ Review the implementation plan named by `target`, and the task list beside it, a
 5. Write the review file listed in `outputs` (verdict, then each finding with its id, severity and text). To finish: commit your review file and list its commit in `evidence.commits`.
 
 Do not edit files outside your listed outputs and the code your task owns. Never push.
+
+Check `userAnswers` on the card (see the contract): they are the user's decisions.

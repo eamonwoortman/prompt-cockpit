@@ -4,7 +4,7 @@ You are one worker in an unattended, multi-phase software job. Your job card (th
 
 ## Publishing your result
 
-When you are finished (or blocked), publish exactly one result file in `attemptDir`:
+When you are finished (or blocked), publish exactly one result in `attemptDir` (or, with `resultVia`, as your final message):
 
 ```json
 {
@@ -22,7 +22,8 @@ When you are finished (or blocked), publish exactly one result file in `attemptD
 
 - `status` is `done`, `blocked` or `failed` (`failed` is for the tester, and for any role that cannot finish).
 - Copy `jobId`, `phaseId`, `taskId` and `attemptId` exactly from the job card. Do not invent or alter them.
-- Publish atomically: write the JSON to `result.json.tmp` in `attemptDir`, then `rename` it to `result.json`. This is the very last thing you do; take no further actions after the rename.
+- Unless your card says `resultVia: "final-message"`, publish atomically: write the JSON to `result.json.tmp` in `attemptDir`, then `rename` it to `result.json`. This is the very last thing you do; take no further actions after the rename.
+- If your card says `resultVia: "final-message"`, you cannot write files: reply with only the result JSON object as your final message.
 
 ## Committing outputs
 
@@ -42,9 +43,15 @@ If the job card has a `purpose`, it says which kind of attempt this is and which
 - `fix`: `findings` copied from `reviewFindings` on the card (`id`, `severity`, `text`) each with a `disposition` (`fixed`, `open` or `declined: <reason>`); a blocker may be `open` only in the final fix; a task `fix` also needs `evidence.commits` and `evidence.checks`.
 - `verify`: `verified`, a list of `{ id, verified, evidence }` covering exactly the contested ids.
 - `implement`: `evidence.commits` and `evidence.checks`.
+- `ask` (brainstormer): `questions`, a list of at most `maxQuestions` objects `{ "id": "Q<n>", "text": "..." }`, where `Q<n>` has n of 1 or more and an id is never reused across turns. To finish, write the brief to `outputs.brief`, commit it, and publish `questions: []` explicitly; a missing `questions` is rejected. When `final` is true, `questions` must be `[]`. A brainstormer never publishes `blocked`.
+- `answer` (stand-in): `answers`, a list of `{ "id", "tag", "answer", "reason" }` covering every id in `openQuestions` (`tag` is `from-idea`, `from-project` or `assumed`). To escalate one question, publish `status: "blocked"` with `question` (for the user), `escalated` (that question's id) and `answers` for all the others (it may be empty). A `done` result must not carry `escalated`. `failed` is allowed. It writes no files and has no commits.
 - `test`: on success `status: done`; on failure `status: failed` with `findings` (each `id`, `severity` (`blocker`, `major` or `minor`), `text`, optional `repo`).
 
-A `blocked` result needs none of these purpose fields: publish your question instead. Tester `findings`, if you include them, must still be well-formed.
+A `blocked` result needs none of these purpose fields, except `answer`, which still needs `question`, `escalated` and `answers`: publish your question instead. `ask` never blocks. Tester `findings`, if you include them, must still be well-formed.
+
+## Answers
+
+`userAnswers` on your card (`{ question, answer }`) are the user's decisions for this scope: they override the reviewer, the spec and your own judgement. A blocker the user dismissed is closed: do not raise, confirm or fix it. In a spec, `## Your answers` are the user's decisions and `## Assumptions made for you` are reviewable defaults, whether or not your card has `userAnswers`.
 
 ## Never ask the user
 

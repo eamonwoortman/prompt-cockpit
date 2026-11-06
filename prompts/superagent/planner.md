@@ -10,3 +10,5 @@ Turn the approved spec into an implementation plan and a machine-readable task l
 6. Final round: when `final` is true, append every finding you did not fix under a heading `## Unresolved review findings`, then commit.
 
 Do not edit files outside your listed outputs and the code your task owns. Never push. If the spec is too ambiguous to plan, publish `status: blocked` with a specific question.
+
+Check `userAnswers` on the card (see the contract): they are the user's decisions.

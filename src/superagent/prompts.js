@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { artifactPaths, reviewPaths, requiredOutputs, reviseOutputs as reviseSet } from './results.js';
+import { artifactPaths, reviewPaths, requiredOutputs, reviseOutputs as reviseSet, BRAINSTORM_BATCH } from './results.js';
+import { brainstormLog } from './sequencer.js';
 
 export const UNATTENDED_DENY_MESSAGE = 'You are running unattended. Put your question in `result.json` with `status: blocked`.';
 export const RECOVERY_NOTE = 'check every worktree\'s git status and log, and the ledger, before repeating work; continue from `handoff.md` if present';
@@ -58,10 +59,22 @@ export async function hasTemplate(role, { projectDir }) {
 
 function keyedOutputs(job, phase, purpose, round, task) {
   const list = requiredOutputs(job, { phase, purpose, round, task });
-  if (purpose === 'author' || purpose === 'test') return Object.fromEntries((phase.outputs ?? []).map((key, i) => [key, list[i]]));
+  if (purpose === 'answer') return {};
+  if (purpose === 'author' || purpose === 'ask' || purpose === 'test') return Object.fromEntries((phase.outputs ?? []).map((key, i) => [key, list[i]]));
   const paths = reviewPaths(job, { phase: phase.phase, round, taskId: task });
   const key = Object.keys(paths).find((k) => paths[k] === list[0]);
   return { [key]: list[0] };
+}
+
+function settledExchanges(job, attempt) {
+  const index = new Map(job.attempts.map((a, i) => [a.attemptId, i]));
+  const own = index.get(attempt.attemptId) ?? job.attempts.length;
+  return brainstormLog(job).filter((e) => e.tag !== null && (index.get(e.answeredBy) ?? Infinity) < own);
+}
+
+function userAnswersFor(job, phaseId, task) {
+  const asked = new Map(job.attempts.filter((a) => a.phase === phaseId && (a.task ?? null) === task).map((a) => [a.attemptId, a.question]));
+  return (job.answers ?? []).filter((a) => asked.has(a.forAttemptId)).map((a) => ({ question: asked.get(a.forAttemptId), answer: a.answer }));
 }
 
 function purposeFields(job, phase, attempt) {
@@ -75,7 +88,7 @@ function purposeFields(job, phase, attempt) {
   };
 
   let previousFindings = null;
-  if (purpose === 'fix') previousFindings = reviewFile(round);
+  if (purpose === 'fix' && done.some((a) => REVIEW_PURPOSES.has(a.purpose) && a.round === round)) previousFindings = reviewFile(round);
   else if (REVIEW_PURPOSES.has(purpose) && round > 1) previousFindings = reviewFile(round - 1);
 
   let reviewFindings = null;
@@ -111,6 +124,9 @@ function purposeFields(job, phase, attempt) {
     contested = (attempt.contested ?? []).map((id) => ({ id, text: findings.get(id)?.text ?? null, disposition: dispositions.get(id) ?? null }));
   }
 
+  const exchanges = phase.kind === 'brainstorm' ? settledExchanges(job, attempt) : null;
+  const userAnswers = exchanges ? [] : userAnswersFor(job, attempt.phase ?? phase.phase, task);
+
   const target = TARGET_PURPOSES.has(purpose) && task == null && phase.target ? (artifactPaths(job)[phase.target] ?? null) : null;
   return {
     purpose,
@@ -124,6 +140,10 @@ function purposeFields(job, phase, attempt) {
     previousFindings,
     reviewFindings,
     contested,
+    ...(exchanges ? { exchanges } : {}),
+    ...(purpose === 'answer' ? { openQuestions: attempt.openQuestions ?? [] } : {}),
+    ...(purpose === 'ask' ? { maxQuestions: BRAINSTORM_BATCH } : {}),
+    ...(userAnswers.length > 0 ? { userAnswers } : {}),
   };
 }
 

@@ -8,3 +8,5 @@ Check that the finished work meets the spec. You are read-only on code: never ed
 4. If anything fails, publish `status: failed` and list each failing check as a finding with `id`, `severity` (`blocker`, `major` or `minor`) and `text`. When the failure is in an additional repo, set the `repo` field of the finding to that repo id.
 
 Do not edit files outside your listed outputs and the code your task owns. Never push.
+
+Check `userAnswers` on the card (see the contract): they are the user's decisions.

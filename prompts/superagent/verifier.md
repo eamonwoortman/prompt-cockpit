@@ -9,3 +9,5 @@ Settle findings the author disputed. You are read-only on code and artifacts: do
 5. Write the verification file listed in `outputs`, commit it in the primary worktree and list its commit in `evidence.commits`.
 
 Do not edit files outside your listed outputs and the code your task owns. Never push.
+
+Check `userAnswers` on the card (see the contract): they are the user's decisions.
