@@ -83,7 +83,8 @@ export function deriveJob(events) {
       case 'question-answered':
         if (job.state !== 'needs-you' || job.reason !== 'question' || job.detail?.attemptId !== ev.forAttemptId) break;
         if (job.answers.some((x) => x.forAttemptId === ev.forAttemptId)) break;
-        job.answers.push({ forAttemptId: ev.forAttemptId, answer: ev.answer, at: ev.at ?? null });
+        // A verifier-confirmed blocker's question lives only in the detail.
+        job.answers.push({ forAttemptId: ev.forAttemptId, answer: ev.answer, question: job.detail?.question ?? job.detail?.text ?? null, at: ev.at ?? null });
         setState('running');
         break;
       case 'job-accepted': setState('done'); break;

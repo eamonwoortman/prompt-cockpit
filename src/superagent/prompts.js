@@ -74,7 +74,7 @@ function settledExchanges(job, attempt) {
 
 function userAnswersFor(job, phaseId, task) {
   const asked = new Map(job.attempts.filter((a) => a.phase === phaseId && (a.task ?? null) === task).map((a) => [a.attemptId, a.question]));
-  return (job.answers ?? []).filter((a) => asked.has(a.forAttemptId)).map((a) => ({ question: asked.get(a.forAttemptId), answer: a.answer }));
+  return (job.answers ?? []).filter((a) => asked.has(a.forAttemptId)).map((a) => ({ question: a.question ?? asked.get(a.forAttemptId), answer: a.answer }));
 }
 
 function purposeFields(job, phase, attempt) {

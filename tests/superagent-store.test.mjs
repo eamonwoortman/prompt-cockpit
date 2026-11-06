@@ -327,7 +327,11 @@ test('question-answered returns the job to running and survives replay', async (
   const job = deriveJob(events);
   assert.equal(job.state, 'running');
   assert.equal(job.reason, null);
-  assert.deepEqual(job.answers, [{ forAttemptId: 'a1', answer: 'yes', at: events[events.length - 1].at }]);
+  assert.deepEqual(job.answers, [{ forAttemptId: 'a1', answer: 'yes', question: 'Q?', at: events[events.length - 1].at }]);
+  const blocker = deriveJob(stamp([jobCreated(), { type: 'job-provisioned' }, { type: 'needs-you', reason: 'question', detail: { kind: 'blocker', text: 'B?', attemptId: 'v1' } }, { type: 'question-answered', forAttemptId: 'v1', answer: 'no' }]));
+  assert.equal(blocker.answers[0].question, 'B?', 'a verifier-confirmed blocker keeps its detail text');
+  const bare = deriveJob(stamp([jobCreated(), { type: 'job-provisioned' }, { type: 'needs-you', reason: 'question', detail: { attemptId: 'a1' } }, { type: 'question-answered', forAttemptId: 'a1', answer: 'no' }]));
+  assert.equal(bare.answers[0].question, null);
   const rootDir = await tempDir('sa-store-');
   const store = createSuperagentStore({ rootDir, logImpl: quiet });
   const written = [];

@@ -1293,7 +1293,8 @@ test('a dismissed blocker closes after the extra round', { timeout: TEST_TIMEOUT
     const fix2 = h.worker.cards().find((c) => c.purpose === 'fix' && c.round === 2);
     assert.deepEqual(fix2.reviewFindings, [BLOCKER]);
     assert.equal(fix2.previousFindings, null);
-    assert.deepEqual(fix2.userAnswers.map((a) => a.answer), ['leave it']);
+    assert.equal(parked.detail.text, `The verifier confirmed blocker B1: ${BLOCKER.text}`);
+    assert.deepEqual(fix2.userAnswers, [{ question: parked.detail.text, answer: 'leave it' }]);
     const fix2Body = h.worker.log.find((e) => e.card === fix2).body;
     assert.equal(fix2Body.findings[0].disposition, 'declined: the user said "leave it"');
     assert.deepEqual(got.completions.find((c) => c.phase === 'spec-review'), { phase: 'spec-review', visit: 1, unresolved: [], verification: [] });

@@ -422,6 +422,18 @@ test('userAnswers reach every later card in the scope', async () => {
   assert.deepEqual((await v.card('verifier', 'plan-review', { purpose: 'verify', round: 4, contested: ['B1'] })).userAnswers, want);
 });
 
+test('a confirmed blocker answer carries the needs-you question, not the done verify attempt', async () => {
+  const text = 'The verifier confirmed blocker B1: x';
+  const { card } = await brainstormJob([
+    started('r3', 'plan-review', 'review', { round: 3 }), ended('r3', { verdict: 'changes', findings: [{ id: 'B1', severity: 'blocker', text: 'x' }] }),
+    started('v1', 'plan-review', 'verify'), ended('v1', { verified: [{ id: 'B1', verified: true, evidence: 'e' }] }),
+    { type: 'needs-you', reason: 'question', detail: { kind: 'blocker', text, evidence: 'B1: e', attemptId: 'v1', phase: 'plan-review', task: null } },
+    { type: 'question-answered', forAttemptId: 'v1', answer: 'leave it' },
+  ]);
+  const fix = await card('planner', 'plan-review', { purpose: 'fix', round: 4, final: true, reviewFindings: REVIEW_FINDINGS });
+  assert.deepEqual(fix.userAnswers, [{ question: text, answer: 'leave it' }]);
+});
+
 test('templates exist and state the rules', async () => {
   const read = (f) => fs.readFile(path.join(templatesDir(), f), 'utf8');
   const has = async (f, ...needles) => { const t = await read(f); for (const n of needles) assert.ok(t.includes(n), `${f}: missing ${n}`); };
