@@ -6,9 +6,9 @@ import path from 'node:path';
 import { tempDir, initRepo, provisionedEvents } from './superagent-helpers.mjs';
 import { slugify, createWorktree } from '../src/superagent/worktree.js';
 import { deriveJob } from '../src/superagent/store.js';
-import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
+import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import {
-  RESULT_FILE, artifactPaths, attemptDir, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
+  ANSWER_TAGS, BRAINSTORM_BATCH, BRIEF_HEADINGS, RESULT_FILE, artifactPaths, attemptDir, headingErrors, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
 } from '../src/superagent/results.js';
 
 const JOB_ID = '12345678-aaaa-bbbb-cccc-000000000000';
@@ -797,4 +797,149 @@ test('blocked: review, task-review, fix and verify workers can ask a question; w
     const done = await f.check(f.result(output, sha), f.as(attempt));
     assert.equal(done.ok, false, purpose);
   }
+});
+
+async function brainstormFixture(pipeline = defaultConfig().pipeline) {
+  const f = await fixture({ commitSpec: false, pipeline });
+  const brief = artifactPaths(f.job).brief;
+  const result = (over = {}) => f.goodResult({ phaseId: 'brainstorm', artifacts: [], evidence: { commits: [] }, ...over });
+  const as = (attempt) => ({ phase: f.job.pipeline.find((p) => p.phase === 'brainstorm'), expect: { phaseId: 'brainstorm' }, attempt });
+  return { ...f, brief, result, as };
+}
+
+const BOTH_HEADINGS = '# Brief\n\nBuild hello.\n\n## Assumptions made for you\n\n- Q1: none.\n\n## Your answers\n\n- none\n';
+const answer = (id, over = {}) => ({ id, tag: 'from-idea', answer: `Answer to ${id}`, reason: 'The idea says so.', ...over });
+
+test('brainstorm constants are exported verbatim', () => {
+  assert.equal(BRAINSTORM_BATCH, 5);
+  assert.deepEqual(ANSWER_TAGS, ['from-idea', 'from-project', 'assumed']);
+  assert.deepEqual(BRIEF_HEADINGS, ['Assumptions made for you', 'Your answers']);
+  assert.deepEqual(headingErrors('## Assumptions made for you\n##  Your answers  \n', 'brief'), []);
+  assert.deepEqual(headingErrors('# Your answers\n', 'spec'), [
+    'spec is missing the heading "## Assumptions made for you"',
+    'spec is missing the heading "## Your answers"',
+  ]);
+});
+
+test('requiredOutputs: ask is the brainstorm phase outputs, answer has none', () => {
+  const job = deriveJob(provisionedEvents({ jobId: JOB_ID, slug: 'add-hello-12345678', createdDate: '2026-11-03', pipeline: defaultConfig().pipeline }));
+  const phase = job.pipeline.find((p) => p.phase === 'brainstorm');
+  assert.deepEqual(requiredOutputs(job, { phase, purpose: 'ask' }), [artifactPaths(job).brief]);
+  assert.deepEqual(requiredOutputs(job, { phase, purpose: 'answer' }), []);
+});
+
+test('ask with questions needs no outputs', async () => {
+  const f = await brainstormFixture();
+  const questions = [{ id: 'Q1', text: 'Who uses it?' }];
+  const v = await f.check(f.result({ questions }), f.as({ purpose: 'ask', final: false, askedIds: [] }));
+  assert.equal(v.ok, true, JSON.stringify(v.errors));
+  assert.deepEqual(outcomeForResult(v.result), { outcome: 'done', questions });
+});
+
+test('ask questions are validated', async () => {
+  const f = await brainstormFixture();
+  const attempt = { purpose: 'ask', final: false, askedIds: ['Q1'] };
+  const errorsFor = async (questions) => {
+    const v = await f.check(f.result({ questions }), f.as(attempt));
+    assert.equal(v.ok, false, JSON.stringify(questions));
+    return v.errors.join('\n');
+  };
+  const six = [2, 3, 4, 5, 6, 7].map((n) => ({ id: `Q${n}`, text: `Question ${n}?` }));
+  assert.match(await errorsFor(six), /at most 5/);
+  assert.match(await errorsFor([{ id: 'X1', text: 'Who?' }]), /id/);
+  assert.match(await errorsFor([{ id: 'Q2', text: 'Who?' }, { id: 'Q2', text: 'Why?' }]), /duplicate/);
+  assert.match(await errorsFor([{ id: 'Q1', text: 'Who?' }]), /already asked/);
+  assert.match(await errorsFor([{ id: 'Q2', text: '  ' }]), /text/);
+  assert.match(await errorsFor('Q2'), /questions must be an array/);
+});
+
+test('a final ask may not ask questions', async () => {
+  const f = await brainstormFixture();
+  const v = await f.check(f.result({ questions: [{ id: 'Q1', text: 'Who?' }] }), f.as({ purpose: 'ask', final: true, askedIds: [] }));
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.includes('a final brainstorm turn must write the brief, not ask questions'), JSON.stringify(v.errors));
+});
+
+test('ask with no questions needs the brief with both headings', async () => {
+  const f = await brainstormFixture();
+  const attempt = { purpose: 'ask', final: true, askedIds: ['Q1'] };
+  const missingBrief = await f.check(f.result({ questions: [] }), f.as(attempt));
+  assert.equal(missingBrief.ok, false);
+  assert.ok(missingBrief.errors.includes(`missing output: ${f.brief}`), JSON.stringify(missingBrief.errors));
+
+  const partial = await f.commit(f.brief, '# Brief\n\n## Assumptions made for you\n\n- Q1: none.\n', 'brief');
+  const noAnswers = await f.check(f.result({ questions: [], artifacts: [f.brief], evidence: { commits: [partial] } }), f.as(attempt));
+  assert.equal(noAnswers.ok, false);
+  assert.deepEqual(noAnswers.errors, ['brief is missing the heading "## Your answers"']);
+
+  const full = await f.commit(f.brief, BOTH_HEADINGS, 'brief headings');
+  const ok = await f.check(f.result({ questions: [], artifacts: [f.brief], evidence: { commits: [full] } }), f.as(attempt));
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  assert.deepEqual(outcomeForResult(ok.result), { outcome: 'done', questions: [] });
+});
+
+test('a blocked ask is refused', async () => {
+  const f = await brainstormFixture();
+  const v = await f.check(f.result({ status: 'blocked', question: 'q' }), f.as({ purpose: 'ask', final: false, askedIds: [] }));
+  assert.equal(v.ok, false);
+  assert.deepEqual(v.errors, ['the brainstormer asks through questions, not a blocked result']);
+});
+
+test('answer results must cover exactly the open questions', async () => {
+  const f = await brainstormFixture();
+  const attempt = { purpose: 'answer', openQuestions: [{ id: 'Q1', text: 'Who?' }, { id: 'Q2', text: 'Which database?' }] };
+  const bad = async (answers, pattern) => {
+    const v = await f.check(f.result({ answers }), f.as(attempt));
+    assert.equal(v.ok, false, JSON.stringify(answers));
+    assert.match(v.errors.join('\n'), pattern);
+  };
+  await bad([answer('Q1')], /Q2/);
+  await bad([answer('Q1'), answer('Q2'), answer('Q3')], /Q3/);
+  await bad([answer('Q1'), answer('Q1'), answer('Q2')], /duplicate/);
+  await bad([answer('Q1', { tag: 'from-you' }), answer('Q2')], /tag/);
+  await bad([answer('Q1', { reason: undefined }), answer('Q2')], /reason/);
+  await bad([answer('Q1', { answer: '' }), answer('Q2')], /answer must/);
+  await bad(undefined, /answers must be an array/);
+
+  const answers = [answer('Q1'), answer('Q2', { tag: 'assumed', reason: 'Nothing points either way; SQLite is the safe default.' })];
+  const v = await f.check(f.result({ answers }), f.as(attempt));
+  assert.equal(v.ok, true, JSON.stringify(v.errors));
+  assert.deepEqual(outcomeForResult(v.result), { outcome: 'done', answers });
+});
+
+test('a stand-in escalation', async () => {
+  const f = await brainstormFixture();
+  const attempt = { purpose: 'answer', openQuestions: [{ id: 'Q1', text: 'Who?' }, { id: 'Q2', text: 'Which database?' }] };
+  const escalation = (over = {}) => f.result({ status: 'blocked', question: 'Which database?', escalated: 'Q2', answers: [answer('Q1')], ...over });
+  const v = await f.check(escalation(), f.as(attempt));
+  assert.equal(v.ok, true, JSON.stringify(v.errors));
+  assert.deepEqual(outcomeForResult(v.result), { outcome: 'question', question: 'Which database?', answers: [answer('Q1')], escalated: 'Q2' });
+
+  for (const [over, pattern] of [
+    [{ escalated: 'Q9' }, /Q9/],
+    [{ question: null }, /question/],
+    [{ answers: [answer('Q1'), answer('Q2')] }, /Q2/],
+    [{ answers: [] }, /Q1/],
+    [{ escalated: undefined }, /escalated/],
+  ]) {
+    const bad = await f.check(escalation(over), f.as(attempt));
+    assert.equal(bad.ok, false, JSON.stringify(over));
+    assert.match(bad.errors.join('\n'), pattern, JSON.stringify(over));
+  }
+  const doneEscalated = await f.check(f.result({ answers: [answer('Q1'), answer('Q2')], escalated: 'Q2' }), f.as(attempt));
+  assert.equal(doneEscalated.ok, false);
+  assert.match(doneEscalated.errors.join('\n'), /escalated/);
+});
+
+test('spec carries the brief headings when the job brainstorms', async () => {
+  const specContent = '# Design\n\n## Your answers\n\n- Q1: SQLite.\n';
+  const attempt = { purpose: 'author' };
+  const brainstorms = await fixture({ specContent, pipeline: defaultConfig().pipeline });
+  const v = await brainstorms.check(brainstorms.goodResult(), { attempt });
+  assert.equal(v.ok, false);
+  assert.deepEqual(v.errors, ['spec is missing the heading "## Assumptions made for you"']);
+
+  const m2 = await fixture({ specContent, pipeline: MILESTONE_2_PIPELINE });
+  const plain = await m2.check(m2.goodResult(), { attempt });
+  assert.equal(plain.ok, true, JSON.stringify(plain.errors));
 });

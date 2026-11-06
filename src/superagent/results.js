@@ -7,7 +7,8 @@
 // committed by a listed commit and unchanged since). Plan 3 decisions 5, 12,
 // 13, 15, 16 and 17 add tasks.json validation, per-purpose schemas, required
 // and revise outputs and implement evidence, selected by the optional
-// `attempt` passed to validateResult.
+// `attempt` passed to validateResult. Plan 5 decisions 4 and 11 add the
+// brainstorm's `ask` and `answer` purposes and the brief headings check.
 //
 // Everything in result.json is untrusted worker output. Identity is compared
 // field by field against the attempt that was launched, so a result copied
@@ -21,6 +22,9 @@ import { failureSignature } from './sequencer.js';
 import { defaultGit } from './worktree.js';
 
 export const RESULT_FILE = 'result.json';
+export const BRAINSTORM_BATCH = 5;
+export const ANSWER_TAGS = ['from-idea', 'from-project', 'assumed'];
+export const BRIEF_HEADINGS = ['Assumptions made for you', 'Your answers'];
 
 const IDENTITY_FIELDS = ['jobId', 'phaseId', 'taskId', 'attemptId'];
 const STATUSES = ['done', 'blocked', 'failed'];
@@ -28,6 +32,7 @@ const VERDICTS = ['approve', 'changes'];
 const SEVERITIES = ['blocker', 'major', 'minor'];
 const SUMMARY_WORDS = 60;
 const SHA_RE = /^[0-9a-f]{4,64}$/i;
+const QUESTION_ID_RE = /^Q[1-9][0-9]*$/;
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim() !== '';
@@ -88,7 +93,8 @@ const PURPOSE_OUTPUT = {
 };
 
 export function requiredOutputs(job, { phase, purpose, round = null, task = null }) {
-  if (purpose === 'author' || purpose === 'test') return outputPaths(job, phase?.outputs ?? []);
+  if (purpose === 'author' || purpose === 'ask' || purpose === 'test') return outputPaths(job, phase?.outputs ?? []);
+  if (purpose === 'answer') return [];
   if (!PURPOSE_OUTPUT[purpose]) throw new Error(`superagent: unknown attempt purpose ${JSON.stringify(purpose)}`);
   const key = PURPOSE_OUTPUT[purpose](task != null);
   const rel = reviewPaths(job, { phase: phase?.phase ?? null, round, taskId: task })[key];
@@ -349,8 +355,66 @@ function testErrors(value, job) {
   return findingErrors(value.findings, { job, disposition: false });
 }
 
+// A done ask either asks a batch of new questions or, with `questions: []`,
+// publishes the brief.
+function askErrors(value, attempt) {
+  if (value.status === 'blocked') return ['the brainstormer asks through questions, not a blocked result'];
+  if (value.status !== 'done') return [];
+  if (!Array.isArray(value.questions)) return ['questions must be an array'];
+  const errors = [];
+  if (attempt.final && value.questions.length > 0) errors.push('a final brainstorm turn must write the brief, not ask questions');
+  if (value.questions.length > BRAINSTORM_BATCH) errors.push(`questions may list at most ${BRAINSTORM_BATCH} per turn`);
+  const asked = new Set(attempt.askedIds ?? []);
+  const seen = new Set();
+  value.questions.forEach((q, i) => {
+    const at = `questions[${i}]`;
+    if (!isPlainObject(q)) return errors.push(`${at} must be an object`);
+    if (typeof q.id !== 'string' || !QUESTION_ID_RE.test(q.id)) errors.push(`${at}.id must be Q<n>: ${JSON.stringify(q.id)}`);
+    else if (seen.has(q.id)) errors.push(`${at}: duplicate id ${JSON.stringify(q.id)}`);
+    else if (asked.has(q.id)) errors.push(`${at}: ${JSON.stringify(q.id)} was already asked`);
+    if (typeof q.id === 'string') seen.add(q.id);
+    if (!isNonEmptyString(q.text)) errors.push(`${at}.text must be a non-empty string`);
+  });
+  return errors;
+}
+
+// Decision 4: a stand-in escalates one open question as blocked, with a
+// question for the user, and answers every other open question.
+function answerErrors(value, attempt) {
+  if (value.status !== 'done' && value.status !== 'blocked') return [];
+  if (!Array.isArray(attempt.openQuestions)) throw new Error('superagent: validateResult needs attempt.openQuestions for answer attempts');
+  const open = attempt.openQuestions.map((q) => q.id);
+  const errors = [];
+  let escalated = null;
+  if (value.status === 'blocked') {
+    if (!isNonEmptyString(value.question)) errors.push('a blocked answer result must carry a question for the user');
+    if (!open.includes(value.escalated)) errors.push(`escalated must name an open question: ${JSON.stringify(value.escalated)}`);
+    else escalated = value.escalated;
+  } else if (value.escalated != null) {
+    errors.push('escalated is only allowed with status blocked');
+  }
+  if (!Array.isArray(value.answers)) return [...errors, 'answers must be an array'];
+  const seen = new Set();
+  value.answers.forEach((a, i) => {
+    const at = `answers[${i}]`;
+    if (!isPlainObject(a)) return errors.push(`${at} must be an object`);
+    if (!isNonEmptyString(a.id)) errors.push(`${at}.id must be a non-empty string`);
+    else if (seen.has(a.id)) errors.push(`${at}: duplicate id ${JSON.stringify(a.id)}`);
+    else if (a.id === escalated) errors.push(`${at}: ${JSON.stringify(a.id)} is escalated, so it is not answered`);
+    else if (!open.includes(a.id)) errors.push(`${at}: ${JSON.stringify(a.id)} is not an open question`);
+    if (typeof a.id === 'string') seen.add(a.id);
+    if (!ANSWER_TAGS.includes(a.tag)) errors.push(`${at}.tag must be one of ${ANSWER_TAGS.join('|')}`);
+    if (!isNonEmptyString(a.answer)) errors.push(`${at}.answer must be a non-empty string`);
+    if (!isNonEmptyString(a.reason)) errors.push(`${at}.reason must be a non-empty string`);
+  });
+  for (const id of open) if (id !== escalated && !seen.has(id)) errors.push(`answers is missing open question ${JSON.stringify(id)}`);
+  return errors;
+}
+
 function purposeErrors(value, { attempt, job }) {
   if (attempt.purpose === 'test') return testErrors(value, job);
+  if (attempt.purpose === 'ask') return askErrors(value, attempt);
+  if (attempt.purpose === 'answer') return answerErrors(value, attempt);
   // A blocked worker publishes a question (or nothing) instead of its purpose fields.
   if (value.status === 'blocked') return [];
   switch (attempt.purpose) {
@@ -551,6 +615,34 @@ async function tasksFileErrors(job) {
   return parsed.ok ? [] : parsed.errors.map((e) => `${rel}: ${e}`);
 }
 
+export function headingErrors(text, label) {
+  return BRIEF_HEADINGS
+    .filter((h) => !new RegExp(`^##\\s+${h}\\s*$`, 'm').test(text))
+    .map((h) => `${label} is missing the heading "## ${h}"`);
+}
+
+const asksQuestions = (value, attempt) => attempt?.purpose === 'ask' && Array.isArray(value.questions) && value.questions.length > 0;
+
+// Decision 11. The brief, and the spec of a job that brainstorms, must carry
+// both brief headings. Fix rounds aren't checked.
+function headingsTarget(job, phase, attempt) {
+  if (attempt?.purpose === 'ask') return 'brief';
+  const brainstorms = job.pipeline.some((p) => p.kind === 'brainstorm');
+  if (attempt?.purpose === 'author' && brainstorms && (phase?.outputs ?? []).includes('spec')) return 'spec';
+  return null;
+}
+
+async function artifactHeadingErrors(job, key) {
+  const rel = artifactPaths(job)[key];
+  let text;
+  try {
+    text = await readFile(path.join(primaryRepo(job).worktree, ...rel.split('/')), 'utf8');
+  } catch (err) {
+    return [`could not read ${rel}: ${err.message}`];
+  }
+  return headingErrors(text, key);
+}
+
 function truncateSummary(summary) {
   const words = summary.trim().split(/\s+/);
   if (words.length <= SUMMARY_WORDS) return summary;
@@ -558,8 +650,8 @@ function truncateSummary(summary) {
 }
 
 // `attempt` ({ purpose, round, final, task, taskDef?, contested?,
-// reviewFindings? }) selects the per-purpose schema and the required outputs;
-// without it the Plan 2 rules apply unchanged.
+// reviewFindings?, askedIds?, openQuestions? }) selects the per-purpose schema
+// and the required outputs; without it the Plan 2 rules apply unchanged.
 export async function validateResult(value, { expected, phase, job, git = defaultGit, attempt = null }) {
   if (!isPlainObject(value)) return { ok: false, errors: ['result is not a JSON object'] };
   const errors = identityErrors(value, expected);
@@ -570,9 +662,12 @@ export async function validateResult(value, { expected, phase, job, git = defaul
   const { errors: commitErrors, resolved } = await resolveCommits(schema.commits, { job, git });
   if (commitErrors.length) return { ok: false, errors: commitErrors };
 
-  if (value.status === 'done') {
+  if (value.status === 'done' && !asksQuestions(value, attempt)) {
     const missing = await outputErrors({ phase, job, commits: resolved, git, attempt });
     if (missing.length) return { ok: false, errors: missing };
+    const key = headingsTarget(job, phase, attempt);
+    const headings = key ? await artifactHeadingErrors(job, key) : [];
+    if (headings.length) return { ok: false, errors: headings };
   }
 
   return {
@@ -585,7 +680,7 @@ export async function validateResult(value, { expected, phase, job, git = defaul
 // summary's first line, so repeated-error can trip on it.
 export function outcomeForResult(result) {
   const extra = {};
-  for (const key of ['verdict', 'findings', 'verified']) if (result[key] !== undefined) extra[key] = result[key];
+  for (const key of ['verdict', 'findings', 'verified', 'questions', 'answers', 'escalated']) if (result[key] !== undefined) extra[key] = result[key];
   if (result.status === 'done') return { outcome: 'done', ...extra };
   if (result.status === 'blocked' && result.question) return { outcome: 'question', question: result.question, ...extra };
   const reason = result.status === 'blocked' ? 'blocked' : 'failed';
