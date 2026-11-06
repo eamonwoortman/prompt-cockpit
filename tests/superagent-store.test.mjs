@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createSuperagentStore, deriveJob } from '../src/superagent/store.js';
 import { tempDir, jobCreated, provisionedEvents, taskCreated, ev } from './superagent-helpers.mjs';
-import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
+import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 
 const quiet = () => {};
 const stamp = (events) => events.map((e, i) => ({ seq: i + 1, at: 1000 + i, ...e }));
@@ -318,4 +318,58 @@ test('store.append accepts router-decided', async () => {
   await store.append('j1', { type: 'router-decided', forAttemptId: 'a1', action: 'retry', note: 'go', ok: true, error: null, model: 'm', request: { estimatedTokens: 1, truncated: [] }, usage: null, latencyMs: 1 });
   await store.flush();
   assert.equal((await createSuperagentStore({ rootDir, logImpl: quiet }).load('j1')).routerDecisions[0].action, 'retry');
+});
+
+const asked = [{ type: 'needs-you', reason: 'question', detail: { attemptId: 'a1', question: 'Q?' } }];
+
+test('question-answered returns the job to running and survives replay', async () => {
+  const events = stamp([jobCreated(), { type: 'job-provisioned' }, ...asked, { type: 'question-answered', forAttemptId: 'a1', answer: 'yes' }]);
+  const job = deriveJob(events);
+  assert.equal(job.state, 'running');
+  assert.equal(job.reason, null);
+  assert.deepEqual(job.answers, [{ forAttemptId: 'a1', answer: 'yes', at: events[events.length - 1].at }]);
+  const rootDir = await tempDir('sa-store-');
+  const store = createSuperagentStore({ rootDir, logImpl: quiet });
+  const written = [];
+  for (const { seq, at, ...e } of events) written.push(await store.append('j1', e));
+  const fresh = await createSuperagentStore({ rootDir, logImpl: quiet }).load('j1');
+  assert.deepEqual(fresh, deriveJob(written));
+  assert.equal(fresh.state, 'running');
+  assert.deepEqual(fresh.answers.map((x) => x.answer), ['yes']);
+});
+
+test('question-answered is ignored unless it answers the open question', () => {
+  const base = [jobCreated(), { type: 'job-provisioned' }];
+  const wrongId = deriveJob(stamp([...base, ...asked, { type: 'question-answered', forAttemptId: 'zz', answer: 'x' }]));
+  assert.equal(wrongId.state, 'needs-you');
+  assert.deepEqual(wrongId.answers, []);
+  const running = deriveJob(stamp([...base, { type: 'question-answered', forAttemptId: 'a1', answer: 'x' }]));
+  assert.equal(running.state, 'running');
+  assert.deepEqual(running.answers, []);
+  const stuck = deriveJob(stamp([...base, { type: 'needs-you', reason: 'stuck', detail: { attemptId: 'a1' } }, { type: 'question-answered', forAttemptId: 'a1', answer: 'x' }]));
+  assert.equal(stuck.state, 'needs-you');
+  assert.equal(stuck.reason, 'stuck');
+  assert.deepEqual(stuck.answers, []);
+  const twice = deriveJob(stamp([...base, ...asked, { type: 'question-answered', forAttemptId: 'a1', answer: 'one' }, { type: 'question-answered', forAttemptId: 'a1', answer: 'two' }]));
+  assert.equal(twice.answers.length, 1);
+  assert.equal(twice.answers[0].answer, 'one');
+});
+
+test('attempt-ended carries brainstorm fields and tokens', () => {
+  const qs = [{ id: 'Q1', text: 't' }];
+  const job = deriveJob(stamp([jobCreated(), { type: 'job-provisioned' }, started('a1', 'brainstorm'), ended('a1', 'done', { questions: qs, answers: null, escalated: null, tokens: 1234 }), started('a2', 'brainstorm'), ended('a2')]));
+  const [a1, a2] = job.attempts;
+  assert.deepEqual([a1.questions, a1.answers, a1.escalated, a1.tokens], [qs, null, null, 1234]);
+  assert.deepEqual([a2.questions, a2.answers, a2.escalated, a2.tokens], [null, null, null, null]);
+});
+
+test('a brainstorm phase advances only on an ask with no questions', () => {
+  const pipeline = defaultConfig().pipeline;
+  const run = (...more) => deriveJob(stamp([jobCreated({ pipeline }), { type: 'job-provisioned' }, ...more]));
+  const ask = (id, over) => [started(id, 'brainstorm', { role: 'brainstormer', purpose: 'ask' }), ended(id, 'done', over)];
+  assert.equal(run(...ask('a1', { questions: [{ id: 'Q1', text: 't' }] })).phaseIndex, 0);
+  assert.equal(run(started('a1', 'brainstorm', { purpose: 'answer' }), ended('a1')).phaseIndex, 0);
+  const done = run(...ask('a1', { questions: [] }));
+  assert.equal(done.phaseIndex, 1);
+  assert.equal(done.phaseId, 'spec');
 });

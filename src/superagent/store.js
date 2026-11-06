@@ -20,7 +20,7 @@ import { writeJsonAtomic } from '../json-store.js';
 import { isSafeSessionId } from '../safe-id.js';
 import { defaultConfig, defaultSuperagentRoot } from './config.js';
 
-export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided'];
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered'];
 
 const NEWLINE = 0x0a;
 
@@ -58,6 +58,7 @@ export function deriveJob(events) {
     visits: {},
     completions: [],
     routerDecisions: [],
+    answers: [],
     lastSeq: first.seq ?? null,
   };
   const attempt = (id) => job.attempts.find((a) => a.attemptId === id);
@@ -79,6 +80,12 @@ export function deriveJob(events) {
       case 'job-provisioned': setState('running'); break;
       case 'job-failed': setState('failed', 'job-failed', { error: ev.error }); break;
       case 'needs-you': setState('needs-you', ev.reason ?? null, ev.detail ?? null); break;
+      case 'question-answered':
+        if (job.state !== 'needs-you' || job.reason !== 'question' || job.detail?.attemptId !== ev.forAttemptId) break;
+        if (job.answers.some((x) => x.forAttemptId === ev.forAttemptId)) break;
+        job.answers.push({ forAttemptId: ev.forAttemptId, answer: ev.answer, at: ev.at ?? null });
+        setState('running');
+        break;
       case 'job-accepted': setState('done'); break;
       case 'job-stopped': setState('stopped'); break;
       case 'attempt-started':
@@ -110,6 +117,10 @@ export function deriveJob(events) {
           findings: null,
           commits: [],
           verified: null,
+          questions: null,
+          answers: null,
+          escalated: null,
+          tokens: null,
         });
         break;
       case 'attempt-session': {
@@ -137,9 +148,14 @@ export function deriveJob(events) {
           findings: ev.findings ?? null,
           commits: ev.commits ?? [],
           verified: ev.verified ?? null,
+          questions: ev.questions ?? null,
+          answers: ev.answers ?? null,
+          escalated: ev.escalated ?? null,
+          tokens: ev.tokens ?? null,
         });
         const current = job.pipeline[job.phaseIndex];
         if (ev.outcome === 'done' && current?.kind === 'author' && a.phase === current.phase) job.phaseIndex++;
+        if (ev.outcome === 'done' && current?.kind === 'brainstorm' && a.phase === current.phase && a.purpose === 'ask' && (ev.questions ?? []).length === 0) job.phaseIndex++;
         break;
       }
       case 'tasks-loaded':
