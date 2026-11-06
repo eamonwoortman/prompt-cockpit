@@ -18,6 +18,8 @@
 // router-decided for that attempt. Cap, repeated-error and back-off are
 // evaluated before it; concurrency after it.
 import path from 'node:path';
+import { STAND_IN_ROLE } from './config.js';
+import { ANSWER_TAGS } from './results.js';
 
 export const CONSUMING_OUTCOMES = new Set(['done', 'failed', 'question']);
 // createJob's gate (index.js).
@@ -63,8 +65,10 @@ export function failureSignature(reason, firstLine = '') {
 // Plan 5 (docs/superpowers/plans/2026-11-06-superagent-p5-brainstorm.md,
 // Decisions 8-10): an answered question resumes the scope that asked it, and a
 // scope's answered questions are capped at limits.questionsPerScope.
+const answerRecord = (job, attemptId) => (job.answers ?? []).find((a) => a.forAttemptId === attemptId) ?? null;
+
 export function answerFor(job, attemptId) {
-  return (job.answers ?? []).find((a) => a.forAttemptId === attemptId)?.answer ?? null;
+  return answerRecord(job, attemptId)?.answer ?? null;
 }
 
 export function answeredInScope(job, phaseId, taskId = null) {
@@ -217,7 +221,7 @@ export function buildFixTask(job, attemptId, rawFindings) {
   };
 }
 
-function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null, model: modelOverride = null, handoff = null }) {
+function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null, model: modelOverride = null, handoff = null, openQuestions = null, askedIds = null }) {
   const model = job.models[role];
   return {
     type: 'launch',
@@ -237,6 +241,8 @@ function launch(job, { phase, task = null, role, attempts, recovery, previousAtt
     reviewFindings,
     contested,
     handoff,
+    openQuestions,
+    askedIds,
   };
 }
 
@@ -450,6 +456,97 @@ function perTaskAction(job, phase, ctx) {
   });
 }
 
+// Decisions 5 and 14: every brainstorm question in the order asked, settled by
+// the stand-in's answers or, for an escalated one, by the user's.
+function exchangesOf(job, attempts) {
+  const entries = new Map();
+  const settle = (id, fields) => {
+    const entry = entries.get(id);
+    if (entry && entry.tag === null) Object.assign(entry, fields);
+  };
+  for (const a of attempts) {
+    if (a.purpose === 'ask' && a.outcome === 'done') {
+      for (const q of a.questions ?? []) {
+        entries.set(q.id, { id: q.id, text: q.text, askedBy: a.attemptId, askedSession: a.sessionId ?? null, answer: null, tag: null, reason: null, answeredBy: null, answeredSession: null, at: null });
+      }
+    } else if (a.purpose === 'answer' && (a.outcome === 'done' || a.outcome === 'question')) {
+      for (const x of a.answers ?? []) {
+        settle(x.id, { answer: x.answer, tag: x.tag, reason: x.reason, answeredBy: a.attemptId, answeredSession: a.sessionId ?? null, at: a.endedAt });
+      }
+      const user = a.escalated == null ? null : answerRecord(job, a.attemptId);
+      if (user) settle(a.escalated, { answer: user.answer, tag: 'from-you', reason: null, answeredBy: a.attemptId, answeredSession: null, at: user.at });
+    }
+  }
+  return [...entries.values()];
+}
+
+export function brainstormLog(job) {
+  const phase = job.pipeline.find((p) => p.kind === 'brainstorm');
+  return phase ? exchangesOf(job, attemptsFor(job, phase.phase)) : [];
+}
+
+// The latest done ask's questions the log has not settled yet.
+function openQuestionsOf(log, attempts) {
+  const ask = attempts.findLast((a) => a.purpose === 'ask' && a.outcome === 'done');
+  return log.filter((e) => ask && e.askedBy === ask.attemptId && e.tag === null).map(({ id, text }) => ({ id, text }));
+}
+
+// Decision 1: open questions go to the stand-in as one batch; otherwise the
+// brainstormer asks, on a final turn once the exchange or token cap is reached.
+function brainstormTurn(job, phase, attempts) {
+  const log = exchangesOf(job, attempts);
+  const open = openQuestionsOf(log, attempts);
+  if (open.length > 0) return { role: STAND_IN_ROLE, purpose: 'answer', final: false, openQuestions: open, askedIds: null };
+  const { brainstormExchanges, brainstormTokens } = job.limits;
+  const exchanges = log.filter((e) => ANSWER_TAGS.includes(e.tag)).length;
+  const tokens = attempts.reduce((sum, a) => sum + (a.tokens ?? 0), 0);
+  const final = exchanges >= brainstormExchanges || (brainstormTokens != null && tokens >= brainstormTokens);
+  return { role: phase.role, purpose: 'ask', final, openQuestions: null, askedIds: log.map((e) => e.id) };
+}
+
+// Guard order mirrors scopeAction: in-flight, open escalation (question cap
+// first), failed-attempt cap, repeated error, back-off, routing, concurrency.
+function brainstormAction(job, phase, ctx) {
+  const { now, liveSessions, maxConcurrentSessions } = ctx;
+  const attempts = attemptsFor(job, phase.phase);
+  if (attempts.some((a) => !a.outcome)) return { type: 'none' };
+
+  const last = attempts[attempts.length - 1];
+  const stuck = (why, extra) => stuckAction(phase, null, why, last, extra);
+  if (last?.outcome === 'question' && answerFor(job, last.attemptId) == null) {
+    if (answeredInScope(job, phase.phase) >= questionCap(job)) return stuck('question-cap');
+    const entry = exchangesOf(job, attempts).find((e) => e.id === last.escalated) ?? null;
+    return {
+      type: 'needs-you',
+      reason: 'question',
+      detail: {
+        kind: 'stand-in',
+        attemptId: last.attemptId,
+        question: last.question,
+        brainstormQuestion: entry && { id: entry.id, text: entry.text },
+        reason: last.summary,
+        record: { jobId: job.jobId, questionId: last.escalated, askedBy: entry?.askedBy ?? null, attemptId: last.attemptId },
+        phase: phase.phase,
+        task: null,
+      },
+    };
+  }
+
+  if (attempts.filter((a) => a.outcome === 'failed').length >= attemptCap(job.limits, null)) return stuck('attempt-cap');
+  const guard = retryGuard(attempts, job.limits, now, stuck);
+  if (guard) return guard;
+
+  // A settled turn (done, or an answered escalation) is not retried: the other side runs next.
+  const recovery = last != null && last.outcome !== 'done' && last.outcome !== 'question';
+  const { role, ...turn } = brainstormTurn(job, phase, attempts);
+  const launchArgs = { phase, task: null, role, attempts, recovery, previousAttemptId: recovery ? last.attemptId : null, round: null, ...turn };
+  const override = recovery ? routeOrApply(job, ctx, { last, role, launchArgs, stuck }) : null;
+  if (override?.type) return override;
+
+  if (liveSessions >= maxConcurrentSessions) return { type: 'wait', until: null, why: 'concurrency' };
+  return launch(job, { ...launchArgs, ...override });
+}
+
 // The launch action's attempt context, rebuilt from the derived job for an
 // attempt that has no live record (reconcile), so its result is validated by
 // the same rules as a live finish. Only attempts before it in its scope count,
@@ -459,8 +556,9 @@ export function attemptContext(job, attempt) {
   const task = attempt.task ?? null;
   const round = attempt.round ?? null;
   const at = job.attempts.findIndex((a) => a.attemptId === attempt.attemptId);
-  const done = (at < 0 ? job.attempts : job.attempts.slice(0, at))
-    .filter((a) => a.phase === attempt.phase && (a.task ?? null) === task && a.outcome === 'done');
+  const before = (at < 0 ? job.attempts : job.attempts.slice(0, at))
+    .filter((a) => a.phase === attempt.phase && (a.task ?? null) === task);
+  const done = before.filter((a) => a.outcome === 'done');
   const phase = job.pipeline.find((p) => p.phase === attempt.phase);
 
   const state = () => loopState(done, phase.kind === 'per-task' ? taskLoopOptions(job, phase) : reviewLoopOptions(job, phase));
@@ -479,6 +577,13 @@ export function attemptContext(job, attempt) {
     const launched = state();
     if (launched.type === 'launch' && launched.purpose === 'verify') contested = launched.contested;
   }
+  let openQuestions = null;
+  let askedIds = null;
+  if (purpose === 'ask' || purpose === 'answer') {
+    const log = exchangesOf(job, before);
+    if (purpose === 'answer') openQuestions = openQuestionsOf(log, before);
+    else askedIds = log.map((e) => e.id);
+  }
   return {
     purpose,
     round,
@@ -487,6 +592,8 @@ export function attemptContext(job, attempt) {
     taskDef: task == null ? null : ((job.tasks ?? []).find((t) => t.id === task) ?? null),
     reviewFindings,
     contested,
+    openQuestions,
+    askedIds,
   };
 }
 
@@ -497,5 +604,6 @@ export function nextAction(job, ctx) {
   if (phase.kind === 'human') return { type: 'needs-you', reason: 'ready-to-try', detail: { phase: phase.phase } };
   if (phase.kind === 'review') return reviewAction(job, phase, ctx);
   if (phase.kind === 'per-task') return perTaskAction(job, phase, ctx);
+  if (phase.kind === 'brainstorm') return brainstormAction(job, phase, ctx);
   return authorAction(job, phase, ctx);
 }

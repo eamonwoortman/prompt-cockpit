@@ -4,7 +4,7 @@ import path from 'node:path';
 import { deriveJob } from '../src/superagent/store.js';
 import { outcomeForResult } from '../src/superagent/results.js';
 import * as sequencer from '../src/superagent/sequencer.js';
-import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
+import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import { ev, jobCreated, provisionedEvents, taskCreated } from './superagent-helpers.mjs';
 
 const { attemptCap, attemptsFor, backoffMs, failureSignature, nextAction } = sequencer;
@@ -13,7 +13,7 @@ const { reviewLoop, pickTask, taskStatus, routeTestFailure, buildFixTask } = seq
 const T0 = 1_000_000;
 const ctx = (over = {}) => ({ now: T0, liveSessions: 0, maxConcurrentSessions: 3, ...over });
 const limits = jobCreated().limits;
-const AUTHOR_EXTRAS = { purpose: 'author', round: null, final: false, taskDef: null, reviewFindings: null, contested: null, handoff: null };
+const AUTHOR_EXTRAS = { purpose: 'author', round: null, final: false, taskDef: null, reviewFindings: null, contested: null, handoff: null, openQuestions: null, askedIds: null };
 
 const started = (id, n, over = {}) => ({ type: 'attempt-started', attemptId: id, phase: 'spec', task: null, role: 'spec-writer', model: 'claude-opus-5-5', n, recovery: n > 1, previousAttemptId: n > 1 ? `a${n - 1}` : null, dir: '/d', ...over });
 const ended = (id, outcome, over = {}) => ({ type: 'attempt-ended', attemptId: id, outcome, ...over });
@@ -273,7 +273,7 @@ test('reviewLoop: injected failures - two failed reviewers before the first succ
 const atReview = (...specs) => m2(...upTo('spec-review'), ...specs.flatMap(attempt));
 const launchOf = (job, role, over) => ({
   type: 'launch', task: null, role, model: job.models[role].model, effort: job.models[role].effort ?? null, maxTurns: job.models[role].maxTurns,
-  n: 1, recovery: false, previousAttemptId: null, round: null, final: false, taskDef: null, reviewFindings: null, contested: null, handoff: null, ...over,
+  n: 1, recovery: false, previousAttemptId: null, round: null, final: false, taskDef: null, reviewFindings: null, contested: null, handoff: null, openQuestions: null, askedIds: null, ...over,
 });
 
 test('nextAction: with defaults (attemptsPerPhase 3) reviewer 1, fix 1, reviewer 2 is NOT stopped by the cap', () => {
@@ -514,15 +514,15 @@ test('attemptContext rebuilds taskDef, contested and reviewFindings from the job
   const T2 = taskCreated('T2');
 
   const author = m2(started('a1', 1));
-  assert.deepEqual(contextOf(author, 'a1'), { purpose: 'author', round: null, final: false, task: null, taskDef: null, reviewFindings: null, contested: null });
+  assert.deepEqual(contextOf(author, 'a1'), { purpose: 'author', round: null, final: false, task: null, taskDef: null, reviewFindings: null, contested: null, openQuestions: null, askedIds: null });
 
   const implementing = atImplement([T1, T2], ...forTask('T2', [{ purpose: 'implement', outcome: null, id: 'i1' }]));
-  assert.deepEqual(contextOf(implementing, 'i1'), { purpose: 'implement', round: null, final: false, task: 'T2', taskDef: T2, reviewFindings: null, contested: null });
+  assert.deepEqual(contextOf(implementing, 'i1'), { purpose: 'implement', round: null, final: false, task: 'T2', taskDef: T2, reviewFindings: null, contested: null, openQuestions: null, askedIds: null });
 
   const reviewed = [{ purpose: 'implement' }, trev(1, 'changes', [{ ...F('m1', 'blocker'), disposition: 'open' }, F('m2')])];
   const taskFix = atImplement([T1], ...forTask('T1', [...reviewed, { purpose: 'fix', round: 1, outcome: null, id: 'tf1' }]));
   const before = atImplement([T1], ...forTask('T1', reviewed));
-  assert.deepEqual(contextOf(taskFix, 'tf1'), { purpose: 'fix', round: 1, final: false, task: 'T1', taskDef: T1, reviewFindings: [F('m1', 'blocker'), F('m2')], contested: null });
+  assert.deepEqual(contextOf(taskFix, 'tf1'), { purpose: 'fix', round: 1, final: false, task: 'T1', taskDef: T1, reviewFindings: [F('m1', 'blocker'), F('m2')], contested: null, openQuestions: null, askedIds: null });
   assert.deepEqual(contextOf(taskFix, 'tf1').reviewFindings, nextAction(before, ctx()).reviewFindings, 'the same findings the launch action carried');
 
   const phaseFix = atReview(rev(1, 'changes', [F('b1', 'blocker')]), fix(1, { b1: 'fixed' }), rev(2, 'changes', [F('b2', 'major')]), { purpose: 'fix', round: 2, outcome: null, id: 'pf2' });
@@ -531,12 +531,12 @@ test('attemptContext rebuilds taskDef, contested and reviewFindings from the job
 
   const capped = [rev(1, 'changes', [F('b1', 'blocker')]), fix(1, { b1: 'open' }), rev(2, 'changes', [F('b1', 'blocker')]), fix(2, { b1: 'open' }), rev(3, 'changes', [F('b1', 'blocker'), F('b2', 'blocker')]), fix(3, { b1: 'declined: no', b2: 'fixed' }, true)];
   const verifying = atReview(...capped, { purpose: 'verify', outcome: null, id: 'v1' });
-  assert.deepEqual(contextOf(verifying, 'v1'), { purpose: 'verify', round: null, final: false, task: null, taskDef: null, reviewFindings: null, contested: ['b1'] });
+  assert.deepEqual(contextOf(verifying, 'v1'), { purpose: 'verify', round: null, final: false, task: null, taskDef: null, reviewFindings: null, contested: ['b1'], openQuestions: null, askedIds: null });
   assert.deepEqual(contextOf(verifying, 'v1').contested, nextAction(atReview(...capped), ctx()).contested);
 
   const taskCapped = forTask('T1', [{ purpose: 'implement' }, trev(1, 'changes', [F('b1', 'blocker')]), fix(1, { b1: 'fixed' }), trev(2, 'changes', [F('b1', 'blocker')]), fix(2, { b1: 'declined: works as intended' }, true)]);
   const taskVerifying = atImplement([T1], ...taskCapped, ...forTask('T1', [{ purpose: 'verify', outcome: null, id: 'tv1' }]));
-  assert.deepEqual(contextOf(taskVerifying, 'tv1'), { purpose: 'verify', round: null, final: false, task: 'T1', taskDef: T1, reviewFindings: null, contested: ['b1'] });
+  assert.deepEqual(contextOf(taskVerifying, 'tv1'), { purpose: 'verify', round: null, final: false, task: 'T1', taskDef: T1, reviewFindings: null, contested: ['b1'], openQuestions: null, askedIds: null });
 
   const finalFix = atReview(rev(1, 'changes', [F('b1', 'blocker')]), { purpose: 'fix', round: 1, final: true, outcome: null, id: 'ff1' });
   assert.equal(contextOf(finalFix, 'ff1').final, true);
@@ -932,7 +932,167 @@ test('the extra round in a task loop', () => {
 
 test('attemptContext rebuilds the extra-round fix', () => {
   const fixing = extra(...confirmedB1, ...answered('v1'), { purpose: 'fix', round: 2, final: true, outcome: null, id: 'xf2' });
-  assert.deepEqual(contextOf(fixing, 'xf2'), { purpose: 'fix', round: 2, final: true, task: null, taskDef: null, reviewFindings: [B1], contested: null });
+  assert.deepEqual(contextOf(fixing, 'xf2'), { purpose: 'fix', round: 2, final: true, task: null, taskDef: null, reviewFindings: [B1], contested: null, openQuestions: null, askedIds: null });
   const verifying = extra(...confirmedB1, ...answered('v1'), fix(2, { B1: 'fixed' }, true), rev(2, 'changes', [B2]), { purpose: 'verify', round: 2, outcome: null, id: 'xv2' });
   assert.deepEqual(contextOf(verifying, 'xv2').contested, ['B2']);
+});
+
+// Plan 5: the automatic brainstorm (Decisions 1, 4, 5, 8 and 14).
+
+const { brainstormLog } = sequencer;
+const BRAINSTORM_PIPELINE = defaultConfig().pipeline;
+const bs = (over, ...events) => deriveJob([...provisionedEvents({ pipeline: BRAINSTORM_PIPELINE, limits: { ...limits, ...over } }), ...events].map((e, i) => ({ seq: i + 1, at: 1, ...e })));
+const Q1 = { id: 'Q1', text: 'Which database?' };
+const Q2 = { id: 'Q2', text: 'Who signs in?' };
+const Q3 = { id: 'Q3', text: 'Which port?' };
+const Q4 = { id: 'Q4', text: 'Which region?' };
+const bsStarted = (id, purpose, over = {}) => ({
+  type: 'attempt-started', attemptId: id, phase: 'brainstorm', task: null, role: purpose === 'ask' ? 'brainstormer' : 'stand-in', model: 'claude-opus-5-5', n: 1, purpose, dir: `/d/${id}`, ...over,
+});
+const sess = (id) => ({ type: 'attempt-session', attemptId: id, sessionId: `sess-${id}` });
+const askDone = (id, questions, { final = false, ...end } = {}) => [bsStarted(id, 'ask', { final }), sess(id), ended(id, 'done', { questions, at: T0, ...end })];
+const replied = (id, answers, end = {}) => [bsStarted(id, 'answer'), sess(id), ended(id, 'done', { answers, at: T0 + 1, ...end })];
+const escalated = (id, questionId, answers) => [
+  bsStarted(id, 'answer'), sess(id),
+  ended(id, 'question', { question: `Please decide ${questionId}`, escalated: questionId, answers, summary: `${questionId} is a product call`, at: T0 + 2 }),
+];
+const userAnswer = (forAttemptId, answer, at = T0 + 3) => [
+  { type: 'needs-you', reason: 'question', detail: { attemptId: forAttemptId } },
+  { type: 'question-answered', forAttemptId, answer, at },
+];
+const A = (id, tag = 'from-idea') => ({ id, tag, answer: `${id} answer`, reason: `${id} reason` });
+const BS = { phase: 'brainstorm' };
+
+test('brainstorm starts with an ask', () => {
+  const job = bs({});
+  assert.deepEqual(nextAction(job, ctx()), launchOf(job, 'brainstormer', { ...BS, purpose: 'ask', final: false, askedIds: [] }));
+});
+
+test('open questions go to the stand-in', () => {
+  const job = bs({}, ...askDone('b1', [Q1, Q2]));
+  assert.deepEqual(nextAction(job, ctx()), launchOf(job, 'stand-in', { ...BS, n: 2, purpose: 'answer', openQuestions: [Q1, Q2] }));
+});
+
+test('answered batch goes back to the brainstormer', () => {
+  const job = bs({}, ...askDone('b1', [Q1, Q2]), ...replied('s1', [A('Q1'), A('Q2', 'assumed')]));
+  assert.deepEqual(nextAction(job, ctx()), launchOf(job, 'brainstormer', { ...BS, n: 3, purpose: 'ask', askedIds: ['Q1', 'Q2'] }));
+});
+
+test('brainstormLog lists every exchange with tag, reason and record references', () => {
+  assert.deepEqual(brainstormLog(bs({})), []);
+  assert.deepEqual(brainstormLog(build()), [], 'a pipeline without a brainstorm has no log');
+  const open = brainstormLog(bs({}, ...askDone('b1', [Q1])));
+  assert.deepEqual(open, [{ ...Q1, askedBy: 'b1', askedSession: 'sess-b1', answer: null, tag: null, reason: null, answeredBy: null, answeredSession: null, at: null }]);
+
+  const job = bs({}, ...askDone('b1', [Q1, Q2]), ...replied('s1', [A('Q1'), A('Q2', 'assumed')]));
+  const log = brainstormLog(job);
+  assert.deepEqual(log, [
+    { ...Q1, askedBy: 'b1', askedSession: 'sess-b1', answer: 'Q1 answer', tag: 'from-idea', reason: 'Q1 reason', answeredBy: 's1', answeredSession: 'sess-s1', at: T0 + 1 },
+    { ...Q2, askedBy: 'b1', askedSession: 'sess-b1', answer: 'Q2 answer', tag: 'assumed', reason: 'Q2 reason', answeredBy: 's1', answeredSession: 'sess-s1', at: T0 + 1 },
+  ]);
+  const byId = (id) => job.attempts.find((a) => a.attemptId === id);
+  for (const entry of log) {
+    assert.ok(byId(entry.askedBy) && byId(entry.answeredBy));
+    assert.equal(entry.askedSession, byId(entry.askedBy).sessionId);
+    assert.equal(entry.answeredSession, byId(entry.answeredBy).sessionId);
+  }
+  const unknown = bs({}, bsStarted('b1', 'ask'), ended('b1', 'done', { questions: [Q1] }));
+  assert.equal(brainstormLog(unknown)[0].askedSession, null);
+});
+
+test('stand-in escalation waits on the user', () => {
+  const events = [...askDone('b1', [Q1, Q2]), ...escalated('s1', 'Q2', [A('Q1')])];
+  const action = nextAction(bs({}, ...events), ctx());
+  assert.deepEqual(action, {
+    type: 'needs-you',
+    reason: 'question',
+    detail: {
+      kind: 'stand-in',
+      attemptId: 's1',
+      question: 'Please decide Q2',
+      brainstormQuestion: Q2,
+      reason: 'Q2 is a product call',
+      record: { jobId: 'j1', questionId: 'Q2', askedBy: 'b1', attemptId: 's1' },
+      phase: 'brainstorm',
+      task: null,
+    },
+  });
+
+  const job = bs({}, ...events, ...userAnswer('s1', 'Postgres'));
+  assert.equal(job.state, 'running');
+  const log = brainstormLog(job);
+  assert.equal(log[0].tag, 'from-idea');
+  assert.deepEqual(log[1], { ...Q2, askedBy: 'b1', askedSession: 'sess-b1', answer: 'Postgres', tag: 'from-you', reason: null, answeredBy: 's1', answeredSession: null, at: T0 + 3 });
+  const next = nextAction(job, ctx());
+  assert.deepEqual(pick(next, 'type', 'role', 'purpose', 'final', 'askedIds', 'openQuestions', 'recovery', 'previousAttemptId'), {
+    type: 'launch', role: 'brainstormer', purpose: 'ask', final: false, askedIds: ['Q1', 'Q2'], openQuestions: null, recovery: false, previousAttemptId: null,
+  });
+});
+
+test('exchange cap forces a final ask; failed finals end in attempt-cap', () => {
+  const one = [...askDone('b1', [Q1]), ...replied('s1', [A('Q1')])];
+  assert.equal(nextAction(bs({ brainstormExchanges: 2 }, ...one), ctx()).final, false);
+  const two = [...one, ...askDone('b2', [Q2]), ...replied('s2', [A('Q2', 'from-project')])];
+  const final = nextAction(bs({ brainstormExchanges: 2 }, ...two), ctx());
+  assert.deepEqual(pick(final, 'type', 'role', 'purpose', 'final', 'askedIds'), { type: 'launch', role: 'brainstormer', purpose: 'ask', final: true, askedIds: ['Q1', 'Q2'] });
+
+  const fromYou = [...askDone('b1', [Q1, Q2]), ...escalated('s1', 'Q2', [A('Q1')]), ...userAnswer('s1', 'Postgres')];
+  assert.equal(nextAction(bs({ brainstormExchanges: 2 }, ...fromYou), ctx()).final, false, 'from-you answers do not count');
+
+  const failedFinal = (id, signature) => [bsStarted(id, 'ask', { final: true }), ended(id, 'failed', { reason: 'invalid-result', signature, at: T0 })];
+  const retried = nextAction(bs({ brainstormExchanges: 2, attemptsPerPhase: 2 }, ...two, ...failedFinal('f1', 'sig-1')), ctx({ now: T0 + 10 * MIN }));
+  assert.deepEqual(pick(retried, 'type', 'purpose', 'final', 'recovery', 'previousAttemptId'), { type: 'launch', purpose: 'ask', final: true, recovery: true, previousAttemptId: 'f1' });
+  const capped = nextAction(bs({ brainstormExchanges: 2, attemptsPerPhase: 2 }, ...two, ...failedFinal('f1', 'sig-1'), ...failedFinal('f2', 'sig-2')), ctx({ now: T0 + 10 * MIN }));
+  assert.equal(capped.type, 'needs-you');
+  assert.equal(capped.reason, 'stuck');
+  assert.equal(capped.detail.why, 'attempt-cap');
+  assert.equal(capped.detail.phase, 'brainstorm');
+});
+
+test('token cap forces a final ask', () => {
+  const run = (askTokens, answerTokens) => bs({ brainstormTokens: 1000 }, ...askDone('b1', [Q1], { tokens: askTokens }), ...replied('s1', [A('Q1')], { tokens: answerTokens }));
+  assert.equal(nextAction(run(600, 399), ctx()).final, false);
+  assert.equal(nextAction(run(600, 400), ctx()).final, true);
+  assert.equal(nextAction(run(1000, null), ctx()).final, true);
+  assert.equal(nextAction(run(999, null), ctx()).final, false, 'tokens: null counts 0');
+  const uncapped = bs({}, ...askDone('b1', [Q1], { tokens: 10_000_000 }), ...replied('s1', [A('Q1')]));
+  assert.equal(nextAction(uncapped, ctx()).final, false, 'brainstormTokens null is no cap');
+});
+
+test('question cap applies to stand-in escalations', () => {
+  const events = [
+    ...askDone('b1', [Q1, Q2]), ...escalated('s1', 'Q2', [A('Q1')]), ...userAnswer('s1', 'Postgres'),
+    ...askDone('b2', [Q3, Q4]), ...escalated('s2', 'Q4', [A('Q3')]),
+  ];
+  const action = nextAction(bs({ questionsPerScope: 1 }, ...events), ctx());
+  assert.equal(action.type, 'needs-you');
+  assert.equal(action.reason, 'stuck');
+  assert.equal(action.detail.why, 'question-cap');
+  assert.equal(action.detail.phase, 'brainstorm');
+  assert.equal(nextAction(bs({ questionsPerScope: 2 }, ...events), ctx()).detail.kind, 'stand-in');
+});
+
+test('a failed stand-in attempt retries the stand-in', () => {
+  const job = bs({}, ...askDone('b1', [Q1, Q2]), bsStarted('s1', 'answer'), ended('s1', 'failed', { reason: 'no-result', signature: 'no-result|', at: T0 }));
+  assert.deepEqual(nextAction(job, ctx()), { type: 'wait', until: T0 + MIN, why: 'backoff' });
+  assert.deepEqual(nextAction(job, ctx({ now: T0 + MIN })), launchOf(job, 'stand-in', { ...BS, n: 3, recovery: true, previousAttemptId: 's1', purpose: 'answer', openQuestions: [Q1, Q2] }));
+});
+
+test('attemptContext rebuilds ask and answer context', () => {
+  const NONE = { round: null, task: null, taskDef: null, reviewFindings: null, contested: null };
+  const first = bs({}, bsStarted('b1', 'ask'));
+  assert.deepEqual(nextAction(first, ctx()), { type: 'none' });
+  assert.deepEqual(contextOf(first, 'b1'), { ...NONE, purpose: 'ask', final: false, openQuestions: null, askedIds: [] });
+
+  const asked = askDone('b1', [Q1, Q2]);
+  const answering = bs({}, ...asked, bsStarted('s1', 'answer'));
+  assert.deepEqual(contextOf(answering, 's1'), { ...NONE, purpose: 'answer', final: false, openQuestions: [Q1, Q2], askedIds: null });
+  assert.deepEqual(contextOf(answering, 's1').openQuestions, nextAction(bs({}, ...asked), ctx()).openQuestions);
+
+  const settled = [...asked, ...replied('s1', [A('Q1'), A('Q2')])];
+  const asking = bs({ brainstormExchanges: 2 }, ...settled, bsStarted('b2', 'ask', { final: true }));
+  const launched = nextAction(bs({ brainstormExchanges: 2 }, ...settled), ctx());
+  const context = contextOf(asking, 'b2');
+  assert.deepEqual(context, { ...NONE, purpose: 'ask', final: true, openQuestions: null, askedIds: ['Q1', 'Q2'] });
+  assert.deepEqual(pick(context, 'final', 'askedIds'), pick(launched, 'final', 'askedIds'));
 });
