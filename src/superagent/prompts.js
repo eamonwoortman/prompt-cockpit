@@ -5,6 +5,14 @@ import { artifactPaths, reviewPaths, requiredOutputs, reviseOutputs as reviseSet
 
 export const UNATTENDED_DENY_MESSAGE = 'You are running unattended. Put your question in `result.json` with `status: blocked`.';
 export const RECOVERY_NOTE = 'check every worktree\'s git status and log, and the ledger, before repeating work; continue from `handoff.md` if present';
+// Read-only roles cannot write result.json; they reply with it instead.
+export const READ_ONLY_ROLES = new Set(['stand-in']);
+export const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob'];
+const BRAINSTORMER_DENY_MESSAGE = 'You are running unattended. Put your questions in result.json\'s `questions` list; the stand-in answers them.';
+
+export function denyMessageFor(role) {
+  return role === 'brainstormer' ? BRAINSTORMER_DENY_MESSAGE : UNATTENDED_DENY_MESSAGE;
+}
 
 const CONTRACT_FILE = 'contract.md';
 const REVIEW_PURPOSES = new Set(['review', 'task-review']);
@@ -147,6 +155,7 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
     recoveryNote: attempt.recovery ? RECOVERY_NOTE : null,
     previousAttemptDir: previous?.dir ?? null,
     handoff: attempt.handoff ?? null,
+    ...(READ_ONLY_ROLES.has(role) ? { resultVia: 'final-message' } : {}),
     ...(attempt.purpose ? purposeFields(job, phase, attempt) : {}),
     ...(job.tasks ? { effectiveTasks: job.tasks.map(({ id, title, repos, acceptance, verify, origin }) => ({ id, title, repos, acceptance, verify, origin })) } : {}),
   };
@@ -157,6 +166,7 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
 }
 
 export function nudgeText(kind, attempt) {
+  if (attempt.readOnly) return 'No result was received. Reply with only the result JSON object as your final message.';
   if (kind === 'turn-cap') {
     return `The turn limit was reached. Write \`handoff.md\` in ${attempt.dir} (current state and next steps), then publish \`result.json\` there via \`result.json.tmp\` and rename.`;
   }

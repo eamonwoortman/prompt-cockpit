@@ -10,10 +10,17 @@
 //   count as progress, so telemetry (rate-limit, status) cannot keep a dead
 //   worker alive.
 // - Permissions (spike S1): every ask from a worker is denied with
-//   UNATTENDED_DENY_MESSAGE, whatever the permission mode. The session is
-//   started with interceptEveryPermission so asks reach the interceptor at all.
-//   The one exception is a brainstormer's AskUserQuestion, which falls through
-//   to the human (automatic-mode routing is Plan 5).
+//   denyMessageFor(role), whatever the permission mode, including the
+//   brainstormer's AskUserQuestion: no question reaches the user except through
+//   needs-you. The session is started with interceptEveryPermission so asks
+//   reach the interceptor at all.
+// - Read-only roles (the stand-in) run with READ_ONLY_TOOLS and no MCP, so they
+//   reply with their result JSON as the final message. review() writes it to
+//   result.json as soon as scan sees it (materialize, not a claimer), so
+//   removal, stall, stop and reconcile all judge the on-disk file. A reply
+//   whose row is removed, or whose cockpit dies, before the next scan is lost.
+// - Tokens: attempt-ended carries the row's usage totals at finish, or null
+//   when there is no row (reconcile).
 // - Context drift (spike S2): PreCompact is an observation point only. The hook
 //   logs a `precompact` event and lets compaction continue.
 //
@@ -30,8 +37,10 @@
 // as src/autopilot.js:517).
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+import { writeJsonAtomic } from '../json-store.js';
 import { RESULT_FILE, attemptDir, outcomeForResult, primaryRepo, readResult, validateResult } from './results.js';
-import { UNATTENDED_DENY_MESSAGE, buildWorkerPrompt, nudgeText } from './prompts.js';
+import { READ_ONLY_ROLES, READ_ONLY_TOOLS, buildWorkerPrompt, denyMessageFor, nudgeText } from './prompts.js';
 import { attemptContext, failureSignature } from './sequencer.js';
 import { defaultGit } from './worktree.js';
 
@@ -39,6 +48,25 @@ export const PROGRESS_TYPES = new Set(['assistant', 'user', 'result']);
 
 const failed = (reason, detail) => ({ outcome: 'failed', reason, signature: failureSignature(reason, detail) });
 const messageOf = (err) => String(err?.message ?? err);
+const TOKEN_KEYS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'];
+
+// A read-only worker's final message: a fenced ```json block if present, else
+// the first `{` to the last `}`. Only a JSON object counts, so a reply that is
+// wholly JSON of another shape (an array) is refused rather than sliced.
+export function extractResultJson(text) {
+  if (typeof text !== 'string') return null;
+  const parse = (candidate) => {
+    try {
+      return { value: JSON.parse(candidate) };
+    } catch {
+      return null;
+    }
+  };
+  const fenced = /```json\s*([\s\S]*?)```/.exec(text);
+  const parsed = fenced ? parse(fenced[1]) : (parse(text) ?? parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)));
+  const value = parsed?.value;
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
 
 export function createRunner({
   registry,
@@ -49,6 +77,7 @@ export function createRunner({
   idImpl = randomUUID,
   logImpl = console.error,
   projectDirFor = (job) => primaryRepo(job).origin,
+  writeJsonImpl = writeJsonAtomic,
 }) {
   const lives = new Map();
   const bySession = new Map();
@@ -90,8 +119,15 @@ export function createRunner({
 
   const endedEvent = (live, payload) => ({ type: 'attempt-ended', attemptId: live.attemptId, ...payload });
 
-  async function finish(live, payload) {
+  function tokensOf(live) {
+    const totals = registry.get(live.sessionId)?.usageAcc?.totals;
+    if (!totals || !TOKEN_KEYS.every((k) => Number.isFinite(totals[k]))) return null;
+    return TOKEN_KEYS.reduce((sum, k) => sum + totals[k], 0);
+  }
+
+  async function finish(live, outcome) {
     live.intended = true;
+    const payload = { ...outcome, tokens: tokensOf(live) };
     try {
       await store.append(live.jobId, endedEvent(live, payload));
       live.pendingEnd = null;
@@ -132,7 +168,21 @@ export function createRunner({
     }
   }
 
-  const contextOf = ({ purpose, round, final, task, taskDef, reviewFindings, contested }) => ({ purpose, round, final, task, taskDef, reviewFindings, contested });
+  const contextOf = ({ purpose, round, final, task, taskDef, reviewFindings, contested, openQuestions, askedIds }) => ({ purpose, round, final, task, taskDef, reviewFindings, contested, openQuestions, askedIds });
+
+  // Not a claimer: a failed write leaves materialized false for the next scan.
+  async function materialize(live) {
+    if (!live.readOnly || live.finalText == null || live.materialized) return;
+    const text = live.finalText;
+    const value = extractResultJson(text);
+    if (!value) return;
+    try {
+      await writeJsonImpl(path.join(live.dir, RESULT_FILE), { ...value, jobId: live.jobId, phaseId: live.phase, taskId: live.task, attemptId: live.attemptId });
+      if (live.finalText === text) live.materialized = true;
+    } catch (err) {
+      log(`could not write the result of attempt ${live.attemptId}, will retry`, err);
+    }
+  }
 
   // { read, payload } for a valid result, { read, invalid } for a present but
   // invalid one, { read } otherwise. `context` is the live record's attempt
@@ -164,6 +214,9 @@ export function createRunner({
         verdict: r.verdict ?? null,
         findings: r.findings ?? null,
         verified: r.verified ?? null,
+        questions: r.questions ?? null,
+        answers: r.answers ?? null,
+        escalated: r.escalated ?? null,
         ...outcomeForResult(r),
       },
     };
@@ -206,7 +259,7 @@ export function createRunner({
       live.promptSeq = row.eventLog.nextSeq - 1;
       live.sawResult = false;
       try {
-        await registry.sendInput(row.id, nudgeText(kind, { dir: live.dir }));
+        await registry.sendInput(row.id, nudgeText(kind, { dir: live.dir, readOnly: live.readOnly }));
       } catch (err) {
         // Row gone: the removal path owns the attempt. Row still there: the
         // stall deadline ends it.
@@ -217,6 +270,7 @@ export function createRunner({
   }
 
   async function processTurnEnd(live) {
+    await materialize(live);
     const verdict = await judge(live, store.get(live.jobId), contextOf(live));
     if (verdict.payload) return finish(live, verdict.payload);
     if (verdict.invalid) return finish(live, verdict.invalid);
@@ -236,6 +290,8 @@ export function createRunner({
         live.sawResult = true;
         live.lastResultSubtype = message.subtype ?? null;
         live.sawMaxTurns ||= message.subtype === 'error_max_turns';
+        live.finalText = typeof message.result === 'string' ? message.result : null;
+        live.materialized = false;
       }
     }
   }
@@ -248,6 +304,10 @@ export function createRunner({
     const row = registry.get(live.sessionId);
     if (!row) return;
     scan(live, row);
+    if (live.readOnly && live.finalText != null && !live.materialized) {
+      await materialize(live);
+      if (stopping || live.finishing) return;
+    }
     if (row.state === 'idle' && row.queue.length === 0 && live.sawResult) {
       await claim(live, () => processTurnEnd(live));
       return;
@@ -317,6 +377,11 @@ export function createRunner({
       taskDef: action.taskDef ?? null,
       reviewFindings: action.reviewFindings ?? null,
       contested: action.contested ?? null,
+      openQuestions: action.openQuestions ?? null,
+      askedIds: action.askedIds ?? null,
+      readOnly: READ_ONLY_ROLES.has(action.role),
+      finalText: null,
+      materialized: false,
       sessionId: null,
       scannedThrough: 0,
       lastProgressAt: now(),
@@ -402,6 +467,7 @@ export function createRunner({
           appendSystemPrompt: prompt.system,
           interceptEveryPermission: true,
           hooks: { PreCompact: [{ hooks: [preCompactHook(jobId, attemptId)] }] },
+          ...(live.readOnly ? { tools: [...READ_ONLY_TOOLS], disallowedTools: ['mcp__*'] } : {}),
         },
       });
     } catch (err) {
@@ -435,7 +501,7 @@ export function createRunner({
       if (attempt.outcome) continue;
       if (lives.get(job.jobId)?.attemptId === attempt.attemptId) continue;
       const verdict = attempt.dir ? await judge({ ...attempt, jobId: job.jobId }, job, attemptContext(job, attempt)) : {};
-      await store.append(job.jobId, { type: 'attempt-ended', attemptId: attempt.attemptId, ...(verdict.payload ?? verdict.invalid ?? { outcome: 'interrupted' }) });
+      await store.append(job.jobId, { type: 'attempt-ended', attemptId: attempt.attemptId, ...(verdict.payload ?? verdict.invalid ?? { outcome: 'interrupted' }), tokens: null });
     }
   }
 
@@ -461,11 +527,10 @@ export function createRunner({
   // In `auto` mode the SDK does not call canUseTool for ordinary tools
   // (confirmed by the 2026-11-04 probe), so this deny rule only covers the
   // asks the SDK actually makes.
-  function onApprovalRequest({ row, request }) {
+  function onApprovalRequest({ row }) {
     const live = bySession.get(row?.id);
     if (!live) return null;
-    if (live.role === 'brainstormer' && request?.toolName === 'AskUserQuestion') return null;
-    return { behavior: 'deny', message: UNATTENDED_DENY_MESSAGE };
+    return { behavior: 'deny', message: denyMessageFor(live.role) };
   }
 
   function onSessionRemoved({ id, reason }) {

@@ -6,7 +6,7 @@ import { tempDir, provisionedEvents } from './superagent-helpers.mjs';
 import { deriveJob } from '../src/superagent/store.js';
 import { artifactPaths, reviewPaths, requiredOutputs } from '../src/superagent/results.js';
 import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
-import { RECOVERY_NOTE, templatesDir, hasTemplate, buildWorkerPrompt, nudgeText } from '../src/superagent/prompts.js';
+import { READ_ONLY_ROLES, READ_ONLY_TOOLS, RECOVERY_NOTE, templatesDir, hasTemplate, buildWorkerPrompt, nudgeText } from '../src/superagent/prompts.js';
 
 const IDEA = 'Line one of the idea.\n\n  Indented line two with "quotes" and \ backslash.\nLast line';
 
@@ -119,7 +119,23 @@ test('nudge texts name the attempt directory and ask for handoff.md on a turn ca
   assert.ok(t.includes('handoff.md') && t.includes(a.dir) && t.includes('result.json'));
 });
 
-const TASK_DEF = { id: 'T1', title: 'Add hello', repos: ['primary'], dependsOn: [], acceptance: 'hello exists', verify: 'npm test', origin: 'plan' };
+test('a read-only role publishes via its final message: card field and nudge text', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const overrides = path.join(emptyDir, '.superpowers', 'superagent', 'prompts');
+  await fs.mkdir(overrides, { recursive: true });
+  await fs.writeFile(path.join(overrides, 'stand-in.md'), '# Stand-in\n');
+  assert.deepEqual([...READ_ONLY_ROLES], ['stand-in']);
+  assert.deepEqual(READ_ONLY_TOOLS, ['Read', 'Grep', 'Glob']);
+  const standIn = parseCard((await buildWorkerPrompt({ role: 'stand-in', job, phase, attempt, projectDir: emptyDir })).card);
+  assert.equal(standIn.resultVia, 'final-message');
+  const writer = parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir })).card);
+  assert.equal('resultVia' in writer, false);
+  const text = 'No result was received. Reply with only the result JSON object as your final message.';
+  assert.equal(nudgeText('result', { dir: attempt.dir, readOnly: true }), text);
+  assert.equal(nudgeText('turn-cap', { dir: attempt.dir, readOnly: true }), text);
+});
+
+const TASK_DEF ={ id: 'T1', title: 'Add hello', repos: ['primary'], dependsOn: [], acceptance: 'hello exists', verify: 'npm test', origin: 'plan' };
 const FIX_DEF = { id: 'F-0123abcd', title: 'Fix greeting', repos: ['primary'], dependsOn: [], acceptance: 'greeting is polite', verify: '', origin: 'test-failure' };
 
 function started(attemptId, phase, purpose, over = {}) {

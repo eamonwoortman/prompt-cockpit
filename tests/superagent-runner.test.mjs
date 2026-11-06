@@ -5,13 +5,14 @@ import path from 'node:path';
 import * as registry from '../src/session-registry.js';
 import { fakeStartSession } from './test-helpers.mjs';
 import { execFileSync } from 'node:child_process';
-import { tempDir, initRepo, jobCreated, sessionFactory, liveJob, launchAction, ids, deferred, taskCreated, T0, MIN } from './superagent-helpers.mjs';
+import { tempDir, initRepo, jobCreated, sessionFactory, scriptedWorker, liveJob, launchAction, ids, deferred, taskCreated, T0, MIN } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
-import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
+import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import { createWorktree } from '../src/superagent/worktree.js';
 import { RESULT_FILE, artifactPaths, attemptDir, readResult, reviewPaths } from '../src/superagent/results.js';
-import { UNATTENDED_DENY_MESSAGE, nudgeText } from '../src/superagent/prompts.js';
-import { createRunner, PROGRESS_TYPES } from '../src/superagent/runner.js';
+import { UNATTENDED_DENY_MESSAGE, denyMessageFor, nudgeText } from '../src/superagent/prompts.js';
+import { createRunner, extractResultJson, PROGRESS_TYPES } from '../src/superagent/runner.js';
+import { writeJsonAtomic } from '../src/json-store.js';
 
 const quiet = () => {};
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -28,14 +29,14 @@ async function stubValidate(value, { expected }) {
 
 const results = { readResult, validateResult: stubValidate };
 
-async function setup() {
+async function setup({ pipeline } = {}) {
   const root = await tempDir('sa-runner-');
   const store = createSuperagentStore({ rootDir: path.join(root, 'jobs'), now: () => T0, logImpl: quiet });
   const repos = [
     { id: 'primary', origin: path.join(root, 'origin') },
     { id: 'extra', origin: path.join(root, 'extra-origin') },
   ];
-  const newJob = (jobId = 'j1') => liveJob(store, { jobId, repos });
+  const newJob = (jobId = 'j1') => liveJob(store, { jobId, repos, ...(pipeline ? { pipeline } : {}) });
   const job = await newJob();
   const events = async (jobId = job.jobId) => {
     const text = await fs.readFile(path.join(store.jobDir(jobId), 'events.jsonl'), 'utf8');
@@ -101,6 +102,40 @@ const assistantMessage = () => ({
   type: 'assistant',
   message: { role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: 'working' }], usage: { input_tokens: 1, output_tokens: 1 } },
 });
+
+// Plan 5: the brainstorm roles. Their templates arrive in Task 7, so tests
+// write them into the project override dir (Decision 15).
+const Q1 = { id: 'Q1', text: 'Which database?' };
+const Q2 = { id: 'Q2', text: 'Which port?' };
+const answerOf = (id, tag = 'from-idea') => ({ id, tag, answer: `${id} answer`, reason: `${id} reason` });
+const standInAction = (over = {}) => launchAction({ phase: 'brainstorm', role: 'stand-in', maxTurns: 8, purpose: 'answer', openQuestions: [Q1, Q2], askedIds: null, ...over });
+const brainstormerAction = (over = {}) => launchAction({ phase: 'brainstorm', role: 'brainstormer', purpose: 'ask', openQuestions: null, askedIds: [], ...over });
+const answerBody = (over = {}) => ({ status: 'done', artifacts: [], summary: 'Answered both.', question: null, answers: [answerOf('Q1'), answerOf('Q2', 'assumed')], ...over });
+
+async function writeBrainstormTemplates(projectDir) {
+  const overrides = path.join(projectDir, '.superpowers', 'superagent', 'prompts');
+  await fs.mkdir(overrides, { recursive: true });
+  await fs.writeFile(path.join(overrides, 'brainstormer.md'), '# Brainstormer\n');
+  await fs.writeFile(path.join(overrides, 'stand-in.md'), '# Stand-in\n');
+}
+
+// A default-pipeline job (it has the brainstorm phase) with stubbed validation.
+async function standInSetup(over = {}) {
+  const s = await setup({ pipeline: defaultConfig().pipeline });
+  await writeBrainstormTemplates(s.job.repos[0].origin);
+  const factory = sessionFactory(registry);
+  const runner = createRunner({ registry: factory.registry, store: s.store, results, now: () => T0, idImpl: ids(), logImpl: quiet, ...over });
+  registry.addSessionRemovedListener(runner.onSessionRemoved);
+  return { ...s, factory, runner };
+}
+
+function reply(impl, text, { idle = true } = {}) {
+  impl.emitMessage({ type: 'result', subtype: 'success', result: text });
+  impl.emitState(idle ? 'idle' : 'running');
+}
+
+const readJsonFile = async (file) => JSON.parse(await fs.readFile(file, 'utf8'));
+const exists = (file) => fs.access(file).then(() => true, () => false);
 
 test('progress types are the worker messages only', () => {
   assert.deepEqual([...PROGRESS_TYPES].sort(), ['assistant', 'result', 'user']);
@@ -392,25 +427,26 @@ test('concurrent launches for one job create one session', async () => {
   } finally { registry._reset(); }
 });
 
-test('brainstormer AskUserQuestion falls through, its other asks are denied', async () => {
+test('every ask is denied, including the brainstormer\'s AskUserQuestion', async () => {
   registry._reset();
   try {
-    const { root, store, job } = await setup();
-    const projectDir = path.join(root, 'project');
-    const overrides = path.join(projectDir, '.superpowers', 'superagent', 'prompts');
-    await fs.mkdir(overrides, { recursive: true });
-    await fs.writeFile(path.join(overrides, 'brainstormer.md'), '# Brainstormer\n');
-    const { registry: reg, impls } = sessionFactory(registry);
-    const runner = createRunner({ registry: reg, store, results, now: () => T0, idImpl: ids(), logImpl: quiet, projectDirFor: () => projectDir });
+    const { store, job, newJob, runner, factory } = await standInSetup();
     registry.addApprovalInterceptor(runner.onApprovalRequest);
-    const { attemptId } = await runner.launch(job, launchAction({ role: 'brainstormer' }));
-    assert.ok(attemptId);
+    await runner.launch(job, brainstormerAction());
     const sessionId = lastAttempt(store, job.jobId).sessionId;
-    const worker = impls.get(sessionId);
-    worker.emitApprovalRequest({ questions: [{ question: 'Which?' }] }, 'AskUserQuestion');
-    assert.equal(registry.get(sessionId).pendingApprovals.length, 1);
+    const worker = factory.impls.get(sessionId);
+    const asked = await worker.emitApprovalRequest({ questions: [{ question: 'Which?' }] }, 'AskUserQuestion');
+    assert.deepEqual(asked, { behavior: 'deny', message: denyMessageFor('brainstormer') });
+    assert.match(asked.message, /questions/);
+    assert.equal(registry.get(sessionId).pendingApprovals.length, 0, 'nothing reaches the human');
     const bash = await worker.emitApprovalRequest({ command: 'curl x' }, 'Bash');
-    assert.deepEqual(bash, { behavior: 'deny', message: UNATTENDED_DENY_MESSAGE });
+    assert.equal(bash.behavior, 'deny');
+
+    const job2 = await newJob('j2');
+    await runner.launch(job2, standInAction());
+    const standIn = factory.impls.get(lastAttempt(store, 'j2').sessionId);
+    assert.deepEqual(await standIn.emitApprovalRequest({ questions: [{ question: 'Which?' }] }, 'AskUserQuestion'), { behavior: 'deny', message: UNATTENDED_DENY_MESSAGE });
+    for (const role of ['stand-in', 'spec-writer', 'verifier']) assert.equal(denyMessageFor(role), UNATTENDED_DENY_MESSAGE, role);
   } finally { registry._reset(); }
 });
 
@@ -723,12 +759,12 @@ test('reconcile ends in-flight attempts with their result or as interrupted', as
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 const F = (id, severity, disposition) => ({ id, severity, text: `Finding ${id}.`, ...(disposition ? { disposition } : {}) });
 
-async function gitSetup({ tasks = null } = {}) {
+async function gitSetup({ tasks = null, pipeline = MILESTONE_2_PIPELINE } = {}) {
   const root = await tempDir('sa-runner-git-');
   const store = createSuperagentStore({ rootDir: path.join(root, 'jobs'), now: () => T0, logImpl: quiet });
   const origin = path.join(root, 'origin');
   await initRepo(origin);
-  const created = jobCreated({ pipeline: MILESTONE_2_PIPELINE, repos: [{ id: 'primary', origin }] });
+  const created = jobCreated({ pipeline, repos: [{ id: 'primary', origin }] });
   const { jobId, branch } = created;
   const worktree = path.join(root, 'wt');
   const { baseSha } = await createWorktree({ origin, worktree, branch, copyLocalClaudeSettings: false });
@@ -768,7 +804,7 @@ async function gitSetup({ tasks = null } = {}) {
   const events = async () => (await fs.readFile(path.join(store.jobDir(jobId), 'events.jsonl'), 'utf8'))
     .split('\n').filter(Boolean).map((line) => JSON.parse(line));
   const endOf = async (attemptId) => (await events()).find((e) => e.type === 'attempt-ended' && e.attemptId === attemptId);
-  return { store, job, jobId, worktree, commit, result, publish, startedOnly, doneReview, events, endOf };
+  return { store, job, jobId, origin, worktree, commit, result, publish, startedOnly, doneReview, events, endOf };
 }
 
 let liveRuns = 0;
@@ -930,5 +966,259 @@ test('a non-final fix with an open blocker ends invalid-result live and in recon
     assert.equal(nonFinalEnd.reason, 'invalid-result');
     assert.match(nonFinalEnd.signature, /may only stay open in the final fix/);
     assert.equal((await g.endOf('fx2')).outcome, 'done', JSON.stringify(await g.endOf('fx2')));
+  } finally { registry._reset(); }
+});
+
+// Plan 5 Task 6: the read-only stand-in, its final-message result, tokens.
+test('stand-in sessions are read-only', async () => {
+  registry._reset();
+  try {
+    const { job, newJob, factory, runner } = await standInSetup();
+    await runner.launch(job, standInAction());
+    assert.deepEqual(factory.calls[0].sdkOptions.tools, ['Read', 'Grep', 'Glob']);
+    assert.deepEqual(factory.calls[0].sdkOptions.disallowedTools, ['mcp__*']);
+    await runner.launch(await newJob('j2'), brainstormerAction());
+    assert.equal('tools' in factory.calls[1].sdkOptions, false);
+    assert.equal('disallowedTools' in factory.calls[1].sdkOptions, false);
+  } finally { registry._reset(); }
+});
+
+test('read-only result: fenced, braced, prose-wrapped and unparseable final messages', () => {
+  const body = { status: 'done', answers: [{ id: 'Q1' }] };
+  const json = JSON.stringify(body);
+  assert.deepEqual(extractResultJson(`Here you go.\n\`\`\`json\n${json}\n\`\`\`\nBye {not this}`), body);
+  assert.deepEqual(extractResultJson(`Here it is: ${json} done`), body);
+  assert.deepEqual(extractResultJson(json), body);
+  assert.equal(extractResultJson('no json here'), null);
+  assert.equal(extractResultJson('{ broken'), null);
+  assert.equal(extractResultJson('[{"status":"done"}]'), null);
+  assert.equal(extractResultJson(null), null);
+});
+
+test('a stand-in final message becomes result.json', async () => {
+  registry._reset();
+  try {
+    const g = await gitSetup({ pipeline: defaultConfig().pipeline });
+    await writeBrainstormTemplates(g.origin);
+    const { registry: reg, impls } = sessionFactory(registry);
+    const runner = createRunner({ registry: reg, store: g.store, now: () => T0, idImpl: ids('si'), logImpl: quiet });
+    await runner.launch(g.store.get(g.jobId), standInAction());
+    const attempt = lastAttempt(g.store, g.jobId);
+    const body = answerBody();
+    reply(impls.get(attempt.sessionId), `\`\`\`json\n${JSON.stringify(body)}\n\`\`\``);
+    await runner.review(g.store.get(g.jobId));
+    await runner.drain();
+    const written = await readJsonFile(path.join(attempt.dir, RESULT_FILE));
+    assert.deepEqual(written, { ...body, jobId: g.jobId, phaseId: 'brainstorm', taskId: null, attemptId: attempt.attemptId });
+    const end = await g.endOf(attempt.attemptId);
+    assert.equal(end.outcome, 'done', JSON.stringify(end));
+    assert.deepEqual(end.answers, body.answers);
+  } finally { registry._reset(); }
+});
+
+test('the result is materialised on the first scan, so removal still judges it', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended, factory, runner } = await standInSetup();
+    await runner.launch(job, standInAction());
+    const attempt = lastAttempt(store, job.jobId);
+    reply(factory.impls.get(attempt.sessionId), JSON.stringify(answerBody()), { idle: false });
+    assert.notEqual(registry.get(attempt.sessionId).state, 'idle');
+    await runner.review(job);
+    assert.equal(await exists(path.join(attempt.dir, RESULT_FILE)), true);
+    assert.equal((await ended()).length, 0, 'the turn has not ended yet');
+    registry.closeSession(attempt.sessionId);
+    await runner.drain();
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].outcome, 'done');
+    assert.deepEqual(ends[0].answers, answerBody().answers);
+  } finally { registry._reset(); }
+});
+
+test('removal before any scan loses the reply (documented boundary)', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended, factory, runner } = await standInSetup();
+    await runner.launch(job, standInAction());
+    const attempt = lastAttempt(store, job.jobId);
+    reply(factory.impls.get(attempt.sessionId), JSON.stringify(answerBody()), { idle: false });
+    registry.closeSession(attempt.sessionId);
+    await runner.drain();
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].outcome, 'failed');
+    assert.equal(ends[0].reason, 'no-result');
+    assert.equal(await exists(path.join(attempt.dir, RESULT_FILE)), false);
+  } finally { registry._reset(); }
+});
+
+test('reconcile after a restart uses the materialised result', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended, factory, runner } = await standInSetup();
+    await runner.launch(job, standInAction());
+    const attempt = lastAttempt(store, job.jobId);
+    reply(factory.impls.get(attempt.sessionId), JSON.stringify(answerBody()), { idle: false });
+    await runner.review(job);
+    const restarted = createRunner({ registry: sessionFactory(registry).registry, store, results, now: () => T0, idImpl: ids('b'), logImpl: quiet });
+    await restarted.reconcile(store.get(job.jobId));
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].outcome, 'done');
+    assert.deepEqual(ends[0].answers, answerBody().answers);
+    assert.equal(ends[0].tokens, null);
+  } finally { registry._reset(); }
+});
+
+test('a failing result write is retried and never strands the attempt', async () => {
+  registry._reset();
+  try {
+    let failures = 1;
+    const logged = [];
+    const writeJsonImpl = async (file, value) => {
+      if (failures-- > 0) throw new Error('disk full');
+      return writeJsonAtomic(file, value);
+    };
+    const { store, job, newJob, ended, events, factory, runner } = await standInSetup({ writeJsonImpl, logImpl: (m) => logged.push(m) });
+    await runner.launch(job, standInAction());
+    const attempt = lastAttempt(store, job.jobId);
+    const impl = factory.impls.get(attempt.sessionId);
+    reply(impl, JSON.stringify(answerBody()), { idle: false });
+    await runner.review(job);
+    assert.equal(await exists(path.join(attempt.dir, RESULT_FILE)), false);
+    assert.ok(logged.some((m) => /disk full/.test(m)), logged.join('\n'));
+    assert.equal((await ended()).length, 0, 'nothing claimed the attempt');
+    assert.equal(runner.isLive(job.jobId), true);
+    impl.emitState('idle');
+    await runner.review(job);
+    await runner.drain();
+    assert.equal(await exists(path.join(attempt.dir, RESULT_FILE)), true);
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].outcome, 'done');
+    assert.equal(registry.get(attempt.sessionId), undefined);
+    assert.equal(runner.isLive(job.jobId), false);
+
+    failures = Infinity;
+    const job2 = await newJob('j2');
+    await runner.launch(job2, standInAction());
+    const attempt2 = lastAttempt(store, 'j2');
+    const impl2 = factory.impls.get(attempt2.sessionId);
+    reply(impl2, JSON.stringify(answerBody()));
+    await runner.review(job2);
+    assert.deepEqual((await events('j2')).filter((e) => e.type === 'attempt-nudged').map((e) => e.kind), ['result']);
+    reply(impl2, JSON.stringify(answerBody()));
+    await runner.review(job2);
+    await runner.drain();
+    const ends2 = await ended('j2');
+    assert.equal(ends2.length, 1);
+    assert.equal(ends2[0].outcome, 'failed');
+    assert.equal(ends2[0].reason, 'no-result');
+  } finally { registry._reset(); }
+});
+
+test('an unparseable stand-in reply is nudged, then fails', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended, events, factory, runner } = await standInSetup();
+    await runner.launch(job, standInAction());
+    const attempt = lastAttempt(store, job.jobId);
+    const impl = factory.impls.get(attempt.sessionId);
+    reply(impl, 'sorry');
+    await runner.review(job);
+    assert.equal((await events()).filter((e) => e.type === 'attempt-nudged').length, 1);
+    assert.match(impl.lastInput, /final message/);
+    assert.equal(impl.lastInput, nudgeText('result', { dir: attempt.dir, readOnly: true }));
+    reply(impl, 'sorry');
+    await runner.review(job);
+    await runner.drain();
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].outcome, 'failed');
+    assert.equal(ends[0].reason, 'no-result');
+  } finally { registry._reset(); }
+});
+
+test('attempt-ended records tokens from the row', async () => {
+  registry._reset();
+  try {
+    const { store, job, newJob, ended } = await setup();
+    const { registry: reg, impls } = sessionFactory(registry);
+    const runner = createRunner({ registry: reg, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    await runner.launch(job, launchAction());
+    const attempt = lastAttempt(store, job.jobId);
+    Object.assign(registry.get(attempt.sessionId).usageAcc.totals, { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 20 });
+    await writeValidResult(job, attempt);
+    endTurn(impls.get(attempt.sessionId));
+    await runner.review(job);
+    await runner.drain();
+    const ends = await ended();
+    assert.equal(ends[0].outcome, 'done');
+    assert.equal(ends[0].tokens, 135);
+    assert.deepEqual([ends[0].questions, ends[0].answers, ends[0].escalated], [null, null, null]);
+
+    const job2 = await newJob('j2');
+    await runner.launch(job2, launchAction());
+    await writeValidResult(job2, lastAttempt(store, 'j2'));
+    const restarted = createRunner({ registry: sessionFactory(registry).registry, store, results, now: () => T0, idImpl: ids('b'), logImpl: quiet });
+    await restarted.reconcile(store.get('j2'));
+    const ends2 = await ended('j2');
+    assert.equal(ends2[0].outcome, 'done');
+    assert.equal(ends2[0].tokens, null);
+  } finally { registry._reset(); }
+});
+
+test('brainstorm payload fields reach attempt-ended', async () => {
+  registry._reset();
+  try {
+    const { store, job, newJob, ended, factory, runner } = await standInSetup();
+    await runner.launch(job, brainstormerAction());
+    const ask = lastAttempt(store, job.jobId);
+    const questions = [Q1, Q2];
+    await fs.mkdir(ask.dir, { recursive: true });
+    await fs.writeFile(path.join(ask.dir, RESULT_FILE), JSON.stringify({
+      jobId: job.jobId, phaseId: 'brainstorm', taskId: null, attemptId: ask.attemptId,
+      status: 'done', artifacts: [], summary: 'Two questions.', question: null, questions,
+    }));
+    endTurn(factory.impls.get(ask.sessionId));
+    await runner.review(job);
+    await runner.drain();
+    const asked = (await ended())[0];
+    assert.equal(asked.outcome, 'done');
+    assert.deepEqual(asked.questions, questions);
+    assert.equal(asked.answers, null);
+
+    const job2 = await newJob('j2');
+    await runner.launch(job2, standInAction());
+    const standIn = lastAttempt(store, 'j2');
+    const blocked = answerBody({ status: 'blocked', question: 'Postgres or SQLite?', escalated: 'Q1', answers: [answerOf('Q2', 'assumed')] });
+    reply(factory.impls.get(standIn.sessionId), JSON.stringify(blocked));
+    await runner.review(job2);
+    await runner.drain();
+    const escalation = (await ended('j2'))[0];
+    assert.equal(escalation.outcome, 'question');
+    assert.equal(escalation.question, 'Postgres or SQLite?');
+    assert.equal(escalation.escalated, 'Q1');
+    assert.deepEqual(escalation.answers, blocked.answers);
+  } finally { registry._reset(); }
+});
+
+test('scriptedWorker publishes a read-only card\'s result as its final message', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended, factory, runner } = await standInSetup();
+    const worker = scriptedWorker({ factory, handlers: { 'brainstorm:answer': () => answerBody() } });
+    await runner.launch(job, standInAction());
+    const attempt = lastAttempt(store, job.jobId);
+    assert.equal(worker.cards()[0].resultVia, 'final-message');
+    assert.equal(await exists(path.join(attempt.dir, RESULT_FILE)), false, 'the worker wrote no file');
+    await runner.review(job);
+    await runner.drain();
+    assert.deepEqual(worker.errors, []);
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].outcome, 'done');
+    assert.deepEqual(ends[0].answers, answerBody().answers);
   } finally { registry._reset(); }
 });

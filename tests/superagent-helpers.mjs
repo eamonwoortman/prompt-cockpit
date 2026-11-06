@@ -170,7 +170,8 @@ export function parseCard(text) {
 // session is the job card; handlers[`${phaseId}:${purpose}`] (or
 // handlers[purpose]) returns the result body without identity fields, which
 // is published as result.json via result.json.tmp + rename before the turn
-// ends. Handler context:
+// ends (a read-only card, `resultVia: 'final-message'`, gets it as the result
+// message's text instead). Handler context:
 // - commit(files, message, repoId = 'primary') writes { relPath: text } into
 //   that repo's worktree, commits them on the job branch, returns the sha;
 // - publish(fields, { content, files }) writes every card output (content by
@@ -240,13 +241,13 @@ export function scriptedWorker({ factory, handlers }) {
       });
       if (body === HOLD) return;
       entry.body = body;
-      await writeResult(card, body);
+      if (card.resultVia !== 'final-message') await writeResult(card, body);
     } catch (err) {
       errors.push(err);
       throw err;
     }
     const impl = factory.impls.get(id);
-    impl.emitMessage({ type: 'result', subtype: 'success' });
+    impl.emitMessage({ type: 'result', subtype: 'success', ...(card.resultVia === 'final-message' ? { result: JSON.stringify(entry.body) } : {}) });
     impl.emitState('idle');
   };
 
