@@ -373,7 +373,7 @@ that cannot be faked without testing the fake instead:
 
 ## Superagent core (Plan 2)
 
-`src/superagent/` is a library, not wired into `src/server.js`; the `author`, `review`, `per-task` and `human` phase kinds run (the `milestone-1` and `milestone-2` fixtures). One test file per module:
+`src/superagent/` is a library, not wired into `src/server.js`; the `author`, `brainstorm`, `review`, `per-task` and `human` phase kinds run (the `milestone-1` and `milestone-2` fixtures, and since Plan 5 the default pipeline, which starts with the brainstorm). One test file per module:
 
 | Module | Test file |
 |---|---|
@@ -385,11 +385,11 @@ that cannot be faked without testing the fake instead:
 | `sequencer.js` | `superagent-sequencer.test.mjs` |
 | `runner.js` | `superagent-runner.test.mjs` |
 | `index.js` (`createSuperagent`) | `superagent.test.mjs` |
-| `milestone-2` pipeline end to end (Plan 3) | `superagent-pipeline.test.mjs` |
+| `milestone-2` pipeline end to end (Plan 3), the default pipeline's brainstorm and answered questions (Plan 5) | `superagent-pipeline.test.mjs` |
 
 The runner and end-to-end tests use the real `session-registry.js` with one `fakeStartSession` per session (`sessionFactory` in `superagent-helpers.mjs`, which spreads the real registry and overrides only `createSession`) and real `git` in temp repos. No model, no network, no cost.
 
-`superagent-pipeline.test.mjs` drives `createSuperagent` with `tick()` and `scriptedWorker` (`superagent-helpers.mjs`): a fake worker that reads the job card from a session's first `sendInput`, runs a per-purpose handler that commits real files in the job's worktrees, and publishes `result.json`. Only the happy path runs every phase with workers; the other scenarios fast-forward the earlier phases through the store and run just the loop under test. About 70s, nearly all of it git process spawns. `initRepo` sets `core.fsmonitor false`, because a machine-wide `core.fsmonitor=true` leaves one daemon running per temp repo.
+`superagent-pipeline.test.mjs` drives `createSuperagent` with `tick()` and `scriptedWorker` (`superagent-helpers.mjs`): a fake worker that reads the job card from a session's first `sendInput`, runs a per-purpose handler that commits real files in the job's worktrees, and publishes `result.json`. Only the happy path runs every phase with workers; the other `milestone-2` scenarios fast-forward the earlier phases through the store and run just the loop under test, and the Plan 5 scenarios run the default pipeline from its brainstorm with workers. About 80s, nearly all of it git process spawns. `initRepo` sets `core.fsmonitor false`, because a machine-wide `core.fsmonitor=true` leaves one daemon running per temp repo.
 
 **Not covered by unit tests, hand-verified only (not yet run):** all three are observed by `tests/superagent-two-phase.manual.mjs`, which needs the user's approval to run (floor estimate about $0.50; Plan 1's probes cost 10-30x their header estimates).
 
@@ -397,7 +397,7 @@ The runner and end-to-end tests use the real `session-registry.js` with one `fak
 - **`maxTurns` semantics.** Whether it counts per prompt or per session in streaming input, and the real `error_max_turns` subtype.
 - **PreCompact through `sdkOptions.hooks`.** Whether a real firing reaches `events.jsonl` as a `precompact` line.
 
-Not built (as of Plan 4: the router now exists, see below): brainstorm/stand-in, usage ledger and caps, UI, an answer/resume path for needs-you questions, server wiring, worktree removal.
+Not built (as of Plan 5: the router, the automatic brainstorm and `answerQuestion` now exist, see below): manual mode, usage ledger and caps, UI, server wiring, worktree removal.
 
 ## Superagent pipeline (Plan 3)
 
@@ -439,3 +439,19 @@ The first real run of `superagent-router.manual.mjs` failed; its findings are in
 - Fail-closed additions in `superagent-router.test.mjs`: a non-positive-integer `maxOutputTokens` (`bad-limit: maxOutputTokens`, no call), a result before any `system/init` or an init without its `tools` / `mcp_servers` / `plugins` list (`isolation-breach`), character caps for space-free text (cards and the 300-character note limit).
 - `superagent-pipeline.test.mjs`: an `aborted` error the supervisor did not cause is recorded as a router failure, and the trigger's `model` is the failed attempt's own model. `superagent-sequencer.test.mjs`: the per-task cap and a review scope's repeated error win over routing.
 - The router probe now makes four calls; the fourth (`thinkingAllowance: 0`) shows the API failing at a 50-token env cap. Both new informational calls still never fail the run.
+
+## Superagent brainstorm and answers (Plan 5)
+
+Unit and integration tested (no model, no network; scripted workers):
+
+- `superagent-config.test.mjs`: the default pipeline's first phase has kind `brainstorm` (first and unique, with a `stand-in` model), and `limits.questionsPerScope` defaults to 3.
+- `superagent-store.test.mjs`: `question-answered` sets the job running again only when it answers the open question, and replays the same way; `attempt-ended` keeps `questions`, `answers`, `escalated` and `tokens`; the brainstorm phase advances only on an `ask` with no questions.
+- `superagent-results.test.mjs`: the `ask` and `answer` schemas (at most 5 new questions, a final ask may not ask, the stand-in answers exactly the open questions or escalates one), the brief and spec headings check, and the `-r<round>` verifier paths of an extra round.
+- `superagent-prompts.test.mjs`: card fields `exchanges`, `openQuestions`, `maxQuestions`, `resultVia` and `userAnswers` (scoped to the asking phase or task), the `brainstormer.md` and `stand-in.md` templates, and the contract's `ask`/`answer` carve-outs.
+- `superagent-sequencer.test.mjs`: the brainstorm turns (`brainstormAction`, the exchange and token caps), `brainstormLog`, the stand-in escalation detail, answered questions relaunching their scope without consuming the attempt cap, the question cap, and the extra review round after an answered confirmed blocker with its carried findings.
+- `superagent-runner.test.mjs`: every ask is denied, the brainstormer's included; the stand-in launches with `tools`/`disallowedTools`, and its final message is parsed and materialised as `result.json` on the first scan (with the documented loss window when the row goes before any scan); `tokens` from the row's usage totals.
+- `superagent-pipeline.test.mjs`: on the default pipeline, the automatic brainstorm reaching `spec` with the brief; a stand-in escalation answered with `answerQuestion` and resumed, also across a supervisor restart; `answerQuestion`'s refusals (wrong state, a budget question, a repeat, bad text, an unknown job) with `events.jsonl` unchanged; an answered spec question; the fourth question in a scope stuck as `question-cap`; and a dismissed verifier-confirmed blocker closing after the extra round (a project config sets spec-review `maxRounds: 1`, since the `milestone-2` fixture is frozen at 3).
+
+Hand-verified only (not yet probed; the user deferred every probe to the end of the plans): whether the real SDK honours the stand-in's `tools: ['Read', 'Grep', 'Glob']` and `disallowedTools: ['mcp__*']`, and whether a real stand-in returns a parseable result as its final message. Both are proven only against `fakeStartSession`.
+
+Token counts are an under-count only for attempts finished by reconcile after a restart (`tokens: null`, counted as 0); a removed attempt records the last scanned snapshot of its row.

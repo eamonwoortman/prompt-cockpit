@@ -1,5 +1,6 @@
 // Superagent supervisor: createSuperagent owns one heartbeat that reviews and
-// advances every running job, plus job creation, accept and stop.
+// advances every running job, plus job creation, accept, answerQuestion and
+// stop.
 //
 // Modelled on createAutopilot (src/autopilot.js): everything injected, one
 // timer, a tick that never overlaps itself, an idempotent start/stop and a
@@ -7,11 +8,11 @@
 // auto-pilot's (spec Decision 1) and is not wired into src/server.js yet
 // (plan 2, "Not in this plan").
 //
-// Per-job serialisation: tick's job step, createJob's provisioning, stopJob
-// and accept all run on one promise chain per job (withJob), so a stop can
-// never interleave with a launch. stopJob marks the job in stopRequested
-// synchronously, before it queues, so a tick step already waiting on a budget
-// check sees the stop on its recheck and launches nothing.
+// Per-job serialisation: tick's job step, createJob's provisioning, stopJob,
+// accept and answerQuestion all run on one promise chain per job (withJob),
+// so a stop can never interleave with a launch. stopJob marks the job in
+// stopRequested synchronously, before it queues, so a tick step already
+// waiting on a budget check sees the stop on its recheck and launches nothing.
 //
 // A rejected store append may still have landed, and store.get() keeps
 // serving the last good state until the next append or load re-reads. Every
@@ -39,6 +40,7 @@ import { RUNNABLE_KINDS, buildFixTask, nextAction } from './sequencer.js';
 import { BRANCH_PREFIX, archiveLedger, createWorktree, defaultGit, listOrphanWorktrees, repoIds, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
+const ANSWER_MAX_CHARS = 4000;
 
 // Decision 14: MAX_PATH less its terminating NUL. Validation bounds phase ids
 // at 24 characters and task ids at 12; attempt ids are uuids. On win32 the
@@ -633,6 +635,26 @@ export function createSuperagent({
     });
   }
 
+  // Plan 5: an answer resumes the scope that asked. A budget refusal has no
+  // asking attempt and is not answerable.
+  function answerQuestion(jobId, text) {
+    return withJob(jobId, async () => {
+      const job = await requireJob(jobId);
+      const forAttemptId = job.detail?.attemptId ?? null;
+      if (
+        job.state !== 'needs-you' || job.reason !== 'question' || forAttemptId == null
+        || job.detail.kind === 'budget' || (job.answers ?? []).some((a) => a.forAttemptId === forAttemptId)
+      ) {
+        throw fail('ERR_INVALID_STATE', `superagent: job ${jobId} is ${job.state}${job.reason ? ` (${job.reason})` : ''}, with no question to answer`);
+      }
+      const answer = typeof text === 'string' ? text.trim() : '';
+      if (answer.length < 1 || answer.length > ANSWER_MAX_CHARS) {
+        throw fail('ERR_INVALID_ANSWER', `superagent: an answer must be 1-${ANSWER_MAX_CHARS} characters`);
+      }
+      return appendConfirmed(jobId, { type: 'question-answered', forAttemptId, answer }, (j) => j.answers.some((a) => a.forAttemptId === forAttemptId));
+    });
+  }
+
   function stopJob(jobId) {
     stopRequested.add(jobId);
     routing.get(jobId)?.controller.abort();
@@ -671,5 +693,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, tick, drain, createJob, accept, stopJob, listJobs, getJob, orphanWorktrees };
+  return { start, stop, tick, drain, createJob, accept, answerQuestion, stopJob, listJobs, getJob, orphanWorktrees };
 }

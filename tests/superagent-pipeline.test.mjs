@@ -1,8 +1,8 @@
-// Milestone-2 pipeline integration: createSuperagent driven by tick() with
-// scripted fake workers (tests/superagent-helpers.mjs scriptedWorker) that
-// commit real files in the job's worktrees. One origin repo (plus one
-// additional repo) is shared by the whole file; each test gets its own
-// store, registry state and job branch.
+// Milestone-2 and default-pipeline (brainstorm) integration: createSuperagent
+// driven by tick() with scripted fake workers (tests/superagent-helpers.mjs
+// scriptedWorker) that commit real files in the job's worktrees. One origin
+// repo (plus one additional repo) is shared by the whole file; each test gets
+// its own store, registry state and job branch.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -14,7 +14,8 @@ import * as registry from '../src/session-registry.js';
 import { HOLD, MIN, T0, deferred, ev, initRepo, scriptedWorker, sessionFactory, tempDir } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
 import { MILESTONE_2_PIPELINE, createSuperagentConfig, defaultConfig } from '../src/superagent/config.js';
-import { artifactPaths } from '../src/superagent/results.js';
+import { brainstormLog } from '../src/superagent/sequencer.js';
+import { ANSWER_TAGS, artifactPaths } from '../src/superagent/results.js';
 import { createSuperagent, pipelineRoles } from '../src/superagent/index.js';
 import { ROUTER_SYSTEM_PROMPT } from '../src/superagent/router.js';
 
@@ -53,12 +54,12 @@ function handlersWith(over = {}) {
   };
 }
 
-async function harness({ handlers = handlersWith(), limits = null, defaults = {}, router: firstRouter, budgetCheck } = {}) {
+async function harness({ handlers = handlersWith(), limits = null, defaults = {}, projects = null, router: firstRouter, budgetCheck } = {}) {
   registry._reset();
   const root = await fs.mkdtemp(path.join(shared.root, 'h-'));
   const configFile = path.join(root, 'config.json');
   const fileDefaults = { ...defaults, ...(limits ? { limits } : {}) };
-  await fs.writeFile(configFile, JSON.stringify(Object.keys(fileDefaults).length > 0 ? { defaults: fileDefaults } : {}));
+  await fs.writeFile(configFile, JSON.stringify({ ...(Object.keys(fileDefaults).length > 0 ? { defaults: fileDefaults } : {}), ...(projects ? { projects } : {}) }));
   const jobsRoot = path.join(root, 'jobs');
   const worktreesRoot = path.join(shared.root, 'worktrees');
   const clock = { t: T0 };
@@ -1065,4 +1066,238 @@ test('pipelineRoles adds the stand-in for a brainstorm phase', () => {
   const roles = pipelineRoles(defaultConfig().pipeline);
   assert.ok(roles.includes('brainstormer') && roles.includes('stand-in'));
   assert.ok(!pipelineRoles(MILESTONE_2_PIPELINE).includes('stand-in'));
+});
+
+// --- Plan 5: the automatic brainstorm and answered questions (default pipeline) ---
+
+const createDefaultJob = (h, over = {}) => createJob(h, { fixture: null, ...over });
+const headed = (title) => `# ${title}\n\n## Assumptions made for you\n\n- Q1: port 8080\n\n## Your answers\n\n- Q2: Postgres\n`;
+const Q1 = { id: 'Q1', text: 'Which port should it listen on?' };
+const Q2 = { id: 'Q2', text: 'Which database should it use?' };
+const DB_QUESTION = 'Which database should the hello endpoint use?';
+const asks = (questions) => ({ status: 'done', artifacts: [], summary: `asks ${questions.length} questions`, question: null, questions });
+const writeBrief = ({ publish }) => publish({ questions: [] }, { content: { brief: headed('Brief') } });
+const writeSpec = ({ publish }) => publish({}, { content: { spec: headed('Spec') } });
+const standInAnswers = (card, skip = null) => card.openQuestions
+  .filter((q) => q.id !== skip)
+  .map((q) => ({ id: q.id, tag: 'from-idea', answer: `answer to ${q.id}`, reason: 'the idea says so' }));
+const standIn = ({ card }) => ({ status: 'done', artifacts: [], summary: 'answered every question', question: null, answers: standInAnswers(card) });
+const escalate = (id) => ({ card }) => ({
+  status: 'blocked', artifacts: [], summary: 'only the user knows which database', question: DB_QUESTION, escalated: id, answers: standInAnswers(card, id),
+});
+// Asks Q1 and Q2 on the first turn, writes the brief on every later one.
+const brainstormWith = (answer = standIn) => ({ 'brainstorm:ask': firstThen(() => asks([Q1, Q2]), writeBrief), 'brainstorm:answer': answer });
+// One turn: the brief straight away.
+const NO_BRAINSTORM = { 'brainstorm:ask': writeBrief, 'spec:author': writeSpec };
+const blockedWith = (question) => ({ status: 'blocked', artifacts: [], summary: 'needs a decision', question });
+const needsYouCount = (h, jobId) => h.events(jobId).filter((e) => e.type === 'needs-you').length;
+const rejectsWith = (promise, code) => assert.rejects(promise, (err) => {
+  assert.equal(err.code, code);
+  return true;
+});
+
+test('automatic brainstorm reaches spec with the brief', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ ...brainstormWith(), 'spec:author': () => HOLD }) });
+    const job = await createDefaultJob(h);
+    assert.equal(job.pipeline[0].kind, 'brainstorm');
+    const got = await h.drive(job.jobId, launchedIn('spec'));
+    assert.deepEqual(h.worker.errors, []);
+    assert.equal(got.phaseId, 'spec');
+
+    assert.deepEqual(steps(h.started(job.jobId)), [
+      ['brainstorm', null, 'ask', 'brainstormer'],
+      ['brainstorm', null, 'answer', 'stand-in'],
+      ['brainstorm', null, 'ask', 'brainstormer'],
+      ['spec', null, 'author', 'spec-writer'],
+    ]);
+    const cards = h.worker.cards();
+    const standInCard = cards.find((c) => c.purpose === 'answer');
+    assert.deepEqual([standInCard.resultVia, standInCard.openQuestions], ['final-message', [Q1, Q2]]);
+    const brief = artifactPaths(job).brief;
+    assert.equal(cards.find((c) => c.phaseId === 'spec').inputs.brief, brief);
+    const wt = job.repos.find((r) => r.id === 'primary').worktree;
+    assert.equal(readFileSync(path.join(wt, ...brief.split('/')), 'utf8'), headed('Brief'));
+
+    const log = brainstormLog(got);
+    assert.deepEqual(log.map((e) => [e.id, e.tag, e.answer]), [['Q1', 'from-idea', 'answer to Q1'], ['Q2', 'from-idea', 'answer to Q2']]);
+    assert.ok(log.every((e) => ANSWER_TAGS.includes(e.tag)));
+    assert.equal(needsYouCount(h, job.jobId), 0);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+// Runs the brainstorm until the stand-in escalates Q2.
+async function escalatedJob() {
+  const h = await harness({ handlers: handlersWith({ ...brainstormWith(escalate('Q2')), 'spec:author': () => HOLD }) });
+  const job = await createDefaultJob(h);
+  const parked = await h.drive(job.jobId);
+  assert.deepEqual(h.worker.errors, []);
+  return { h, job, parked };
+}
+
+test('stand-in escalation, answer, resume', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const { h, job, parked } = await escalatedJob();
+    assert.deepEqual([parked.state, parked.reason, parked.detail.kind], ['needs-you', 'question', 'stand-in']);
+    const standInAttempt = h.started(job.jobId).at(-1);
+    assert.deepEqual([standInAttempt.purpose, parked.detail.attemptId, parked.detail.question], ['answer', standInAttempt.attemptId, DB_QUESTION]);
+    assert.deepEqual(parked.detail.brainstormQuestion, Q2);
+    assert.equal(registry.list().length, 0, 'no live session while the job waits');
+    assert.ok([...h.factory.impls.values()].every((impl) => impl.closed));
+
+    const resumed = await h.sa.answerQuestion(job.jobId, 'Postgres');
+    assert.equal(resumed.state, 'running');
+    assert.deepEqual(resumed.answers.map((a) => [a.forAttemptId, a.answer]), [[standInAttempt.attemptId, 'Postgres']]);
+    const answeredEvent = h.events(job.jobId).at(-1);
+    assert.deepEqual([answeredEvent.type, answeredEvent.forAttemptId, answeredEvent.answer], ['question-answered', standInAttempt.attemptId, 'Postgres']);
+
+    const got = await h.drive(job.jobId, launchedIn('spec'));
+    assert.deepEqual(h.worker.errors, []);
+    assert.equal(got.phaseId, 'spec');
+    const askCards = h.worker.cards().filter((c) => c.purpose === 'ask');
+    assert.equal(askCards.length, 2);
+    assert.deepEqual(askCards[1].exchanges.map((e) => [e.id, e.tag, e.answer]), [['Q1', 'from-idea', 'answer to Q1'], ['Q2', 'from-you', 'Postgres']]);
+    const lastAsk = h.started(job.jobId, 'brainstorm').at(-1);
+    assert.equal(endOf(h, job.jobId, lastAsk.attemptId).outcome, 'done', 'the brief is accepted');
+    assert.equal(needsYouCount(h, job.jobId), 1);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('restart after an answer launches the asking scope', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const { h, job } = await escalatedJob();
+    await h.sa.answerQuestion(job.jobId, 'Postgres');
+    await h.sa.stop();
+    const before = h.started(job.jobId).length;
+
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    await fresh.sa.tick();
+    const launched = fresh.started(job.jobId);
+    assert.equal(launched.length, before + 1);
+    assert.deepEqual(steps(launched.slice(-1)), [['brainstorm', null, 'ask', 'brainstormer']]);
+    const [card] = fresh.worker.cards();
+    const q2 = card.exchanges.find((e) => e.id === 'Q2');
+    assert.deepEqual([q2.tag, q2.answer], ['from-you', 'Postgres']);
+    assert.equal(needsYouCount(fresh, job.jobId), 1, 'no needs-you after the restart');
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('answerQuestion refuses wrong states, budget questions, repeats and bad text', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ ...brainstormWith(escalate('Q2')), 'spec:author': () => HOLD }) });
+    const job = await createDefaultJob(h);
+    const lines = () => h.events(job.jobId).length;
+    let count = lines();
+    await rejectsWith(h.sa.answerQuestion(job.jobId, 'Postgres'), 'ERR_INVALID_STATE');
+    assert.equal(lines(), count, 'a running job');
+
+    const parked = await h.drive(job.jobId);
+    assert.deepEqual([parked.state, parked.reason, parked.detail.kind], ['needs-you', 'question', 'stand-in']);
+    count = lines();
+    for (const text of ['', '   ', 'x'.repeat(4001), null, 42]) {
+      await rejectsWith(h.sa.answerQuestion(job.jobId, text), 'ERR_INVALID_ANSWER');
+      assert.equal(lines(), count, `text ${String(text).slice(0, 20)}`);
+    }
+    const answered = await h.sa.answerQuestion(job.jobId, `  ${'x'.repeat(4000)}  `);
+    assert.deepEqual(answered.answers.map((a) => a.answer), ['x'.repeat(4000)]);
+    count = lines();
+    await rejectsWith(h.sa.answerQuestion(job.jobId, 'MySQL'), 'ERR_INVALID_STATE');
+    assert.equal(lines(), count, 'a second answer');
+    await rejectsWith(h.sa.answerQuestion('no-such-job', 'Postgres'), 'ERR_UNKNOWN_JOB');
+    await h.sa.stop();
+
+    const b = await harness({ handlers: handlersWith(NO_BRAINSTORM), budgetCheck: () => ({ allow: false, reason: 'job budget spent' }) });
+    const budgetJob = await createDefaultJob(b);
+    const refused = await b.drive(budgetJob.jobId);
+    assert.deepEqual([refused.state, refused.reason, refused.detail], ['needs-you', 'question', { kind: 'budget', text: 'job budget spent' }]);
+    const budgetLines = b.events(budgetJob.jobId).length;
+    await rejectsWith(b.sa.answerQuestion(budgetJob.jobId, 'raise it'), 'ERR_INVALID_STATE');
+    assert.equal(b.events(budgetJob.jobId).length, budgetLines, 'a budget question');
+    await b.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('an answered spec question resumes spec', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({
+      handlers: handlersWith({ ...NO_BRAINSTORM, 'spec:author': firstThen(blockedWith('Which port?'), writeSpec), 'spec-review:review': () => HOLD }),
+    });
+    const job = await createDefaultJob(h);
+    const parked = await h.drive(job.jobId);
+    const [asking] = h.started(job.jobId, 'spec');
+    assert.deepEqual([parked.state, parked.reason, parked.detail], ['needs-you', 'question', { attemptId: asking.attemptId, question: 'Which port?' }]);
+
+    await h.sa.answerQuestion(job.jobId, '8080');
+    const got = await h.drive(job.jobId, launchedIn('spec-review'));
+    assert.deepEqual(h.worker.errors, []);
+    assert.equal(got.phaseId, 'spec-review');
+    const specCards = h.worker.cards().filter((c) => c.phaseId === 'spec');
+    assert.equal(specCards.length, 2);
+    assert.equal('userAnswers' in specCards[0], false);
+    assert.deepEqual(specCards[1].userAnswers, [{ question: 'Which port?', answer: '8080' }]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('the fourth question in a scope is stuck', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    let asked = 0;
+    const h = await harness({ handlers: handlersWith({ ...NO_BRAINSTORM, 'spec:author': () => blockedWith(`Question ${++asked}?`) }) });
+    const job = await createDefaultJob(h);
+    for (let i = 1; i <= 3; i++) {
+      const parked = await h.drive(job.jobId);
+      assert.deepEqual([parked.state, parked.reason, parked.detail.question], ['needs-you', 'question', `Question ${i}?`]);
+      await h.sa.answerQuestion(job.jobId, `answer ${i}`);
+    }
+    const got = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual([got.state, got.reason, got.detail.phase, got.detail.why], ['needs-you', 'stuck', 'spec', 'question-cap']);
+    assert.equal(h.started(job.jobId, 'spec').length, 4);
+    assert.deepEqual(h.worker.cards().at(-1).userAnswers.map((a) => a.answer), ['answer 1', 'answer 2', 'answer 3']);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a dismissed blocker closes after the extra round', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const pipeline = defaultConfig().pipeline.map((p) => (p.phase === 'spec-review' ? { ...p, maxRounds: 1 } : p));
+    const h = await harness({
+      projects: { [shared.repo]: { pipeline } },
+      handlers: handlersWith({
+        ...NO_BRAINSTORM,
+        'spec-review:review': (ctx) => (ctx.card.round === 1 ? changes(BLOCKER)(ctx) : approve(ctx)),
+        'spec-review:fix': ({ card, publish }) => (card.round === 1
+          ? decline(BLOCKER)({ publish })
+          : publish({ findings: [{ ...BLOCKER, disposition: `declined: the user said "${card.userAnswers[0].answer}"` }] })),
+        verify: ({ card, publish }) => publish({ verified: card.contested.map(({ id }) => ({ id, verified: true, evidence: EVIDENCE })) }),
+        'plan:author': () => HOLD,
+      }),
+    });
+    const job = await createDefaultJob(h);
+    assert.equal(job.pipeline.find((p) => p.phase === 'spec-review').maxRounds, 1);
+    const parked = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    const verifyAttempt = h.started(job.jobId, 'spec-review').at(-1);
+    assert.deepEqual([parked.state, parked.reason, parked.detail.kind, parked.detail.attemptId], ['needs-you', 'question', 'blocker', verifyAttempt.attemptId]);
+
+    await h.sa.answerQuestion(job.jobId, 'leave it');
+    const got = await h.drive(job.jobId, launchedIn('plan'));
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual(loopSteps(h.started(job.jobId, 'spec-review')), [
+      ['review', 1, false], ['fix', 1, true], ['verify', null, false], ['fix', 2, true], ['review', 2, false],
+    ]);
+    const fix2 = h.worker.cards().find((c) => c.purpose === 'fix' && c.round === 2);
+    assert.deepEqual(fix2.reviewFindings, [BLOCKER]);
+    assert.equal(fix2.previousFindings, null);
+    assert.deepEqual(fix2.userAnswers.map((a) => a.answer), ['leave it']);
+    const fix2Body = h.worker.log.find((e) => e.card === fix2).body;
+    assert.equal(fix2Body.findings[0].disposition, 'declined: the user said "leave it"');
+    assert.deepEqual(got.completions.find((c) => c.phase === 'spec-review'), { phase: 'spec-review', visit: 1, unresolved: [], verification: [] });
+    assert.deepEqual(steps(h.started(job.jobId).slice(-1)), [['plan', null, 'author', 'planner']]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
 });
