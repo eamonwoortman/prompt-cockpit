@@ -72,6 +72,8 @@ export function answeredInScope(job, phaseId, taskId = null) {
   return (job.answers ?? []).filter((a) => scope.has(a.forAttemptId)).length;
 }
 
+// Decision 9: an answered question does not consume an attempt.
+const consumes = (job, a) => CONSUMING_OUTCOMES.has(a.outcome) && !(a.outcome === 'question' && answerFor(job, a.attemptId) != null);
 const questionCap = (job) => job.limits.questionsPerScope ?? 3;
 const answerMap = (job) => new Map((job.answers ?? []).map((a) => [a.forAttemptId, a.answer]));
 
@@ -102,7 +104,7 @@ function capOutcome(reviewFindings, finalFix, verify, round = null) {
       question: confirmed.map(({ f }) => `The verifier confirmed blocker ${f.id}: ${f.text}`).join('\n'),
       evidence: confirmed.map(({ f, v }) => `${f.id}: ${v.evidence}`).join('\n'),
       blockers: confirmed.map(({ f }) => finding(f)),
-      carried: unresolved(null).filter((f) => f.severity !== 'blocker'),
+      carried: unresolved('disputed-not-verified').filter((f) => !confirmed.some((c) => c.f.id === f.id)),
     };
   }
   return { type: 'complete', unresolved: unresolved('disputed-not-verified'), verification };
@@ -274,7 +276,7 @@ function routeOrApply(job, ctx, { last, role, launchArgs, stuck }) {
   if (!decision) {
     const { phase, task, attempts, purpose, round } = launchArgs;
     const byFailed = phase.kind !== 'author';
-    const used = attempts.filter((a) => (byFailed ? a.outcome === 'failed' : CONSUMING_OUTCOMES.has(a.outcome))).length;
+    const used = attempts.filter((a) => (byFailed ? a.outcome === 'failed' : consumes(job, a))).length;
     return {
       type: 'route',
       forAttemptId: last.attemptId,
@@ -324,7 +326,7 @@ function authorAction(job, phase, ctx) {
     return { type: 'needs-you', reason: 'question', detail: { attemptId: last.attemptId, question: last.question } };
   }
 
-  const used = attempts.filter((a) => CONSUMING_OUTCOMES.has(a.outcome) && !(a.outcome === 'question' && answerFor(job, a.attemptId) != null));
+  const used = attempts.filter((a) => consumes(job, a));
   if (used.length >= attemptCap(limits, null)) return stuck('attempt-cap');
 
   const isTest = phase.phase === 'test';

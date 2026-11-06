@@ -892,6 +892,25 @@ test('carried minors survive the extra round', () => {
   assert.deepEqual(disputed.unresolved, [{ ...M1, status: 'open' }, { ...B2, status: 'disputed-not-verified' }]);
 });
 
+test('blockers the base verifier disputed survive the extra round', () => {
+  const B3 = F('B3', 'blocker');
+  const split = { ...ver([{ id: 'B1', verified: true, evidence: 'B1 reproduced' }, { id: 'B3', verified: false, evidence: 'B3 is fine' }]), id: 'v1' };
+  const head = [rev(1, 'changes', [B1, B3, M1]), fix(1, { B1: 'declined: no', B3: 'declined: no', M1: 'open' }, true), split, ...answered('v1')];
+  assert.deepEqual(pick(nextAction(extra(...head), ctx()), 'purpose', 'round', 'reviewFindings'), { purpose: 'fix', round: 2, reviewFindings: [B1] });
+  const approved = nextAction(extra(...head, fix(2, { B1: 'fixed' }, true), rev(2, 'approve')), ctx());
+  assert.equal(approved.type, 'complete-phase');
+  assert.deepEqual(approved.unresolved, [{ ...B3, status: 'disputed-not-verified' }, { ...M1, status: 'open' }]);
+});
+
+test('route: attemptsUsed in an author phase excludes an answered question', () => {
+  const job = build(...asked('a1', 1), ...answered('a1'), ...authorFail('a2', 'invalid-result'));
+  const action = nextAction(job, routing());
+  assert.equal(action.type, 'route');
+  assert.equal(action.forAttemptId, 'a2');
+  assert.equal(action.attemptsUsed, 1);
+  assert.equal(action.attemptsLeft, 2);
+});
+
 test('the extra round in a task loop', () => {
   const T1 = taskCreated('T1');
   const task = (...list) => oneRound({}, ...upTo('implement'), ev.tasksLoaded([T1]), ...items(list.map((x) => (x.type ? x : { phase: 'implement', task: 'T1', ...x }))));
