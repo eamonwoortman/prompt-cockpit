@@ -808,6 +808,8 @@ test('question cap turns the next question into stuck', () => {
   assert.equal(capped.reason, 'stuck');
   assert.equal(capped.detail.why, 'question-cap');
   assert.equal(capped.detail.phase, 'spec');
+  assert.equal(capped.detail.attemptId, 'a3');
+  assert.equal(capped.detail.question, 'a3?');
 
   const { questionsPerScope, ...noCap } = limits;
   const legacy = (...events) => deriveJob([...provisionedEvents({ limits: noCap }), ...events].map((e, i) => ({ seq: i + 1, at: 1, ...e })));
@@ -880,6 +882,8 @@ test('an answered confirmed blocker gets one extra round', () => {
   const capped = nextAction(oneRound({ questionsPerScope: 1 }, ...upTo('spec-review'), ...items([...raised, confirms('B2', 'v2', 2)])), ctx());
   assert.deepEqual(pick(capped, 'type', 'reason'), { type: 'needs-you', reason: 'stuck' });
   assert.equal(capped.detail.why, 'question-cap');
+  assert.equal(capped.detail.attemptId, 'v2');
+  assert.equal(capped.detail.question, again.detail.question);
 });
 
 test('carried minors survive the extra round', () => {
@@ -1069,6 +1073,8 @@ test('question cap applies to stand-in escalations', () => {
   assert.equal(action.reason, 'stuck');
   assert.equal(action.detail.why, 'question-cap');
   assert.equal(action.detail.phase, 'brainstorm');
+  assert.equal(action.detail.attemptId, 's2');
+  assert.equal(action.detail.question, 'Please decide Q4');
   assert.equal(nextAction(bs({ questionsPerScope: 2 }, ...events), ctx()).detail.kind, 'stand-in');
 });
 
@@ -1076,6 +1082,11 @@ test('a failed stand-in attempt retries the stand-in', () => {
   const job = bs({}, ...askDone('b1', [Q1, Q2]), bsStarted('s1', 'answer'), ended('s1', 'failed', { reason: 'no-result', signature: 'no-result|', at: T0 }));
   assert.deepEqual(nextAction(job, ctx()), { type: 'wait', until: T0 + MIN, why: 'backoff' });
   assert.deepEqual(nextAction(job, ctx({ now: T0 + MIN })), launchOf(job, 'stand-in', { ...BS, n: 3, recovery: true, previousAttemptId: 's1', purpose: 'answer', openQuestions: [Q1, Q2] }));
+});
+
+test('an interrupted stand-in answer relaunches the stand-in on the same batch', () => {
+  const job = bs({}, ...askDone('b1', [Q1, Q2]), bsStarted('s1', 'answer'), ended('s1', 'interrupted', { at: T0 }));
+  assert.deepEqual(nextAction(job, ctx({ now: T0 })), launchOf(job, 'stand-in', { ...BS, n: 2, recovery: true, previousAttemptId: 's1', purpose: 'answer', openQuestions: [Q1, Q2] }));
 });
 
 test('attemptContext rebuilds ask and answer context', () => {

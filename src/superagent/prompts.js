@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { artifactPaths, reviewPaths, requiredOutputs, reviseOutputs as reviseSet, BRAINSTORM_BATCH } from './results.js';
-import { brainstormLog } from './sequencer.js';
+import { brainstormLog, DEFAULT_REVIEW_ROUNDS } from './sequencer.js';
 
 export const UNATTENDED_DENY_MESSAGE = 'You are running unattended. Put your question in `result.json` with `status: blocked`.';
 export const RECOVERY_NOTE = 'check every worktree\'s git status and log, and the ledger, before repeating work; continue from `handoff.md` if present';
@@ -91,6 +91,13 @@ function purposeFields(job, phase, attempt) {
   if (purpose === 'fix' && done.some((a) => REVIEW_PURPOSES.has(a.purpose) && a.round === round)) previousFindings = reviewFile(round);
   else if (REVIEW_PURPOSES.has(purpose) && round > 1) previousFindings = reviewFile(round - 1);
 
+  // An extra round (Decision 10) runs its fix before its review, so that fix shares the review's round.
+  let previousResponse = null;
+  if (purpose === 'review' && round > 1) {
+    const fixRound = round > (phase.maxRounds ?? DEFAULT_REVIEW_ROUNDS) ? round : round - 1;
+    previousResponse = reviewPaths(job, { phase: phase.phase, round: fixRound }).response;
+  }
+
   let reviewFindings = null;
   let reviseOutputs = null;
   if (purpose === 'fix') {
@@ -138,6 +145,7 @@ function purposeFields(job, phase, attempt) {
     task: attempt.taskDef ?? (task != null ? (job.tasks ?? []).find((t) => t.id === task) ?? null : null),
     taskCommits,
     previousFindings,
+    ...(purpose === 'review' ? { previousResponse } : {}),
     reviewFindings,
     contested,
     ...(exchanges ? { exchanges } : {}),

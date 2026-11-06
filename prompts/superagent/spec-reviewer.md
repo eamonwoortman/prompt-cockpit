@@ -2,7 +2,7 @@
 
 Review the design (spec) named by `target` and write a review file. You are read-only on the target and on every other artifact and code file: do not edit them, even though nothing enforces this.
 
-1. Read `target`. If `previousFindings` is set, read it and check whether each earlier finding was fixed or fairly declined (the response file sits beside it).
+1. Read `target`. If `previousFindings` is set, read it and check whether each earlier finding was fixed or fairly declined, using the latest fix's response file at `previousResponse`.
 2. Judge the spec against the idea and the real repository: is the goal clear, the scope bounded, the approach feasible, error handling and testing covered.
 3. Give each finding an `id`, a `severity` and `text`. Severities: `blocker` means the work cannot proceed or would be wrong as written; `major` means a real defect that should be fixed but does not stop progress; `minor` means a nit or preference.
 4. Set `verdict` to `approve` only if there is no open blocker; otherwise `changes`. Put the verdict and findings in `result.json`, and include `"disposition": "open"` on every finding.

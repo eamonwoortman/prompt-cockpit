@@ -350,6 +350,26 @@ test('an extra-round fix has no review at its round, so previousFindings is null
   assert.deepEqual(extra.reviewFindings, REVIEW_FINDINGS);
 });
 
+test('a review card names the response of the fix that ran just before it as previousResponse', async () => {
+  const { job, card } = await m2();
+  const paths = (phase, round) => reviewPaths(job, { phase, round });
+  assert.equal((await card('spec-reviewer', 'spec-review', { purpose: 'review', round: 1 })).previousResponse, null);
+  assert.equal((await card('spec-reviewer', 'spec-review', { purpose: 'review', round: 2 })).previousResponse, paths('spec-review', 1).response);
+  const extra = await card('spec-reviewer', 'spec-review', { purpose: 'review', round: 4 });
+  assert.equal(extra.previousResponse, paths('spec-review', 4).response);
+  assert.equal(extra.previousFindings, paths('spec-review', 3).review);
+  assert.equal((await card('plan-reviewer', 'plan-review', { purpose: 'review', round: 4 })).previousResponse, paths('plan-review', 4).response);
+  const taskReview = await card('task-reviewer', 'implement', { purpose: 'task-review', round: 2, task: 'T1', taskDef: TASK_DEF });
+  assert.ok(!('previousResponse' in taskReview));
+  assert.ok(!('previousResponse' in (await card('spec-writer', 'spec-review', { purpose: 'fix', round: 1 }))));
+  const read = (f) => fs.readFile(path.join(templatesDir(), f), 'utf8');
+  for (const f of ['spec-reviewer.md', 'plan-reviewer.md']) {
+    const t = await read(f);
+    assert.ok(t.includes('`previousResponse`'), `${f}: names previousResponse`);
+    assert.ok(!t.includes('sits beside it'), `${f}: no sibling-file rule`);
+  }
+});
+
 async function brainstormJob(extra = []) {
   const emptyDir = await tempDir('sa-prompts-bs-');
   const job = deriveJob([...provisionedEvents({ jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', idea: IDEA, pipeline: defaultConfig().pipeline }), ...extra]);
@@ -438,7 +458,7 @@ test('templates exist and state the rules', async () => {
   const read = (f) => fs.readFile(path.join(templatesDir(), f), 'utf8');
   const has = async (f, ...needles) => { const t = await read(f); for (const n of needles) assert.ok(t.includes(n), `${f}: missing ${n}`); };
   await has('brainstormer.md', 'brief', 'questions', '## Assumptions made for you', '## Your answers', 'question id', 'Do not write a design document');
-  await has('stand-in.md', ...ANSWER_TAGS, 'escalated', 'final message', 'When unsure whether');
+  await has('stand-in.md', ...ANSWER_TAGS, 'escalated', 'final message', 'When unsure whether', 'put why you escalated in `summary`');
   await has('spec-writer.md', '## Assumptions made for you', '## Your answers');
   for (const f of ['spec-reviewer', 'plan-reviewer', 'task-reviewer', 'verifier', 'planner', 'implementer', 'tester']) await has(`${f}.md`, '`userAnswers`');
   for (const f of ['brainstormer.md', 'stand-in.md']) assert.ok((await read(f)).split('\n').length < 25);

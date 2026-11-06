@@ -612,6 +612,17 @@ test('createJob rejects a pipeline whose role has no template with ERR_NO_TEMPLA
   } finally { registry._reset(); }
 });
 
+test('createJob refuses manual mode on a pipeline with a brainstorm; a fixture without one is unaffected', async () => {
+  try {
+    const h = await harness();
+    await assert.rejects(create(h, { fixture: undefined, mode: 'manual' }), { code: 'ERR_MODE_UNSUPPORTED', message: 'superagent: manual mode is not built yet' });
+    await noJobDirs(h.jobsRoot);
+    assert.deepEqual(h.sa.listJobs(), []);
+    const job = await create(h, { mode: 'manual' });
+    assert.deepEqual([job.state, job.mode], ['running', 'manual']);
+  } finally { registry._reset(); }
+});
+
 test('a project override template satisfies the check', async () => {
   try {
     const h = await harness();

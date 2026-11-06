@@ -34,7 +34,7 @@ export function hasAlternate(model, alternate) {
 }
 
 const REVIEW_PURPOSES = new Set(['review', 'task-review']);
-const DEFAULT_REVIEW_ROUNDS = 3;
+export const DEFAULT_REVIEW_ROUNDS = 3;
 
 export function attemptsFor(job, phase, task = null) {
   return job.attempts.filter((a) => a.phase === phase && (a.task ?? null) === task);
@@ -328,7 +328,7 @@ function authorAction(job, phase, ctx) {
   const limits = job.limits;
   const stuck = (why, extra) => stuckAction(phase, null, why, last, extra);
   if (last?.outcome === 'question' && answerFor(job, last.attemptId) == null) {
-    if (answeredInScope(job, phase.phase) >= questionCap(job)) return stuck('question-cap');
+    if (answeredInScope(job, phase.phase) >= questionCap(job)) return stuck('question-cap', { attemptId: last.attemptId, question: last.question });
     return { type: 'needs-you', reason: 'question', detail: { attemptId: last.attemptId, question: last.question } };
   }
 
@@ -375,7 +375,7 @@ function scopeAction(job, phase, ctx, { attempts, loop, task, roles, onComplete 
   const last = attempts[attempts.length - 1];
   const stuck = (why, extra) => stuckAction(phase, task?.id ?? null, why, last, extra);
   if (loop.type === 'question' || loop.type === 'question-open') {
-    if (answeredInScope(job, phase.phase, task?.id ?? null) >= questionCap(job)) return stuck('question-cap');
+    if (answeredInScope(job, phase.phase, task?.id ?? null) >= questionCap(job)) return stuck('question-cap', { attemptId: loop.attemptId, question: loop.question });
     return {
       type: 'needs-you',
       reason: 'question',
@@ -514,7 +514,7 @@ function brainstormAction(job, phase, ctx) {
   const last = attempts[attempts.length - 1];
   const stuck = (why, extra) => stuckAction(phase, null, why, last, extra);
   if (last?.outcome === 'question' && answerFor(job, last.attemptId) == null) {
-    if (answeredInScope(job, phase.phase) >= questionCap(job)) return stuck('question-cap');
+    if (answeredInScope(job, phase.phase) >= questionCap(job)) return stuck('question-cap', { attemptId: last.attemptId, question: last.question });
     const entry = exchangesOf(job, attempts).find((e) => e.id === last.escalated) ?? null;
     return {
       type: 'needs-you',

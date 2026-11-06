@@ -585,6 +585,7 @@ export function createSuperagent({
     const origin = path.resolve(primaryPath);
     const resolved = config.resolve(origin);
     const pipeline = await resolvePipeline(resolved, fixture, origin);
+    if (mode === 'manual' && pipeline.some((p) => p.kind === 'brainstorm')) throw fail('ERR_MODE_UNSUPPORTED', 'superagent: manual mode is not built yet');
     const jobId = idImpl();
     const slug = fitSlug(pipeline, { title, jobId });
     const created = {
