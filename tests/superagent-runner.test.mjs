@@ -440,7 +440,7 @@ test('every ask is denied, including the brainstormer\'s AskUserQuestion', async
     assert.match(asked.message, /questions/);
     assert.equal(registry.get(sessionId).pendingApprovals.length, 0, 'nothing reaches the human');
     const bash = await worker.emitApprovalRequest({ command: 'curl x' }, 'Bash');
-    assert.equal(bash.behavior, 'deny');
+    assert.deepEqual(bash, { behavior: 'deny', message: denyMessageFor('brainstormer') });
 
     const job2 = await newJob('j2');
     await runner.launch(job2, standInAction());
@@ -1220,5 +1220,47 @@ test('scriptedWorker publishes a read-only card\'s result as its final message',
     assert.equal(ends.length, 1);
     assert.equal(ends[0].outcome, 'done');
     assert.deepEqual(ends[0].answers, answerBody().answers);
+  } finally { registry._reset(); }
+});
+
+test('a removal after a failed result write still materialises the reply', async () => {
+  registry._reset();
+  try {
+    let failures = 1;
+    const writeJsonImpl = async (file, value) => {
+      if (failures-- > 0) throw new Error('disk full');
+      return writeJsonAtomic(file, value);
+    };
+    const { store, job, ended, factory, runner } = await standInSetup({ writeJsonImpl });
+    await runner.launch(job, standInAction());
+    const attempt = lastAttempt(store, job.jobId);
+    reply(factory.impls.get(attempt.sessionId), JSON.stringify(answerBody()), { idle: false });
+    await runner.review(job);
+    assert.equal(await exists(path.join(attempt.dir, RESULT_FILE)), false);
+    registry.closeSession(attempt.sessionId);
+    await runner.drain();
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].outcome, 'done');
+    assert.deepEqual(ends[0].answers, answerBody().answers);
+  } finally { registry._reset(); }
+});
+
+test('a removed attempt records the tokens last seen on its row', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended } = await setup();
+    const runner = createRunner({ registry: sessionFactory(registry).registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    registry.addSessionRemovedListener(runner.onSessionRemoved);
+    await runner.launch(job, launchAction());
+    const sessionId = lastAttempt(store, job.jobId).sessionId;
+    Object.assign(registry.get(sessionId).usageAcc.totals, { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 20 });
+    await runner.review(job);
+    registry.closeSession(sessionId);
+    await runner.drain();
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0].reason, 'no-result');
+    assert.equal(ends[0].tokens, 135);
   } finally { registry._reset(); }
 });

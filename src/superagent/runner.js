@@ -19,8 +19,9 @@
 //   result.json as soon as scan sees it (materialize, not a claimer), so
 //   removal, stall, stop and reconcile all judge the on-disk file. A reply
 //   whose row is removed, or whose cockpit dies, before the next scan is lost.
-// - Tokens: attempt-ended carries the row's usage totals at finish, or null
-//   when there is no row (reconcile).
+// - Tokens: attempt-ended carries the row's usage totals at finish, the last
+//   scan's snapshot once the row is removed, or null with no live record
+//   (reconcile).
 // - Context drift (spike S2): PreCompact is an observation point only. The hook
 //   logs a `precompact` event and lets compaction continue.
 //
@@ -49,6 +50,7 @@ export const PROGRESS_TYPES = new Set(['assistant', 'user', 'result']);
 const failed = (reason, detail) => ({ outcome: 'failed', reason, signature: failureSignature(reason, detail) });
 const messageOf = (err) => String(err?.message ?? err);
 const TOKEN_KEYS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'];
+const sumTokens = (totals) => (totals && TOKEN_KEYS.every((k) => Number.isFinite(totals[k])) ? TOKEN_KEYS.reduce((sum, k) => sum + totals[k], 0) : null);
 
 // A read-only worker's final message: a fenced ```json block if present, else
 // the first `{` to the last `}`. Only a JSON object counts, so a reply that is
@@ -119,10 +121,10 @@ export function createRunner({
 
   const endedEvent = (live, payload) => ({ type: 'attempt-ended', attemptId: live.attemptId, ...payload });
 
+  // A removed row is gone from the registry, so fall back to the last scan's snapshot.
   function tokensOf(live) {
-    const totals = registry.get(live.sessionId)?.usageAcc?.totals;
-    if (!totals || !TOKEN_KEYS.every((k) => Number.isFinite(totals[k]))) return null;
-    return TOKEN_KEYS.reduce((sum, k) => sum + totals[k], 0);
+    const row = registry.get(live.sessionId);
+    return row ? sumTokens(row.usageAcc?.totals) : live.tokens;
   }
 
   async function finish(live, outcome) {
@@ -241,6 +243,7 @@ export function createRunner({
       return;
     }
     claim(live, async () => {
+      await materialize(live);
       const verdict = await judge(live, store.get(live.jobId), contextOf(live));
       await finish(live, verdict.payload ?? failed('no-result', `session ${reason}`));
     });
@@ -294,6 +297,7 @@ export function createRunner({
         live.materialized = false;
       }
     }
+    live.tokens = sumTokens(row.usageAcc?.totals);
   }
 
   async function review(job) {
@@ -382,6 +386,7 @@ export function createRunner({
       readOnly: READ_ONLY_ROLES.has(action.role),
       finalText: null,
       materialized: false,
+      tokens: null,
       sessionId: null,
       scannedThrough: 0,
       lastProgressAt: now(),
