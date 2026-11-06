@@ -21,7 +21,7 @@ import path from 'node:path';
 
 export const CONSUMING_OUTCOMES = new Set(['done', 'failed', 'question']);
 // createJob's gate (index.js).
-export const RUNNABLE_KINDS = new Set(['author', 'review', 'per-task', 'human']);
+export const RUNNABLE_KINDS = new Set(['author', 'brainstorm', 'review', 'per-task', 'human']);
 export const ROUTER_ACTIONS = ['retry', 'retry-alternate', 'retry-handoff', 'escalate'];
 export const ROUTED_REASONS = new Set(['no-result', 'invalid-result', 'turn-cap', 'stalled', 'failed', 'blocked']);
 

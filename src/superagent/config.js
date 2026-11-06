@@ -11,7 +11,8 @@ import { readJsonChecked, writeJsonAtomic } from '../json-store.js';
 import { costForUsage } from '../usage.js';
 import { CLAUDE_EFFORTS } from '../provider-registry.js';
 
-export const PHASE_KINDS = ['author', 'review', 'per-task', 'human'];
+export const PHASE_KINDS = ['author', 'brainstorm', 'review', 'per-task', 'human'];
+export const STAND_IN_ROLE = 'stand-in';
 export const WORKER_PERMISSION_MODES = ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk'];
 const MODES = ['automatic', 'manual'];
 // The router's answer limit; its generation cap adds a thinking allowance on top.
@@ -50,7 +51,7 @@ export function defaultConfig() {
   return {
     mode: 'automatic',
     pipeline: [
-      { phase: 'brainstorm', kind: 'author', role: 'brainstormer', inputs: ['idea'], outputs: ['brief'] },
+      { phase: 'brainstorm', kind: 'brainstorm', role: 'brainstormer', inputs: ['idea'], outputs: ['brief'] },
       { phase: 'spec', kind: 'author', role: 'spec-writer', inputs: ['brief'], outputs: ['spec'] },
       { phase: 'spec-review', kind: 'review', role: 'spec-reviewer', author: 'spec-writer', target: 'spec', maxRounds: 3 },
       { phase: 'plan', kind: 'author', role: 'planner', inputs: ['spec'], outputs: ['plan', 'tasks'] },
@@ -85,6 +86,7 @@ export function defaultConfig() {
       repeatedErrorStop: 2,
       brainstormExchanges: 20,
       brainstormTokens: null,
+      questionsPerScope: 3,
       driftHandoffPct: 70,
       longCapNotifyHours: 12,
     },
@@ -198,6 +200,15 @@ function checkPipeline(d, errors, { composition }) {
   }
   if (pipeline.some((p) => p?.kind === 'review' || p?.kind === 'per-task') && !isPlainObject(models.verifier)) {
     errors.push({ path: 'models.verifier', message: 'a verifier model is required when the pipeline has a review or per-task phase' });
+  }
+  const brainstorms = pipeline.map((p, i) => [p, i]).filter(([p]) => p?.kind === 'brainstorm');
+  if (brainstorms.length > 0) {
+    if (!isPlainObject(models[STAND_IN_ROLE])) {
+      errors.push({ path: keyPath('models', STAND_IN_ROLE), message: 'a stand-in model is required when the pipeline has a brainstorm phase' });
+    }
+    if (brainstorms.length > 1 || brainstorms[0][1] !== 0) {
+      errors.push({ path: 'pipeline', message: 'a brainstorm phase must be the first phase, and there can be only one' });
+    }
   }
   if (composition) checkComposition(pipeline, errors);
 }

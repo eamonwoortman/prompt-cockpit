@@ -295,3 +295,33 @@ test('alternate must be a non-empty string different from model', () => {
   }
   assert.deepEqual(validateDefaults(defaultConfig()).errors, []);
 });
+
+test('default brainstorm phase has kind brainstorm', () => {
+  assert.deepEqual(defaultConfig().pipeline[0], { phase: 'brainstorm', kind: 'brainstorm', role: 'brainstormer', inputs: ['idea'], outputs: ['brief'] });
+  assert.deepEqual(validateDefaults(defaultConfig()).errors, []);
+});
+
+test('questionsPerScope defaults to 3 and must be a positive integer', () => {
+  assert.equal(defaultConfig().limits.questionsPerScope, 3);
+  const d = defaultConfig();
+  d.limits.questionsPerScope = 0;
+  assert.ok(hasError(validateDefaults(d), 'limits.questionsPerScope'));
+});
+
+test('a brainstorm phase needs a stand-in model', () => {
+  const d = defaultConfig();
+  delete d.models['stand-in'];
+  assert.ok(validateDefaults(d).errors.some((e) => e.path === "models['stand-in']" && e.message === 'a stand-in model is required when the pipeline has a brainstorm phase'));
+});
+
+test('a brainstorm phase must be first and unique', () => {
+  const message = 'a brainstorm phase must be the first phase, and there can be only one';
+  const moved = defaultConfig();
+  const [brainstorm] = moved.pipeline.splice(0, 1);
+  moved.pipeline.splice(1, 0, brainstorm);
+  const doubled = defaultConfig();
+  doubled.pipeline.splice(1, 0, { ...doubled.pipeline[0], phase: 'brainstorm2', outputs: [] });
+  for (const d of [moved, doubled]) {
+    assert.ok(validateDefaults(d).errors.some((e) => e.path === 'pipeline' && e.message === message));
+  }
+});

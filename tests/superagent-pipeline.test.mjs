@@ -13,9 +13,9 @@ import path from 'node:path';
 import * as registry from '../src/session-registry.js';
 import { HOLD, MIN, T0, deferred, ev, initRepo, scriptedWorker, sessionFactory, tempDir } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
-import { createSuperagentConfig } from '../src/superagent/config.js';
+import { MILESTONE_2_PIPELINE, createSuperagentConfig, defaultConfig } from '../src/superagent/config.js';
 import { artifactPaths } from '../src/superagent/results.js';
-import { createSuperagent } from '../src/superagent/index.js';
+import { createSuperagent, pipelineRoles } from '../src/superagent/index.js';
 import { ROUTER_SYSTEM_PROMPT } from '../src/superagent/router.js';
 
 const quiet = () => {};
@@ -1059,4 +1059,10 @@ test('router: the budget check runs before a router call', { timeout: TEST_TIMEO
     assert.equal(routerEvents(h, job.jobId).length, 0);
     await h.sa.stop();
   } finally { registry._reset(); }
+});
+
+test('pipelineRoles adds the stand-in for a brainstorm phase', () => {
+  const roles = pipelineRoles(defaultConfig().pipeline);
+  assert.ok(roles.includes('brainstormer') && roles.includes('stand-in'));
+  assert.ok(!pipelineRoles(MILESTONE_2_PIPELINE).includes('stand-in'));
 });

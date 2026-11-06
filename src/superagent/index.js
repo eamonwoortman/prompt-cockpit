@@ -30,7 +30,7 @@
 import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { FIXTURES, defaultSuperagentRoot, validateDefaults, validateMilestoneFixture } from './config.js';
+import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateDefaults, validateMilestoneFixture } from './config.js';
 import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
@@ -61,10 +61,11 @@ function localDate(ms) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function pipelineRoles(pipeline) {
+export function pipelineRoles(pipeline) {
   const roles = [];
   for (const p of pipeline) {
     if (p.kind !== 'human') roles.push(p.role);
+    if (p.kind === 'brainstorm') roles.push(STAND_IN_ROLE);
     if (p.kind === 'review') roles.push(p.author);
     if (p.kind === 'per-task' && p.taskReview !== undefined) roles.push(p.taskReview);
   }
