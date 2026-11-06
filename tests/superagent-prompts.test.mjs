@@ -458,3 +458,31 @@ test('later workers treat the spec sections as the user decisions and reviewable
   assert.equal(parseCard(card).userAnswers, undefined);
   assert.ok(system.includes('`## Your answers` are the user\'s decisions and `## Assumptions made for you` are reviewable defaults'));
 });
+
+test('contract carves out ask and answer from the blocked-question rule, and templates pin the final-turn and reason rules', async () => {
+  const read = (f) => fs.readFile(path.join(templatesDir(), f), 'utf8');
+  const contract = await read('contract.md');
+  const never = contract.slice(contract.indexOf('## Never ask the user'), contract.indexOf('## Scope'));
+  assert.ok(never.includes('the brainstormer asks only through `questions`'));
+  assert.ok(never.includes('the stand-in escalates only as described under `answer`'));
+  const blocked = contract.split('\n').find((l) => l.startsWith('A `blocked` result needs none'));
+  assert.ok(blocked.includes('Exception: a blocked `answer` still needs `escalated` and `answers`. `ask` never blocks.'));
+  const brainstormer = await read('brainstormer.md');
+  assert.ok(brainstormer.includes('`unasked:`') && brainstormer.includes('instead of a question id'));
+  assert.ok((await read('stand-in.md')).includes('why the assumption is safe'));
+  assert.ok((await read('spec-writer.md')).includes('`userAnswers`'));
+});
+
+test('userAnswers stay on the answered task: T1 cards carry them, T2 cards do not', async () => {
+  const events = [
+    { type: 'tasks-loaded', tasks: [TASK_DEF, { ...TASK_DEF, id: 'T2' }] },
+    started('i1', 'implement', 'implement', { task: 'T1' }), ended('i1', { outcome: 'question', question: 'T1Q?' }),
+    { type: 'needs-you', reason: 'question', detail: { attemptId: 'i1' } },
+    { type: 'question-answered', forAttemptId: 'i1', answer: 'T1A' },
+  ];
+  const { card } = await m2(events);
+  const t1 = await card('implementer', 'implement', { purpose: 'implement', task: 'T1', taskDef: TASK_DEF });
+  assert.deepEqual(t1.userAnswers, [{ question: 'T1Q?', answer: 'T1A' }]);
+  const t2 = await card('implementer', 'implement', { purpose: 'implement', task: 'T2', taskDef: { ...TASK_DEF, id: 'T2' } });
+  assert.equal('userAnswers' in t2, false);
+});

@@ -47,7 +47,7 @@ If the job card has a `purpose`, it says which kind of attempt this is and which
 - `answer` (stand-in): `answers`, a list of `{ "id", "tag", "answer", "reason" }` covering every id in `openQuestions` (`tag` is `from-idea`, `from-project` or `assumed`). To escalate one question, publish `status: "blocked"` with `question` (for the user), `escalated` (that question's id) and `answers` for all the others (it may be empty). A `done` result must not carry `escalated`. `failed` is allowed. It writes no files and has no commits.
 - `test`: on success `status: done`; on failure `status: failed` with `findings` (each `id`, `severity` (`blocker`, `major` or `minor`), `text`, optional `repo`).
 
-A `blocked` result needs none of these purpose fields, except `answer`, which still needs `question`, `escalated` and `answers`: publish your question instead. `ask` never blocks. Tester `findings`, if you include them, must still be well-formed.
+A `blocked` result needs none of these purpose fields; publish your question instead. Exception: a blocked `answer` still needs `escalated` and `answers`. `ask` never blocks. Tester `findings`, if you include them, must still be well-formed.
 
 ## Answers
 
@@ -55,7 +55,7 @@ A `blocked` result needs none of these purpose fields, except `answer`, which st
 
 ## Never ask the user
 
-Nobody is watching. `AskUserQuestion` is unavailable and any permission prompt is denied. If you cannot proceed without an answer, set `status` to `blocked`, put the question in `question`, and publish. Do not guess past a real ambiguity.
+Nobody is watching. `AskUserQuestion` is unavailable and any permission prompt is denied. If you cannot proceed without an answer, set `status` to `blocked`, put the question in `question`, and publish. Do not guess past a real ambiguity. Exceptions: the brainstormer asks only through `questions`, and the stand-in escalates only as described under `answer` and otherwise follows its own autonomy rules.
 
 ## Scope
 

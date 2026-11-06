@@ -204,8 +204,10 @@ test('createJob refuses pipelines this plan cannot run', async () => {
 
     const plain = await harness();
     await assert.rejects(create(plain, { fixture: 'milestone-9' }), { code: 'ERR_UNKNOWN_FIXTURE' });
-    const entries = await fs.readdir(h.jobsRoot).catch((err) => (err.code === 'ENOENT' ? [] : Promise.reject(err)));
-    assert.deepEqual(entries, []);
+    for (const jobsRoot of [h.jobsRoot, plain.jobsRoot]) {
+      const entries = await fs.readdir(jobsRoot).catch((err) => (err.code === 'ENOENT' ? [] : Promise.reject(err)));
+      assert.deepEqual(entries, []);
+    }
     assert.deepEqual(plain.sa.listJobs(), []);
   } finally { registry._reset(); }
 });
