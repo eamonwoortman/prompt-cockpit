@@ -60,19 +60,36 @@ export function failureSignature(reason, firstLine = '') {
   return `${reason}|${line}`;
 }
 
+// Plan 5 (docs/superpowers/plans/2026-11-06-superagent-p5-brainstorm.md,
+// Decisions 8-10): an answered question resumes the scope that asked it, and a
+// scope's answered questions are capped at limits.questionsPerScope.
+export function answerFor(job, attemptId) {
+  return (job.answers ?? []).find((a) => a.forAttemptId === attemptId)?.answer ?? null;
+}
+
+export function answeredInScope(job, phaseId, taskId = null) {
+  const scope = new Set(attemptsFor(job, phaseId, taskId).map((a) => a.attemptId));
+  return (job.answers ?? []).filter((a) => scope.has(a.forAttemptId)).length;
+}
+
+const questionCap = (job) => job.limits.questionsPerScope ?? 3;
+const answerMap = (job) => new Map((job.answers ?? []).map((a) => [a.forAttemptId, a.answer]));
+
 const finding = ({ id, severity, text }) => ({ id, severity, text });
 const loopLaunch = (purpose, round, side, over = {}) => ({ type: 'launch', purpose, round, final: false, side, reviewFindings: null, contested: null, ...over });
+// Deduplicated by id, the later entry winning.
+const mergeById = (...lists) => [...new Map(lists.flat().map((f) => [f.id, f])).values()];
 
 // Decision 7: at the cap, a last-round blocker is contested unless the final
 // fix lists it as fixed; contested blockers go to one verifier attempt.
-function capOutcome(reviewFindings, finalFix, verify) {
+function capOutcome(reviewFindings, finalFix, verify, round = null) {
   const disposition = new Map((finalFix.findings ?? []).map((f) => [f.id, f.disposition]));
   const left = reviewFindings.filter((f) => disposition.get(f.id) !== 'fixed');
   const contested = left.filter((f) => f.severity === 'blocker');
   const statusOf = (f) => (String(disposition.get(f.id) ?? '').startsWith('declined') ? 'declined' : 'open');
   const unresolved = (blockerStatus) => left.map((f) => ({ ...finding(f), status: f.severity === 'blocker' ? blockerStatus : statusOf(f) }));
   if (contested.length === 0) return { type: 'complete', unresolved: unresolved(null), verification: [] };
-  if (!verify) return loopLaunch('verify', null, 'verifier', { contested: contested.map((f) => f.id) });
+  if (!verify) return loopLaunch('verify', round, 'verifier', { contested: contested.map((f) => f.id) });
 
   const verification = (verify.verified ?? []).map(({ id, verified, evidence }) => ({ id, verified, evidence }));
   const confirmed = contested
@@ -84,15 +101,17 @@ function capOutcome(reviewFindings, finalFix, verify) {
       attemptId: verify.attemptId,
       question: confirmed.map(({ f }) => `The verifier confirmed blocker ${f.id}: ${f.text}`).join('\n'),
       evidence: confirmed.map(({ f, v }) => `${f.id}: ${v.evidence}`).join('\n'),
+      blockers: confirmed.map(({ f }) => finding(f)),
+      carried: unresolved(null).filter((f) => f.severity !== 'blocker'),
     };
   }
   return { type: 'complete', unresolved: unresolved('disputed-not-verified'), verification };
 }
 
-function loopState(done, { initial, maxRounds }) {
+function loopState(done, { initial, maxRounds, answers = new Map() }) {
   if (initial && !done.some((a) => a.purpose === initial)) return loopLaunch(initial, null, 'initial');
   const reviewer = initial ? 'task-review' : 'review';
-  const reviews = done.filter((a) => REVIEW_PURPOSES.has(a.purpose));
+  const reviews = done.filter((a) => REVIEW_PURPOSES.has(a.purpose) && a.round <= maxRounds);
   const round = reviews.length;
   if (round === 0) return maxRounds > 0 ? loopLaunch(reviewer, 1, 'reviewer') : { type: 'complete', unresolved: [], verification: [] };
 
@@ -102,19 +121,35 @@ function loopState(done, { initial, maxRounds }) {
   const fix = done.find((a) => a.purpose === 'fix' && a.round === round);
   if (!fix) return loopLaunch('fix', round, 'author', { final: round >= maxRounds, reviewFindings: findings.map(finding) });
   if (round < maxRounds) return loopLaunch(reviewer, round + 1, 'reviewer');
-  return capOutcome(findings, fix, done.findLast((a) => a.purpose === 'verify'));
+
+  // Decision 10: each answered confirmed blocker earns one extra round E.
+  let outcome = capOutcome(findings, fix, done.findLast((a) => a.purpose === 'verify' && a.round == null));
+  let carried = [];
+  for (let n = 1; outcome.type === 'question' && answers.has(outcome.attemptId); n++) {
+    carried = mergeById(carried, outcome.carried);
+    const E = maxRounds + n;
+    const fixE = done.find((a) => a.purpose === 'fix' && a.round === E);
+    if (!fixE) return loopLaunch('fix', E, 'author', { final: true, reviewFindings: outcome.blockers });
+    const reviewE = done.find((a) => REVIEW_PURPOSES.has(a.purpose) && a.round === E);
+    if (!reviewE) return loopLaunch(reviewer, E, 'reviewer');
+    if (reviewE.verdict === 'approve') return { type: 'complete', unresolved: carried, verification: [] };
+    outcome = capOutcome(reviewE.findings ?? [], { findings: [] }, done.find((a) => a.purpose === 'verify' && a.round === E), E);
+  }
+  if (outcome.type === 'complete') return { ...outcome, unresolved: mergeById(carried, outcome.unresolved) };
+  return outcome;
 }
 
 // `attempts` are one scope's (a review phase's, or one task's) in order.
 // `initial: 'implement'` requires a done implementer attempt before the first
 // review; `maxRounds: 0` means no reviewer at all (a task without taskReview).
 // Only failed attempts count toward `failedCap`; repeated-error and back-off
-// are the caller's (Plan 2 rules applied per scope).
-export function reviewLoop(attempts, { initial, maxRounds, failedCap }) {
+// are the caller's (Plan 2 rules applied per scope). `answers` (attemptId ->
+// answer) reopens a scope whose question was answered.
+export function reviewLoop(attempts, { initial, maxRounds, failedCap, answers = new Map() }) {
   if (attempts.some((a) => !a.outcome)) return { type: 'pending' };
   const last = attempts[attempts.length - 1];
-  if (last?.outcome === 'question') return { type: 'question-open', attemptId: last.attemptId, question: last.question };
-  const state = loopState(attempts.filter((a) => a.outcome === 'done'), { initial, maxRounds });
+  if (last?.outcome === 'question' && !answers.has(last.attemptId)) return { type: 'question-open', attemptId: last.attemptId, question: last.question };
+  const state = loopState(attempts.filter((a) => a.outcome === 'done'), { initial, maxRounds, answers });
   if (state.type !== 'launch') return state;
   if (attempts.filter((a) => a.outcome === 'failed').length >= failedCap) return { type: 'stuck', why: 'attempt-cap' };
   return state;
@@ -127,6 +162,7 @@ function taskLoopOptions(job, phase) {
     initial: 'implement',
     maxRounds: phase?.taskReview ? (phase.maxRounds ?? job.limits.taskReviewRounds) : 0,
     failedCap: attemptCap(job.limits, true),
+    answers: answerMap(job),
   };
 }
 
@@ -281,13 +317,14 @@ function authorAction(job, phase, ctx) {
   if (attempts.some((a) => !a.outcome)) return { type: 'none' };
 
   const last = attempts[attempts.length - 1];
-  if (last?.outcome === 'question') {
+  const limits = job.limits;
+  const stuck = (why, extra) => stuckAction(phase, null, why, last, extra);
+  if (last?.outcome === 'question' && answerFor(job, last.attemptId) == null) {
+    if (answeredInScope(job, phase.phase) >= questionCap(job)) return stuck('question-cap');
     return { type: 'needs-you', reason: 'question', detail: { attemptId: last.attemptId, question: last.question } };
   }
 
-  const limits = job.limits;
-  const stuck = (why, extra) => stuckAction(phase, null, why, last, extra);
-  const used = attempts.filter((a) => CONSUMING_OUTCOMES.has(a.outcome));
+  const used = attempts.filter((a) => CONSUMING_OUTCOMES.has(a.outcome) && !(a.outcome === 'question' && answerFor(job, a.attemptId) != null));
   if (used.length >= attemptCap(limits, null)) return stuck('attempt-cap');
 
   const isTest = phase.phase === 'test';
@@ -327,15 +364,16 @@ function scopeAction(job, phase, ctx, { attempts, loop, task, roles, onComplete 
   const { now, liveSessions, maxConcurrentSessions } = ctx;
   if (loop.type === 'pending') return { type: 'none' };
   if (loop.type === 'complete') return onComplete(loop);
+  const last = attempts[attempts.length - 1];
+  const stuck = (why, extra) => stuckAction(phase, task?.id ?? null, why, last, extra);
   if (loop.type === 'question' || loop.type === 'question-open') {
+    if (answeredInScope(job, phase.phase, task?.id ?? null) >= questionCap(job)) return stuck('question-cap');
     return {
       type: 'needs-you',
       reason: 'question',
       detail: { attemptId: loop.attemptId, question: loop.question, evidence: loop.evidence ?? null, phase: phase.phase, task: task?.id ?? null },
     };
   }
-  const last = attempts[attempts.length - 1];
-  const stuck = (why, extra) => stuckAction(phase, task?.id ?? null, why, last, extra);
   if (loop.type === 'stuck') return stuck(loop.why);
 
   // Repeated-error reads Plan 2's consecutive window over the scope's consuming attempts.
@@ -374,7 +412,7 @@ const completePhase = (job, phase, unresolved, verification) => ({
 });
 
 function reviewLoopOptions(job, phase) {
-  return { initial: null, maxRounds: phase.maxRounds ?? DEFAULT_REVIEW_ROUNDS, failedCap: attemptCap(job.limits, null) };
+  return { initial: null, maxRounds: phase.maxRounds ?? DEFAULT_REVIEW_ROUNDS, failedCap: attemptCap(job.limits, null), answers: answerMap(job) };
 }
 
 function reviewAction(job, phase, ctx) {
@@ -423,15 +461,21 @@ export function attemptContext(job, attempt) {
     .filter((a) => a.phase === attempt.phase && (a.task ?? null) === task && a.outcome === 'done');
   const phase = job.pipeline.find((p) => p.phase === attempt.phase);
 
+  const state = () => loopState(done, phase.kind === 'per-task' ? taskLoopOptions(job, phase) : reviewLoopOptions(job, phase));
   let reviewFindings = null;
   if (purpose === 'fix') {
     const review = done.findLast((a) => REVIEW_PURPOSES.has(a.purpose) && a.round === round);
     if (review) reviewFindings = (review.findings ?? []).map(finding);
+    else if (phase) {
+      // An extra-round fix (Decision 10) runs before its round's review.
+      const launched = state();
+      if (launched.type === 'launch' && launched.purpose === 'fix') reviewFindings = launched.reviewFindings;
+    }
   }
   let contested = null;
   if (purpose === 'verify' && phase) {
-    const state = loopState(done, phase.kind === 'per-task' ? taskLoopOptions(job, phase) : reviewLoopOptions(job, phase));
-    if (state.type === 'launch' && state.purpose === 'verify') contested = state.contested;
+    const launched = state();
+    if (launched.type === 'launch' && launched.purpose === 'verify') contested = launched.contested;
   }
   return {
     purpose,

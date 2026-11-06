@@ -757,3 +757,163 @@ test('route: a per-task scope routes the implementer and applies retry, retry-al
   assert.deepEqual(applied('retry-alternate'), launchOf(job, 'implementer', { ...base, model: 'claude-opus-5-5' }));
   assert.deepEqual(applied('retry-handoff'), launchOf(job, 'implementer', { ...base, handoff: path.join('/d', 'handoff.md') }));
 });
+
+// Plan 5: the answer path, the per-scope question cap and the extra review round.
+
+const { answerFor, answeredInScope } = sequencer;
+const answered = (forAttemptId, answer = 'A') => [
+  { type: 'needs-you', reason: 'question', detail: { attemptId: forAttemptId } },
+  { type: 'question-answered', forAttemptId, answer },
+];
+const withLimits = (over, ...events) => deriveJob([...provisionedEvents({ limits: { ...limits, ...over } }), ...events].map((e, i) => ({ seq: i + 1, at: 1, ...e })));
+const asked = (id, n, phase = 'spec', question = `${id}?`) => [started(id, n, { phase }), ended(id, 'question', { question, at: T0 })];
+
+test('answerFor and answeredInScope read job.answers by attempt and scope', () => {
+  const job = implementWith([taskCreated('T1'), taskCreated('T2')], [
+    { phase: 'spec', purpose: 'author', id: 's1', outcome: 'question', question: 'S?' },
+    { phase: 'implement', task: 'T1', purpose: 'implement', id: 'i1', outcome: 'question', question: 'I?' },
+    { phase: 'implement', task: 'T2', purpose: 'implement', id: 'i2', outcome: 'question', question: 'J?' },
+  ], ...answered('s1', 'Postgres'), ...answered('i1', 'yes'));
+  assert.equal(answerFor(job, 's1'), 'Postgres');
+  assert.equal(answerFor(job, 'i2'), null);
+  assert.equal(answerFor({ answers: undefined }, 's1'), null);
+  assert.equal(answeredInScope(job, 'spec'), 1);
+  assert.equal(answeredInScope(job, 'implement'), 0);
+  assert.equal(answeredInScope(job, 'implement', 'T1'), 1);
+  assert.equal(answeredInScope(job, 'implement', 'T2'), 0);
+});
+
+test('an answered author question relaunches the phase', () => {
+  const open = build(...asked('a1', 1, 'spec', 'Which DB?'));
+  assert.deepEqual(nextAction(open, ctx()), { type: 'needs-you', reason: 'question', detail: { attemptId: 'a1', question: 'Which DB?' } });
+  const job = build(...asked('a1', 1), ...answered('a1'));
+  assert.equal(job.state, 'running');
+  assert.deepEqual(nextAction(job, ctx()), {
+    type: 'launch', phase: 'spec', task: null, role: 'spec-writer', model: 'claude-opus-5-5', effort: null, maxTurns: 60, n: 2, recovery: true, previousAttemptId: 'a1', ...AUTHOR_EXTRAS,
+  });
+});
+
+test('an answered question does not consume the attempt cap', () => {
+  const events = [...failedAt('a1', 1, T0, 'sig-one'), ...asked('a2', 2), ...answered('a2')];
+  const action = nextAction(withLimits({ attemptsPerPhase: 2 }, ...events), ctx({ now: T0 + 60 * MIN }));
+  assert.equal(action.type, 'launch');
+  assert.equal(action.phase, 'spec');
+  assert.equal(action.previousAttemptId, 'a2');
+});
+
+test('question cap turns the next question into stuck', () => {
+  const twoAnswered = [...asked('a1', 1), ...answered('a1'), ...asked('a2', 2), ...answered('a2')];
+  const capped = nextAction(withLimits({ questionsPerScope: 2 }, ...twoAnswered, ...asked('a3', 3)), ctx());
+  assert.equal(capped.type, 'needs-you');
+  assert.equal(capped.reason, 'stuck');
+  assert.equal(capped.detail.why, 'question-cap');
+  assert.equal(capped.detail.phase, 'spec');
+
+  const { questionsPerScope, ...noCap } = limits;
+  const legacy = (...events) => deriveJob([...provisionedEvents({ limits: noCap }), ...events].map((e, i) => ({ seq: i + 1, at: 1, ...e })));
+  assert.equal(legacy().limits.questionsPerScope, undefined);
+  assert.equal(nextAction(legacy(...twoAnswered, ...asked('a3', 3)), ctx()).reason, 'question');
+  const third = [...twoAnswered, ...asked('a3', 3), ...answered('a3'), ...asked('a4', 4)];
+  assert.equal(nextAction(legacy(...third), ctx()).detail.why, 'question-cap');
+});
+
+test('answered questions in other scopes do not count', () => {
+  const events = [...asked('p1', 1, 'plan'), ...answered('p1'), ...asked('p2', 2, 'plan'), ...answered('p2'), ...asked('a3', 1)];
+  const action = nextAction(withLimits({ questionsPerScope: 2 }, ...events), ctx());
+  assert.equal(action.type, 'needs-you');
+  assert.equal(action.reason, 'question');
+  assert.equal(action.detail.attemptId, 'a3');
+});
+
+test('an answered reviewer question relaunches the same purpose and round', () => {
+  const specs = [rev(1, 'changes', [F('m1')]), fix(1, { m1: 'fixed' }), { purpose: 'review', round: 2, outcome: 'question', question: 'Q?', id: 'q2' }];
+  assert.equal(nextAction(reviewWith(specs), ctx()).reason, 'question');
+  const job = reviewWith(specs, ...answered('q2'));
+  assert.deepEqual(nextAction(job, ctx()), launchOf(job, 'spec-reviewer', { phase: 'spec-review', purpose: 'review', round: 2, n: 4, recovery: true, previousAttemptId: 'q2' }));
+  const loop = (answers) => reviewLoop(attemptsFor(job, 'spec-review'), { ...PHASE_LOOP, answers });
+  assert.equal(loop(undefined).type, 'question-open');
+  assert.deepEqual(loop(new Map([['q2', 'A']])), L('review', 2, 'reviewer'));
+});
+
+// Spec-review and implement capped at one round, so the extra round is round 2.
+const ONE_ROUND = MILESTONE_2_PIPELINE.map((p) => (p.phase === 'spec-review' || p.phase === 'implement' ? { ...p, maxRounds: 1 } : p));
+const oneRound = (over, ...events) => deriveJob([...provisionedEvents({ pipeline: ONE_ROUND, limits: { ...limits, ...over } }), ...events].map((e, i) => ({ seq: i + 1, at: 1, ...e })));
+// Raw events (with a `type`) pass through; anything else is an attempt spec.
+const items = (list) => list.flatMap((x) => (x.type ? [x] : attempt(x)));
+const extra = (...list) => oneRound({}, ...upTo('spec-review'), ...items(list));
+const B1 = F('B1', 'blocker');
+const B2 = F('B2', 'blocker');
+const M1 = F('M1');
+const confirms = (id, attemptId, round = null) => ({ ...ver([{ id, verified: true, evidence: `${id} reproduced` }]), id: attemptId, round });
+const disputes = (id, round = null) => ({ ...ver([{ id, verified: false, evidence: `${id} is fine` }]), round });
+const confirmedB1 = [rev(1, 'changes', [B1]), fix(1, { B1: 'declined: no' }, true), confirms('B1', 'v1')];
+const pick = (action, ...keys) => Object.fromEntries(keys.map((k) => [k, action[k]]));
+
+test('an answered confirmed blocker gets one extra round', () => {
+  assert.equal(nextAction(extra(...confirmedB1), ctx()).reason, 'question');
+  const afterAnswer = [...confirmedB1, ...answered('v1')];
+  assert.deepEqual(
+    pick(nextAction(extra(...afterAnswer), ctx()), 'type', 'role', 'purpose', 'round', 'final', 'reviewFindings'),
+    { type: 'launch', role: 'spec-writer', purpose: 'fix', round: 2, final: true, reviewFindings: [B1] },
+  );
+  const fixed = [...afterAnswer, fix(2, { B1: 'fixed' }, true)];
+  assert.deepEqual(pick(nextAction(extra(...fixed), ctx()), 'type', 'role', 'purpose', 'round'), { type: 'launch', role: 'spec-reviewer', purpose: 'review', round: 2 });
+  assert.deepEqual(nextAction(extra(...fixed, rev(2, 'approve')), ctx()), { type: 'complete-phase', phase: 'spec-review', visit: 1, unresolved: [], verification: [] });
+
+  const raised = [...fixed, rev(2, 'changes', [B2])];
+  assert.deepEqual(
+    pick(nextAction(extra(...raised), ctx()), 'type', 'role', 'purpose', 'round', 'contested'),
+    { type: 'launch', role: 'verifier', purpose: 'verify', round: 2, contested: ['B2'] },
+  );
+  const again = nextAction(extra(...raised, confirms('B2', 'v2', 2)), ctx());
+  assert.deepEqual(pick(again, 'type', 'reason'), { type: 'needs-you', reason: 'question' });
+  assert.equal(again.detail.attemptId, 'v2');
+  assert.match(again.detail.question, /B2 text/);
+  assert.deepEqual(nextAction(extra(...raised, disputes('B2', 2)), ctx()), {
+    type: 'complete-phase', phase: 'spec-review', visit: 1,
+    unresolved: [{ ...B2, status: 'disputed-not-verified' }],
+    verification: [{ id: 'B2', verified: false, evidence: 'B2 is fine' }],
+  });
+
+  const third = nextAction(extra(...raised, confirms('B2', 'v2', 2), ...answered('v2')), ctx());
+  assert.deepEqual(pick(third, 'purpose', 'round', 'final', 'reviewFindings'), { purpose: 'fix', round: 3, final: true, reviewFindings: [B2] });
+  const capped = nextAction(oneRound({ questionsPerScope: 1 }, ...upTo('spec-review'), ...items([...raised, confirms('B2', 'v2', 2)])), ctx());
+  assert.deepEqual(pick(capped, 'type', 'reason'), { type: 'needs-you', reason: 'stuck' });
+  assert.equal(capped.detail.why, 'question-cap');
+});
+
+test('carried minors survive the extra round', () => {
+  const head = [rev(1, 'changes', [B1, M1]), fix(1, { B1: 'declined: no', M1: 'open' }, true), confirms('B1', 'v1'), ...answered('v1'), fix(2, { B1: 'fixed' }, true)];
+  const approved = nextAction(extra(...head, rev(2, 'approve')), ctx());
+  assert.equal(approved.type, 'complete-phase');
+  assert.deepEqual(approved.unresolved, [{ ...M1, status: 'open' }]);
+  const disputed = nextAction(extra(...head, rev(2, 'changes', [B2]), disputes('B2', 2)), ctx());
+  assert.equal(disputed.type, 'complete-phase');
+  assert.deepEqual(disputed.unresolved, [{ ...M1, status: 'open' }, { ...B2, status: 'disputed-not-verified' }]);
+});
+
+test('the extra round in a task loop', () => {
+  const T1 = taskCreated('T1');
+  const task = (...list) => oneRound({}, ...upTo('implement'), ev.tasksLoaded([T1]), ...items(list.map((x) => (x.type ? x : { phase: 'implement', task: 'T1', ...x }))));
+  const head = [{ purpose: 'implement' }, trev(1, 'changes', [B1]), fix(1, { B1: 'declined: no' }, true), confirms('B1', 'tv1'), ...answered('tv1')];
+  assert.deepEqual(
+    pick(nextAction(task(...head), ctx()), 'type', 'role', 'task', 'purpose', 'round', 'final', 'reviewFindings'),
+    { type: 'launch', role: 'implementer', task: 'T1', purpose: 'fix', round: 2, final: true, reviewFindings: [B1] },
+  );
+  const fixed = [...head, fix(2, { B1: 'fixed' }, true)];
+  assert.deepEqual(pick(nextAction(task(...fixed), ctx()), 'type', 'role', 'task', 'purpose', 'round'), { type: 'launch', role: 'task-reviewer', task: 'T1', purpose: 'task-review', round: 2 });
+  assert.deepEqual(pick(nextAction(task(...fixed, trev(2, 'approve')), ctx()), 'type', 'phase', 'unresolved'), { type: 'complete-phase', phase: 'implement', unresolved: [] });
+  const raised = [...fixed, trev(2, 'changes', [B2])];
+  assert.deepEqual(pick(nextAction(task(...raised), ctx()), 'type', 'role', 'purpose', 'round', 'contested'), { type: 'launch', role: 'verifier', purpose: 'verify', round: 2, contested: ['B2'] });
+  const again = nextAction(task(...raised, confirms('B2', 'tv2', 2)), ctx());
+  assert.deepEqual(pick(again, 'type', 'reason'), { type: 'needs-you', reason: 'question' });
+  assert.equal(again.detail.task, 'T1');
+  assert.equal(again.detail.attemptId, 'tv2');
+});
+
+test('attemptContext rebuilds the extra-round fix', () => {
+  const fixing = extra(...confirmedB1, ...answered('v1'), { purpose: 'fix', round: 2, final: true, outcome: null, id: 'xf2' });
+  assert.deepEqual(contextOf(fixing, 'xf2'), { purpose: 'fix', round: 2, final: true, task: null, taskDef: null, reviewFindings: [B1], contested: null });
+  const verifying = extra(...confirmedB1, ...answered('v1'), fix(2, { B1: 'fixed' }, true), rev(2, 'changes', [B2]), { purpose: 'verify', round: 2, outcome: null, id: 'xv2' });
+  assert.deepEqual(contextOf(verifying, 'xv2').contested, ['B2']);
+});

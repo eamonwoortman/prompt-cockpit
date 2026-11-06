@@ -66,13 +66,15 @@ export function reviewPaths(job, { phase = null, round = null, taskId = null }) 
   const p = phase == null ? null : segment('phase', phase);
   const t = taskId == null ? null : segment('taskId', taskId);
   const r = Number.isInteger(round);
+  // Plan 5 Decision 10: an extra-round verifier carries its round; the base one (round null) does not.
+  const v = r ? `-r${round}` : '';
   return {
     review: p && r ? `${jobs}/reviews/${p}-r${round}.md` : null,
     response: p && r ? `${jobs}/reviews/${p}-r${round}-response.md` : null,
-    verify: p ? `${jobs}/reviews/${p}-verify.md` : null,
+    verify: p ? `${jobs}/reviews/${p}-verify${v}.md` : null,
     report: t ? `${jobs}/tasks/${t}-report.md` : null,
     taskReview: t && r ? `${jobs}/tasks/${t}-review-r${round}.md` : null,
-    taskVerify: t ? `${jobs}/tasks/${t}-verify.md` : null,
+    taskVerify: t ? `${jobs}/tasks/${t}-verify${v}.md` : null,
   };
 }
 

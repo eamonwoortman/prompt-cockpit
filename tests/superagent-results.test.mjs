@@ -287,10 +287,10 @@ test('reviewPaths builds round and task scoped paths under the slug', () => {
   assert.deepEqual(reviewPaths(job, { phase: 'spec-review', round: 2, taskId: 'T1' }), {
     review: `${JOBS}/reviews/spec-review-r2.md`,
     response: `${JOBS}/reviews/spec-review-r2-response.md`,
-    verify: `${JOBS}/reviews/spec-review-verify.md`,
+    verify: `${JOBS}/reviews/spec-review-verify-r2.md`,
     report: `${JOBS}/tasks/T1-report.md`,
     taskReview: `${JOBS}/tasks/T1-review-r2.md`,
-    taskVerify: `${JOBS}/tasks/T1-verify.md`,
+    taskVerify: `${JOBS}/tasks/T1-verify-r2.md`,
   });
   const phaseOnly = reviewPaths(job, { phase: 'plan-review' });
   assert.equal(phaseOnly.verify, `${JOBS}/reviews/plan-review-verify.md`);
@@ -298,6 +298,15 @@ test('reviewPaths builds round and task scoped paths under the slug', () => {
   assert.equal(phaseOnly.report, null);
   assert.throws(() => reviewPaths(job, { phase: 'implement', taskId: '../x' }), /unsafe/);
   assert.throws(() => reviewPaths(job, { phase: 'a/b', round: 1 }), /unsafe/);
+});
+
+test('extra-round verifier paths carry the round', () => {
+  const job = m2Job();
+  assert.ok(reviewPaths(job, { phase: 'spec-review', round: 2 }).verify.endsWith('/reviews/spec-review-verify-r2.md'));
+  assert.ok(reviewPaths(job, { phase: 'implement', taskId: 'T1', round: 2 }).taskVerify.endsWith('/tasks/T1-verify-r2.md'));
+  const base = reviewPaths(job, { phase: 'implement', taskId: 'T1', round: null });
+  assert.equal(base.verify, `${JOBS}/reviews/implement-verify.md`);
+  assert.equal(base.taskVerify, `${JOBS}/tasks/T1-verify.md`);
 });
 
 test('reviseOutputs maps spec to [spec] and plan to [plan, tasks]', () => {
