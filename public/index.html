@@ -26,6 +26,8 @@
     <span id="sessionLabelError" class="mcp-error" hidden></span>
     <span id="modelBadge" class="model-badge session-chrome" hidden title="Model / reasoning effort / thinking budget in use"></span>
     <span id="rateLimitBanner" class="rate-limit-banner session-chrome" hidden></span>
+    <button type="button" id="chainOfferBtn" class="btn session-chrome" hidden title="Continue this session's work in a new session on your chain target"></button>
+    <span id="chainError" class="mcp-error" hidden></span>
     <div class="spacer"></div>
     <label id="autoContinueLabel" class="session-chrome" hidden title="When the plan usage limit rejects a turn, automatically send Continue once it resets">
       <input type="checkbox" id="autoContinueBtn" /> Auto-continue
@@ -191,6 +193,12 @@
     <button type="button" id="pendingTurnsBadge" class="session-chrome" hidden title="Turns cockpit still thinks are in flight. Click if nothing is actually running to force it back to idle."></button>
     <button type="button" id="stopBtn" class="session-chrome" hidden title="Cancel the running turn (Esc)">Stop</button>
     <button type="button" id="toolRevealBtn" class="btn session-chrome" hidden aria-pressed="false" title="Tool calls are hidden by your Settings > Display choice. Click to reveal them so you can open one in the detail pane.">Show tool calls</button>
+    <button type="button" id="chainBtn" class="btn session-chrome" hidden title="Continue this session's work in a new session on another provider or account. This session stays open.">Chain to...</button>
+    <span id="chainMenu" class="session-chrome" hidden>
+      <label class="visually-hidden" for="chainMenuSelect">Chain target</label>
+      <select id="chainMenuSelect"></select>
+      <button type="button" id="chainGoBtn" class="btn" title="Start the new session in this folder and send it a summary of this one">Chain</button>
+    </span>
     <span id="statsPanel" hidden></span>
     <button type="button" id="compactBtn" class="btn session-chrome" title="Run /compact now to free up context">Compact</button>
     <button type="button" id="reportStuckBtn" class="btn session-chrome" title="Copy a diagnostic snapshot of the live session state (for reporting a stuck spinner or similar)">🐛 Report state</button>
@@ -362,6 +370,23 @@
             <span class="hint" title="Sessions must share the same handshake value (Session list > Handshake) to send or receive /ask delegated tasks. Local sessions are trusted automatically when created; paste a value here to re-sync after a rotation, or an invalid value to revoke this session's own trust.">?</span>
           </div>
           <div id="handshakeError" class="mcp-error" hidden></div>
+          <div id="chainSettingsRows">
+            <label class="settings-row">
+              <span>When a rate limit hits</span>
+              <select id="rateLimitActionSelect">
+                <option value="none">Do nothing</option>
+                <option value="wait">Wait and resume</option>
+                <option value="ask">Ask me to chain</option>
+                <option value="chain">Chain automatically</option>
+              </select>
+              <span class="hint" title="Per folder. Wait and resume sends Continue once the limit resets (same as Auto-continue). Chaining starts a new session on the chain target, in this folder, with a text summary of this conversation sent as its first message; this session stays open. A chained session never chains again. Only Claude sessions report rate limits.">?</span>
+            </label>
+            <label class="settings-row">
+              <span>Chain target</span>
+              <select id="chainTargetSelect"></select>
+              <span class="hint" title="Where a chain goes: another provider, or another Claude login folder from your cockpit settings. Used by Ask me / Chain automatically and offered first in the Chain to... menu. The new session starts at that target's default model and effort, in default permission mode.">?</span>
+            </label>
+          </div>
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Always-allowed tools in this project</strong>

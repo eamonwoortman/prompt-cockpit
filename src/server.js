@@ -11,6 +11,7 @@ import readline from 'node:readline';
 import { WebSocketServer } from 'ws';
 
 import * as registry from './session-registry.js';
+import { chainRunner } from './chain.js';
 import { createRouter } from './router.js';
 import { registerSessionRoutes, seedSessionDefaults } from './routes/sessions.js';
 import { registerHistoryRoutes } from './routes/history.js';
@@ -211,6 +212,8 @@ wss.on('connection', (ws, req, id, since) => {
     registry.detachClient(id, ws);
   });
 });
+
+registry.setChainRunner(chainRunner); // chain.js imports the registry, so it is injected rather than imported back
 
 export { server, PORT, HOST, seedSessionDefaults };
 

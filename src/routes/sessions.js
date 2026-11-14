@@ -23,6 +23,10 @@ export async function seedSessionDefaults(row, defaults) {
   if (d.autoContinue) {
     await registry.setAutoContinue(row.id, true).catch(() => {});
   }
+  // A session that is itself a chain product never auto-chains again.
+  if (!row.chainedFrom && (d.rateLimitAction === 'ask' || d.rateLimitAction === 'chain') && d.chainTarget) {
+    await registry.setChainPolicy(row.id, { rateLimitAction: d.rateLimitAction, chainTarget: d.chainTarget }).catch(() => {});
+  }
 }
 
 export function registerSessionRoutes(router) {

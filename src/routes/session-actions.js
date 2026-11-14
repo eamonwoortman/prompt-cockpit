@@ -14,6 +14,7 @@ import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
 import { readRawBody, saveUpload, UploadTooLargeError } from '../uploads.js';
 import { seedSessionDefaults } from './sessions.js';
+import { RATE_LIMIT_ACTIONS, normalizeChainTarget } from '../chain.js';
 import { getProvider } from '../provider-registry.js';
 import { offBlockedReason, effortBlockedByOffReason } from '../thinking-rules.js';
 
@@ -44,6 +45,8 @@ const ACTIONS = {
         maxThinkingTokens: row.maxThinkingTokens,
         thinkingDisplay: row.thinkingDisplay,
         autoContinue: row.autoContinue,
+        rateLimitAction: row.rateLimitAction,
+        chainTarget: row.chainTarget,
       });
     } catch (err) {
       registry.closeSession(replacement.id);
@@ -324,6 +327,52 @@ const ACTIONS = {
     return { enabled: Boolean(body.enabled) };
   },
 
+  // Manual chain: continue this session's work in a new session on another
+  // provider/account (same folder, target's default model/effort, summary
+  // auto-sent as its first message). The source session stays open.
+  'POST chain': async ({ id, req }) => {
+    const body = await readJsonBody(req);
+    let target;
+    try {
+      target = normalizeChainTarget(body.target);
+    } catch (err) {
+      throw new RouteError(400, { error: err.message });
+    }
+    const created = await registry.chainSession(id, target);
+    return { newSession: { id: created.id, token: created.token } };
+  },
+
+  // The "When a rate limit hits" choice. 'wait' is the existing
+  // auto-continue (kept as its own row flag); 'ask' and 'chain' need a
+  // target. Persisted per folder alongside the other session defaults.
+  'POST chain-policy': async ({ id, row, req }) => {
+    const body = await readJsonBody(req);
+    if (!RATE_LIMIT_ACTIONS.includes(body.rateLimitAction)) {
+      throw new RouteError(400, { error: `invalid rateLimitAction: ${body.rateLimitAction}` });
+    }
+    let chainTarget = null;
+    if (body.chainTarget) {
+      try {
+        chainTarget = normalizeChainTarget(body.chainTarget);
+      } catch (err) {
+        throw new RouteError(400, { error: err.message });
+      }
+    }
+    if ((body.rateLimitAction === 'ask' || body.rateLimitAction === 'chain') && !chainTarget) {
+      throw new RouteError(400, { error: 'a chain target is required for this choice' });
+    }
+    const wait = body.rateLimitAction === 'wait';
+    const action = wait ? 'none' : body.rateLimitAction;
+    await registry.setAutoContinue(id, wait);
+    await registry.setChainPolicy(id, { rateLimitAction: action, chainTarget });
+    try {
+      await setSessionDefaults(row.cwd, { autoContinue: wait, rateLimitAction: action, chainTarget });
+    } catch {
+      // best-effort persistence, see 'thinking' route above
+    }
+    return { rateLimitAction: body.rateLimitAction, chainTarget };
+  },
+
   'POST approval-decision': async ({ id, row, req }) => {
     const body = await readJsonBody(req);
     // `alwaysAllow` rides along on the same decision object
@@ -395,6 +444,8 @@ const ACTIONS = {
         maxThinkingTokens: row.maxThinkingTokens,
         thinkingDisplay: row.thinkingDisplay,
         autoContinue: row.autoContinue,
+        rateLimitAction: row.rateLimitAction,
+        chainTarget: row.chainTarget,
       });
       return { ...result, newSession: { id: forked.id, token: forked.token } };
     }

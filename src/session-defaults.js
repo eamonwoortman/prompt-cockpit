@@ -1,11 +1,11 @@
 // Per-cwd session defaults (thinking budget/display, auto-continue,
-// effort) in `.claude/settings.local.json`, surviving a restart and
+// effort, and the rate-limit chain choice + target) in `.claude/settings.local.json`, surviving a restart and
 // shared across every tab on this cwd - unlike the in-memory registry
 // row (forgets on close) or localStorage (one browser only). `model`
 // isn't tracked: a fork always carries it forward via createSession.
 import { readSettingsFile, updateSettingsFile } from './settings-file.js';
 
-const EMPTY_DEFAULTS = { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null };
+const EMPTY_DEFAULTS = { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null, rateLimitAction: 'none', chainTarget: null };
 
 export async function readSessionDefaults(cwd) {
   const settings = await readSettingsFile(cwd);

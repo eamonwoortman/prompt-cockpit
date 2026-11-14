@@ -19,6 +19,7 @@ import { initMcpPanel } from '/mcp-panel.js';
 import { initPluginPanel } from '/plugin-panel.js';
 import { initSessionControlsPanel } from '/session-controls-panel.js';
 import { initApprovalPanel } from '/approval-panel.js';
+import { initChainUi } from '/chain-ui.js';
 import { initGlobalStatsPanel } from '/global-stats-panel.js';
 import { initSettings, loadSettings, patchSettings } from '/settings.js';
 import { initTurnChart } from '/turn-chart.js';
@@ -916,6 +917,25 @@ toolRevealBtn.addEventListener('click', () => {
   document.getElementById('historyBody')?.classList.toggle('reveal-tool-calls', revealed);
   toolRevealBtn.setAttribute('aria-pressed', revealed ? 'true' : 'false');
   toolRevealBtn.textContent = revealed ? 'Hide tool calls' : 'Show tool calls';
+});
+
+const chainUi = initChainUi({
+  actionSelect: document.getElementById('rateLimitActionSelect'),
+  targetSelect: document.getElementById('chainTargetSelect'),
+  settingsRows: document.getElementById('chainSettingsRows'),
+  chainBtn: document.getElementById('chainBtn'),
+  chainMenu: document.getElementById('chainMenu'),
+  chainMenuSelect: document.getElementById('chainMenuSelect'),
+  chainGoBtn: document.getElementById('chainGoBtn'),
+  offerBtn: document.getElementById('chainOfferBtn'),
+  errorEl: document.getElementById('chainError'),
+  getCatalog: () => providerCatalog,
+  post: (action, body) => fetch(`/api/sessions/${sessionId}/${action}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  }),
+  onChained: (newSession) => connect(newSession.id, newSession.token),
 });
 
 // Cog button opens the modal instead of Close session sitting directly in
@@ -2449,6 +2469,10 @@ function connect(id, token, { reconnect = false } = {}) {
       agentLiveness.reset(); // same reasoning - the resend will re-fire onToolCallStarted for any Agent call still open, re-tracking it fresh
     } else if (payload.type === 'cockpit:hello' || payload.type === 'cockpit:state') {
       applySession(payload.session);
+    } else if (payload.type === 'cockpit:chained') {
+      // Auto-chain (rate limit hit with "Chain automatically"): jump to the
+      // new session. The old one stays open and idle on the server.
+      if (payload.session) connect(payload.session.id, payload.session.token);
     } else if (payload.type === 'cockpit:approval-request') {
       approvalPanel.enqueue(payload.request);
     } else if (payload.type === 'cockpit:approval-resolved') {
@@ -2607,6 +2631,7 @@ function applySession(session) {
   // bar above - a checkbox toggled from another tab, or a timer firing
   // server-side, shows up here without this tab having done anything.
   autoContinueBtn.checked = Boolean(session.autoContinue);
+  chainUi.render(session, { supportsRateLimits: caps.autoContinue === true });
   if (session.rateLimitHit) {
     const resetsAt = session.rateLimitHit.resetsAt;
     const when = resetsAt ? new Date(resetsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'unknown time';

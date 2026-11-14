@@ -414,3 +414,20 @@ queue (stays set until the request resolves, not cleared on focus). The Settings
 Display "Tool calls in the transcript" select and the activity bar's "Show tool
 calls" reveal button, whose hiding is CSS-only (`:has()` keeps running or failed
 groups in Hide successful) in `style-transcript.css`.
+
+## Chain
+
+`chain-summary.test.mjs` covers `src/chain-summary.js` (kept text, one line per
+tool call, dropped tool results/thinking, merged assistant chunks, newest-first
+budget with an omitted count, empty history). `chain.test.mjs` covers the
+registry triggers against a stubbed session (ask raises the offer, chain fires
+once and tells connected tabs, one hop for a chained session, failure surfaces
+`chainError`, a policy set after a hit acts at once, a lifted limit clears the
+offer, reset keeps the policy) and `chain.js`'s `chainSession` with injected
+deps (same folder, target defaults, default permission mode, summary sent).
+
+**Hand-verified only (no jsdom, no live rate limit):** `public/chain-ui.js`
+(settings selects, the Chain to... menu, the ask-me button, the tab jumping to
+the new session on `cockpit:chained`) and the `POST chain` / `POST chain-policy`
+route wiring in `session-actions.js`. A real rate-limit hit and a real
+cross-provider start were not exercised.

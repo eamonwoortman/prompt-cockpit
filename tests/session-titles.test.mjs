@@ -106,6 +106,8 @@ test('concurrent setSessionTitle and setSessionDefaults/setPluginEnabled on the 
       thinkingDisplay: 'summarized',
       autoContinue: false,
       effort: null,
+      rateLimitAction: 'none',
+      chainTarget: null,
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });

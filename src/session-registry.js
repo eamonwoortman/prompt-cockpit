@@ -26,7 +26,7 @@ export const setSessionHandshake = delegation.setSessionHandshake;
 export const isSessionTrusted = delegation.isSessionTrusted;
 export const delegateTask = delegation.delegateTask;
 
-export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, startSessionImpl }) {
+export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, rateLimitAction, chainTarget, chainedFrom, startSessionImpl }) {
   // Authoritative uniqueness check for delegation names - this function has
   // no `await` before it and none until sessions.set() below, closing the
   // TOCTOU window server.js's own pre-check has (that check runs after
@@ -111,6 +111,20 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     autoContinue: Boolean(autoContinue),
     rateLimitHit: null, // { resetsAt, rateLimitType } | null
     autoContinueTimer: null,
+    // Chain-on-rate-limit (chain.js): what to do when the limit hits -
+    // 'none' | 'ask' | 'chain' - and where to chain to. `chainedFrom` marks a
+    // session that is itself the product of a chain: it never auto-chains
+    // again (one hop, so two limited accounts can't bounce a task forever).
+    // `chainOffer` is the 'ask' prompt state, `chainedTo` the auto-chain
+    // latch (both the rejected event and the CLI's limit text can fire for
+    // one hit), `chainError` the last failed attempt for the UI to show.
+    rateLimitAction: rateLimitAction || 'none',
+    chainTarget: chainTarget || null,
+    chainedFrom: chainedFrom || null,
+    chainOffer: false,
+    chainedTo: null,
+    chainError: null,
+    chaining: false,
     // Throttling state for scheduleUsageBroadcast below - a Grok reply can
     // land dozens of assistant-message chunks a second, each one otherwise
     // triggering its own cockpit:usage broadcast. -Infinity (not 0) so the
@@ -224,6 +238,9 @@ export function resetSession(id, { startSessionImpl } = {}) {
     maxThinkingTokens: row.maxThinkingTokens,
     thinkingDisplay: row.thinkingDisplay,
     autoContinue: row.autoContinue,
+    rateLimitAction: row.rateLimitAction,
+    chainTarget: row.chainTarget,
+    chainedFrom: row.chainedFrom,
     permissionMode: row.mode,
     startSessionImpl,
   });
@@ -393,6 +410,11 @@ export function toSummary(row) {
     effort: row.effort || null,
     autoContinue: row.autoContinue,
     rateLimitHit: row.rateLimitHit,
+    rateLimitAction: row.rateLimitAction,
+    chainTarget: row.chainTarget,
+    chainedFrom: row.chainedFrom,
+    chainOffer: row.chainOffer,
+    chainError: row.chainError,
     // Whether this row is currently allowed to send/receive a delegated
     // task. The raw secret value itself is NOT included (only the server's
     // canonical copy is meant to be copied around, via /api/handshake).
@@ -564,6 +586,69 @@ export async function setAutoContinue(id, enabled) {
   } else if (!row.autoContinue) {
     clearAutoContinueTimer(row);
   }
+  broadcastSummary(id);
+}
+
+// ---- Chain-on-rate-limit -------------------------------------------------
+// chain.js builds the summary and starts the target session; it imports this
+// module, so the registry reaches it through an injected runner instead of
+// importing it back (server.js wires it at startup).
+let chainRunner = null;
+export function setChainRunner(fn) {
+  chainRunner = fn;
+}
+
+// Starts a session on `target` ({ provider, subscription? }) carrying this
+// row's conversation as a text summary. The source row is left untouched
+// (open, idle), like rewind's fork. Returns { id, token } of the new row.
+export async function chainSession(id, target) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  if (!chainRunner) throw new Error('chaining is not available');
+  const result = await chainRunner(id, target);
+  row.chainedTo = { id: result.id };
+  row.chainOffer = false;
+  row.chainError = null;
+  broadcastSummary(id);
+  return result;
+}
+
+async function autoChain(id) {
+  const row = sessions.get(id);
+  if (!row || row.chaining || row.chainedTo || !row.chainTarget) return;
+  row.chaining = true;
+  try {
+    const result = await chainSession(id, row.chainTarget);
+    broadcast(id, { type: 'cockpit:chained', session: { id: result.id, token: result.token }, auto: true });
+  } catch (err) {
+    row.chainError = String(err.message || err);
+    broadcastSummary(id);
+  } finally {
+    row.chaining = false;
+  }
+}
+
+// Single entry point for a fresh rate-limit hit (called from both detection
+// sources). Wait-and-resume (autoContinue) is independent of the chain
+// choice; the UI keeps the two mutually exclusive.
+function onRateLimitHit(id) {
+  const row = sessions.get(id);
+  if (!row) return;
+  if (row.autoContinue) scheduleAutoContinue(id);
+  if (row.chainedFrom || row.chainedTo || !row.chainTarget) return; // one hop only
+  if (row.rateLimitAction === 'ask') row.chainOffer = true;
+  else if (row.rateLimitAction === 'chain') autoChain(id);
+}
+
+// Sets what happens on a rate limit. Like setAutoContinue, acts at once when
+// the limit has already been hit rather than waiting for another rejection.
+export async function setChainPolicy(id, { rateLimitAction, chainTarget }) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  row.rateLimitAction = rateLimitAction;
+  row.chainTarget = chainTarget || null;
+  if (rateLimitAction === 'none') row.chainOffer = false;
+  if (row.rateLimitHit) onRateLimitHit(id);
   broadcastSummary(id);
 }
 
@@ -750,9 +835,10 @@ function handleMessage(id, message) {
       // here so rateLimitHit.resetsAt is plain epoch-ms everywhere below and
       // in app.js, instead of every reader having to remember the *1000.
       row.rateLimitHit = { resetsAt: info.resetsAt ? info.resetsAt * 1000 : null, rateLimitType: info.rateLimitType || null };
-      if (row.autoContinue) scheduleAutoContinue(id);
+      onRateLimitHit(id);
     } else if (row.rateLimitHit) {
       row.rateLimitHit = null;
+      row.chainOffer = false;
       clearAutoContinueTimer(row);
     }
     broadcastSummary(id);
@@ -767,7 +853,7 @@ function handleMessage(id, message) {
       const resetsAt = parseSessionLimitResetText(block.text);
       if (resetsAt != null) {
         row.rateLimitHit = { resetsAt: resetsAt + AUTO_CONTINUE_BUFFER_MS, rateLimitType: 'session_limit_text' };
-        if (row.autoContinue) scheduleAutoContinue(id);
+        onRateLimitHit(id);
         broadcastSummary(id);
       }
     }
