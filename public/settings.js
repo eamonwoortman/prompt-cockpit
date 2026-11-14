@@ -16,6 +16,9 @@ const DEFAULTS = {
   turnChartExcludeCacheMisses: false,
   turnChartAxisPosition: 'left', // 'left' | 'right' - which side of the cost graph shows y-axis labels
   showMessageTimestamps: false,
+  // 'show' | 'hide-successful' | 'hide-all' - how much of the tool-call
+  // groups the transcript displays. Per-browser, same as the timestamps pref.
+  toolCallVisibility: 'show',
   // Default ON, unlike the other two panels above - Decision 3 (tool-call
   // presentation redesign) calls for the detail pane docked by default when
   // a session is active, not closed-by-default/slide-in.
@@ -98,6 +101,7 @@ export function initSettings({
   onBrowseFolder,
   turnChartCheckbox,
   timestampsCheckbox,
+  toolCallVisibilitySelect,
   detailPaneCheckbox,
   pendingTurnsBadgeCheckbox,
   closeSessionButton,
@@ -105,6 +109,7 @@ export function initSettings({
   onAutoCollapseChange,
   onTurnChartEnabledChange,
   onTimestampsChange,
+  onToolCallVisibilityChange,
   onDetailPaneEnabledChange,
   onPendingTurnsBadgeEnabledChange,
   onCloseSession,
@@ -124,11 +129,13 @@ export function initSettings({
   autoCollapseCheckbox.checked = settings.autoCollapsePreviousGroup;
   turnChartCheckbox.checked = settings.turnChartEnabled;
   timestampsCheckbox.checked = settings.showMessageTimestamps;
+  toolCallVisibilitySelect.value = settings.toolCallVisibility;
   detailPaneCheckbox.checked = settings.detailPaneEnabled;
   pendingTurnsBadgeCheckbox.checked = settings.pendingTurnsBadgeEnabled;
   onAutoCollapseChange(settings.autoCollapsePreviousGroup);
   onTurnChartEnabledChange(settings.turnChartEnabled);
   onTimestampsChange(settings.showMessageTimestamps);
+  onToolCallVisibilityChange(settings.toolCallVisibility);
   onDetailPaneEnabledChange(settings.detailPaneEnabled);
   onPendingTurnsBadgeEnabledChange(settings.pendingTurnsBadgeEnabled);
   renderCustomFolders();
@@ -226,6 +233,10 @@ export function initSettings({
   timestampsCheckbox.addEventListener('change', () => {
     persist({ showMessageTimestamps: timestampsCheckbox.checked });
     onTimestampsChange(timestampsCheckbox.checked);
+  });
+  toolCallVisibilitySelect.addEventListener('change', () => {
+    persist({ toolCallVisibility: toolCallVisibilitySelect.value });
+    onToolCallVisibilityChange(toolCallVisibilitySelect.value);
   });
   pendingTurnsBadgeCheckbox.addEventListener('change', () => {
     persist({ pendingTurnsBadgeEnabled: pendingTurnsBadgeCheckbox.checked });

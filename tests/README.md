@@ -392,3 +392,15 @@ Hand-verified only (no jsdom): the source dropdown, file drilldown, Refresh
 button and the "Loading diff..." state in `detail-pane.js`. The session net
 diff is rebuilt from the edit calls, not read from disk, so edits made by
 Bash or outside the session only show under the Git sources.
+
+## Tab title states and tool-call visibility
+
+No unit tests: both are pure client-side DOM behavior (no jsdom here).
+
+**Hand-verified only:** `public/tab-chrome.js`'s emoji prefix priority
+(pending approval/question, then needs-attention, then error, then running;
+idle has none) and `approval-panel.js` driving `setPendingApproval` from the
+queue (stays set until the request resolves, not cleared on focus). The Settings >
+Display "Tool calls in the transcript" select and the activity bar's "Show tool
+calls" reveal button, whose hiding is CSS-only (`:has()` keeps running or failed
+groups in Hide successful) in `style-transcript.css`.

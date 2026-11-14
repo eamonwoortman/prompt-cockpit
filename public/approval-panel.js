@@ -45,6 +45,7 @@ export function initApprovalPanel({
     if (!request || !request.requestId) return;
     if (approvalQueue.some((r) => r.requestId === request.requestId)) return;
     approvalQueue.push(request);
+    tabChrome.setPendingApproval(true);
     if (approvalQueue.length === 1) renderBanner(request);
     else updateApprovalQueueCount();
   }
@@ -279,6 +280,7 @@ export function initApprovalPanel({
     if (index < 0) return;
     const wasCurrent = String(pendingApprovalRequestId) === String(requestId);
     approvalQueue.splice(index, 1);
+    tabChrome.setPendingApproval(approvalQueue.length > 0);
     if (!wasCurrent) {
       updateApprovalQueueCount();
       return;
@@ -336,6 +338,7 @@ export function initApprovalPanel({
   // still occupy queue[0].
   function reset() {
     approvalQueue.length = 0;
+    tabChrome.setPendingApproval(false);
     pendingApprovalRequestId = null;
     pendingApprovalToolName = null;
     pendingApprovalKind = null;

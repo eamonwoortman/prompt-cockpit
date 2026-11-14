@@ -63,6 +63,7 @@ const recentFoldersSelect = document.getElementById('recentFoldersSelect');
 const resumeListEl = document.getElementById('resumeList');
 const modeBtn = document.getElementById('modeBtn');
 const stopBtn = document.getElementById('stopBtn');
+const toolRevealBtn = document.getElementById('toolRevealBtn');
 const pendingTurnsBadge = document.getElementById('pendingTurnsBadge');
 // Declared here (not down by forceIdleSession/disarmForceIdle, where this
 // conceptually belongs) because initSettings()'s
@@ -910,6 +911,13 @@ async function resetSession() {
   }
 }
 
+toolRevealBtn.addEventListener('click', () => {
+  const revealed = streamEl.classList.toggle('reveal-tool-calls');
+  document.getElementById('historyBody')?.classList.toggle('reveal-tool-calls', revealed);
+  toolRevealBtn.setAttribute('aria-pressed', revealed ? 'true' : 'false');
+  toolRevealBtn.textContent = revealed ? 'Hide tool calls' : 'Show tool calls';
+});
+
 // Cog button opens the modal instead of Close session sitting directly in
 // the header - see settings.js's module comment for why.
 const settings = initSettings({
@@ -925,6 +933,7 @@ const settings = initSettings({
   onBrowseFolder: (onSelect) => dirBrowser.open('', onSelect),
   turnChartCheckbox: document.getElementById('turnChartEnabledBtn'),
   timestampsCheckbox: document.getElementById('showTimestampsBtn'),
+  toolCallVisibilitySelect: document.getElementById('toolCallVisibilityBtn'),
   detailPaneCheckbox: document.getElementById('detailPaneEnabledBtn'),
   pendingTurnsBadgeCheckbox: document.getElementById('pendingTurnsBadgeEnabledBtn'),
   closeSessionButton: closeSessionBtn,
@@ -954,6 +963,20 @@ const settings = initSettings({
     streamEl.classList.toggle('show-timestamps', enabled);
     const historyBody = document.getElementById('historyBody');
     if (historyBody) historyBody.classList.toggle('show-timestamps', enabled);
+  },
+  // CSS-driven (style-transcript.css), so flipping it re-hides/re-shows every
+  // group already on screen. The reveal button is the way back to a hidden
+  // call's detail-pane view; switching mode resets any prior reveal.
+  onToolCallVisibilityChange: (mode) => {
+    const hiding = mode !== 'show';
+    for (const el of [streamEl, document.getElementById('historyBody')]) {
+      if (!el) continue;
+      el.dataset.toolCalls = mode;
+      el.classList.remove('reveal-tool-calls');
+    }
+    toolRevealBtn.hidden = !hiding;
+    toolRevealBtn.setAttribute('aria-pressed', 'false');
+    toolRevealBtn.textContent = 'Show tool calls';
   },
   onCloseSession: closeSession,
   onResetSession: resetSession,

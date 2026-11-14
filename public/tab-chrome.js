@@ -8,6 +8,17 @@ const DOT = {
   attention: '#ff6b6b',
 };
 
+// Title prefix per state, so a tab strip shows what each tab is doing
+// without opening it. Idle gets no prefix. Priority in render(): pending
+// approval/question > needs-attention > error > running.
+const STATE_TO_EMOJI = {
+  running: '🔄',
+  starting: '🔄',
+  error: '❌',
+};
+const PENDING_EMOJI = '🔔'; // a permission request or question is waiting on the user
+const ATTENTION_EMOJI = '❗'; // finished while unfocused / session-list focus request
+
 const STATE_TO_DOT = {
   running: 'running',
   starting: 'running',
@@ -30,12 +41,14 @@ export function initTabChrome({ faviconEl = document.getElementById('favicon'), 
   let userName = null; // set once the user renames the tab; auto-naming stops touching it from then on
   let dotState = 'idle';
   let needsAttention = false;
+  let pendingApproval = false; // unlike needsAttention, only cleared when the request is actually resolved - not on focus
+  let sessionState = 'idle';
 
   function render() {
     const name = userName || autoName;
-    const prefix = needsAttention ? '❗ ' : ''; // exclamation - the loudest signal, wins over the running dot
-    document.title = `${prefix}${name}`;
-    faviconEl.href = FAVICONS[needsAttention ? 'attention' : dotState] || FAVICONS.idle;
+    const emoji = pendingApproval ? PENDING_EMOJI : needsAttention ? ATTENTION_EMOJI : STATE_TO_EMOJI[sessionState] || '';
+    document.title = emoji ? `${emoji} ${name}` : name;
+    faviconEl.href = FAVICONS[pendingApproval || needsAttention ? 'attention' : dotState] || FAVICONS.idle;
   }
 
   // Called whenever the session itself has an obvious name (cwd, mostly) -
@@ -51,13 +64,19 @@ export function initTabChrome({ faviconEl = document.getElementById('favicon'), 
     render();
   }
 
-  function setState(sessionState) {
-    dotState = STATE_TO_DOT[sessionState] || 'idle';
+  function setState(state) {
+    sessionState = state;
+    dotState = STATE_TO_DOT[state] || 'idle';
     render();
   }
 
   function setNeedsAttention(value) {
     needsAttention = value;
+    render();
+  }
+
+  function setPendingApproval(value) {
+    pendingApproval = Boolean(value);
     render();
   }
 
@@ -68,5 +87,5 @@ export function initTabChrome({ faviconEl = document.getElementById('favicon'), 
 
   render();
 
-  return { setAutoName, rename, setState, setNeedsAttention, isUserNamed: () => userName !== null };
+  return { setAutoName, rename, setState, setNeedsAttention, setPendingApproval, isUserNamed: () => userName !== null };
 }

@@ -86,6 +86,8 @@ Tabs using different providers can run at the same time. A session keeps the pro
 - **Rewind** on a user turn - opens a new session forked at that point. The original stays. Claude can also revert files when this process started the session fresh. Grok is conversation-only (files on disk stay as they are). Codex forks through the selected completed turn, including its response; files on disk stay as they are. Codex requires a CLI with `thread/fork.lastTurnId` support.
 - **`@`** in the compose box - file autocomplete in the project.
 - **Cost strip** - spend, tokens in/out, cache hit rate, context used. Grok and Codex have an effort picker instead of Claude's thinking-token budget.
+- **Tab title** - the browser tab shows a state emoji plus the session name (or the folder name if you haven't named it): 🔔 an approval or question is waiting, ❗ a turn finished while the tab was unfocused, 🔄 running, ❌ error. Idle has no emoji.
+- **Tool-call visibility** (Settings > Display) - Show all, Hide successful (keeps groups that are running or have a failed call), or Hide all. Per browser. The "Show tool calls" button in the activity bar reveals hidden groups so you can still open a call in the detail pane. Approvals, questions and errors always show.
 - **`/ask Name: …`** - send a task to another named session in the same folder. The answer comes back as a queued turn.
 
 Settings (gear) covers MCP servers, plugins, permission rules, and UI prefs. On Grok, MCP/plugin toggles go through the Grok CLI (`grok inspect` / `grok mcp` / `grok plugin`) and may need a new session before the agent picks them up. On Codex, current app-server builds provide native MCP/plugin status and config writes; plugin changes are shown immediately but take effect for a new session.

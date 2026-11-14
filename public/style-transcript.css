@@ -192,6 +192,15 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
+  /* Tool-call visibility (Settings > Display). hide-successful keeps a group
+     that is still running or contains a failed call; the reveal button adds
+     .reveal-tool-calls to show everything again for detail-pane inspection. */
+  #stream[data-tool-calls="hide-all"]:not(.reveal-tool-calls) .group,
+  #historyBody[data-tool-calls="hide-all"]:not(.reveal-tool-calls) .group,
+  #stream[data-tool-calls="hide-successful"]:not(.reveal-tool-calls) .group:not(:has(.tool-row-error, .tool-row-pending)),
+  #historyBody[data-tool-calls="hide-successful"]:not(.reveal-tool-calls) .group:not(:has(.tool-row-error, .tool-row-pending)) {
+    display: none;
+  }
   #stream.show-timestamps .msg-time,
   #historyBody.show-timestamps .msg-time {
     display: inline;
