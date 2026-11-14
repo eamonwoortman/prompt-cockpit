@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.0]
+- Chain: continue a session in a new session on another provider or Claude
+  login folder, from "Chain to..." or automatically on a rate limit
+  (Settings > Project; per folder). A text summary of the conversation is sent
+  as the first message; the original session stays open
+- Drop and paste files or screenshots into the compose box; files outside the
+  project are saved under .claude/cockpit-uploads/ and referenced with @path
+- Tab title shows a state emoji (approval waiting, finished, running, error)
+- Tool-call visibility setting: show all, hide successful, or hide all, with a
+  button to reveal hidden calls for the detail pane
+- Detail pane: Changes tab gains git sources (unstaged, staged, HEAD) and net
+  +/- counts
+- Claude effort is shown as "default" when unset instead of assuming High
+- Pricing: long-context tiers, Haiku 5.5, Fable 5.2, Mythos 5.2, more Grok and
+  Codex models, Sonnet 5.5 cache-read fix
+- Installs skip dependency scripts (.npmrc); Claude Agent SDK 0.3.300
+
 ## [0.2.2]
 - Detail pane: new Changes tab with a per-file table of edits (+/- lines,
   totals); click a row to open that file's last edit
