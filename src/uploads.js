@@ -14,21 +14,26 @@ export class UploadTooLargeError extends Error {}
 // that sanitizes to nothing falls back to a generic one.
 export function sanitizeUploadName(name) {
   const base = String(name || '').split(/[\\/]/).pop();
-  const cleaned = base.replace(/[^\w.\- ]+/g, '_').replace(/^\.+/, '').trim().slice(-100);
+  const cleaned = base.replace(/[^\w.-]+/g, '_').replace(/^\.+/, '').trim().slice(-100);
   return cleaned || 'upload';
 }
 
 export async function readRawBody(req, limit = MAX_UPLOAD_BYTES) {
   const chunks = [];
   let total = 0;
+  // Past the limit the rest is read and discarded rather than the socket
+  // destroyed, so the route's 413 reply still reaches the browser.
+  let exceeded = false;
   for await (const chunk of req) {
     total += chunk.length;
-    if (total > limit) {
-      req.destroy();
-      throw new UploadTooLargeError(`upload exceeds ${limit / (1024 * 1024)}MB limit`);
+    if (exceeded || total > limit) {
+      exceeded = true;
+      chunks.length = 0;
+      continue;
     }
     chunks.push(chunk);
   }
+  if (exceeded) throw new UploadTooLargeError(`upload exceeds ${limit / (1024 * 1024)}MB limit`);
   return Buffer.concat(chunks);
 }
 

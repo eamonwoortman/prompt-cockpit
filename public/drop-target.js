@@ -23,6 +23,9 @@ export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
   textarea.addEventListener('paste', (event) => {
     const files = [...(event.clipboardData?.files || [])];
     if (files.length === 0) return;
+    // A clipboard carrying text too (a spreadsheet cell, rich text with an
+    // image) is a text paste first - don't swallow it.
+    if (event.clipboardData?.getData('text/plain')) return;
     event.preventDefault();
     handleFiles(files, { tryResolve: false }); // clipboard names ("image.png") are never real cwd paths
   });
