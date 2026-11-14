@@ -605,26 +605,31 @@ export async function chainSession(id, target) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
   if (!chainRunner) throw new Error('chaining is not available');
-  const result = await chainRunner(id, target);
-  row.chainedTo = { id: result.id };
-  row.chainOffer = false;
-  row.chainError = null;
-  broadcastSummary(id);
-  return result;
+  // One chain at a time per row: two tabs (or the ask-me button racing a
+  // manual chain) must not each start a target session.
+  if (row.chaining) throw new Error('a chain is already in progress for this session');
+  row.chaining = true;
+  try {
+    const result = await chainRunner(id, target);
+    row.chainedTo = { id: result.id };
+    row.chainOffer = false;
+    row.chainError = null;
+    return result;
+  } finally {
+    row.chaining = false;
+    broadcastSummary(id);
+  }
 }
 
 async function autoChain(id) {
   const row = sessions.get(id);
   if (!row || row.chaining || row.chainedTo || !row.chainTarget) return;
-  row.chaining = true;
   try {
     const result = await chainSession(id, row.chainTarget);
     broadcast(id, { type: 'cockpit:chained', session: { id: result.id, token: result.token }, auto: true });
   } catch (err) {
     row.chainError = String(err.message || err);
     broadcastSummary(id);
-  } finally {
-    row.chaining = false;
   }
 }
 
@@ -647,6 +652,7 @@ export async function setChainPolicy(id, { rateLimitAction, chainTarget }) {
   if (!row) throw new Error(`unknown session: ${id}`);
   row.rateLimitAction = rateLimitAction;
   row.chainTarget = chainTarget || null;
+  row.chainError = null; // a new choice supersedes the last attempt's failure
   if (rateLimitAction === 'none') row.chainOffer = false;
   if (row.rateLimitHit) onRateLimitHit(id);
   broadcastSummary(id);
@@ -1178,6 +1184,7 @@ function scheduleAutoContinue(id) {
     // timer sat waiting.
     if (!row.autoContinue || !row.rateLimitHit) return;
     row.rateLimitHit = null;
+    row.chainOffer = false;
     pushTurn(row, 'Continue'); // Must go through pushTurn, not handle.pushInput directly - see its comment
     broadcastSummary(id);
   }, delay);

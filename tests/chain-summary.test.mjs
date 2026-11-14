@@ -56,3 +56,10 @@ test('tool-only assistant turn is labeled and truncated args stay one line', () 
   assert.ok(toolLine.length <= 205);
   assert.doesNotMatch(toolLine, /second line/);
 });
+
+test('a multi-line assistant reply survives whole, including lines that look like tool lines', () => {
+  const reply = 'Plan:\n1. do X\n  - indented bullet\n2. do Y';
+  const out = buildChainSummary([user('go'), assistant(text(reply), tool('Bash', { command: 'ls' }))]);
+  assert.ok(out.includes(`Assistant: ${reply}`));
+  assert.match(out, /\n  - Bash: ls/);
+});

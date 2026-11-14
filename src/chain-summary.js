@@ -32,10 +32,12 @@ function toolArgSummary(input) {
   return '';
 }
 
-function assistantEntry(message) {
+// One assistant message as { texts, tools } so merging never has to re-parse
+// rendered text (a multi-line reply must survive whole).
+function assistantParts(message) {
   const content = message.message && message.message.content;
   if (!Array.isArray(content)) {
-    return typeof content === 'string' && content.trim() ? `Assistant: ${clip(content.trim(), MAX_ENTRY_CHARS)}` : null;
+    return { texts: typeof content === 'string' && content.trim() ? [content.trim()] : [], tools: [] };
   }
   const texts = [];
   const tools = [];
@@ -46,38 +48,28 @@ function assistantEntry(message) {
       tools.push(`  - ${clip(arg ? `${block.name}: ${arg}` : block.name, MAX_TOOL_LINE_CHARS)}`);
     }
   }
-  if (!texts.length && !tools.length) return null;
-  const lines = [];
-  if (texts.length) lines.push(`Assistant: ${clip(texts.join('\n'), MAX_ENTRY_CHARS)}`);
-  else lines.push('Assistant (tool calls only):');
-  lines.push(...tools);
-  return lines.join('\n');
+  return { texts, tools };
 }
 
 // Turns the transcript into ordered entries, merging back-to-back assistant
 // messages (a Grok reply arrives as many chunks) into one.
 function toEntries(messages) {
   const entries = [];
-  let pendingAssistant = [];
+  let texts = [];
+  let tools = [];
   const flush = () => {
-    if (!pendingAssistant.length) return;
-    const texts = [];
-    const tools = [];
-    for (const message of pendingAssistant) {
-      const entry = assistantEntry(message);
-      if (!entry) continue;
-      const [first, ...rest] = entry.split('\n');
-      if (first.startsWith('Assistant: ')) texts.push(first.slice('Assistant: '.length));
-      tools.push(...rest.filter((line) => line.startsWith('  - ')));
+    if (texts.length || tools.length) {
+      const body = texts.length ? `Assistant: ${clip(texts.join('\n'), MAX_ENTRY_CHARS)}` : 'Assistant (tool calls only):';
+      entries.push([body, ...tools].join('\n'));
     }
-    pendingAssistant = [];
-    if (!texts.length && !tools.length) return;
-    const body = texts.length ? `Assistant: ${clip(texts.join('\n'), MAX_ENTRY_CHARS)}` : 'Assistant (tool calls only):';
-    entries.push([body, ...tools].join('\n'));
+    texts = [];
+    tools = [];
   };
   for (const message of messages) {
     if (message.type === 'assistant') {
-      pendingAssistant.push(message);
+      const parts = assistantParts(message);
+      texts.push(...parts.texts);
+      tools.push(...parts.tools);
     } else if (isRealUserTurn(message)) {
       flush();
       entries.push(`User: ${clip(message.message.content.trim(), MAX_ENTRY_CHARS)}`);

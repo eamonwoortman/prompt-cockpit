@@ -47,6 +47,7 @@ export function initChainUi({
 }) {
   let session = null;
   let busy = false;
+  let optionsKey = '';
 
   function showError(message) {
     errorEl.textContent = message || '';
@@ -70,8 +71,13 @@ export function initChainUi({
   }
 
   // Called when the provider catalog (re)loads, and on every summary.
+  // Rebuilt only when the option list actually changed: summaries stream in
+  // constantly, and tearing down a select the user has open loses their pick.
   function refreshTargets() {
     const options = buildTargetOptions(getCatalog());
+    const key = options.map((o) => `${o.value}|${o.label}`).join('\n');
+    if (key === optionsKey) return;
+    optionsKey = key;
     fill(targetSelect, options, true);
     fill(chainMenuSelect, options, true);
   }
@@ -88,7 +94,10 @@ export function initChainUi({
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       showError(`Could not save: ${err.error || res.statusText}`);
+      return;
     }
+    const result = await res.json().catch(() => ({}));
+    if (result.persisted === false) showError('Applied to this session only: could not save it for the folder.');
   }
 
   async function chainNow(targetValue) {
@@ -130,21 +139,27 @@ export function initChainUi({
     session = next;
     refreshTargets();
     settingsRows.hidden = !supportsRateLimits;
-    actionSelect.value = next.autoContinue ? 'wait' : (next.rateLimitAction || 'none');
     const target = encodeTarget(next.chainTarget);
-    if (target && [...targetSelect.options].some((o) => o.value === target)) targetSelect.value = target;
+    // Never overwrite a control the user is in the middle of using.
+    if (document.activeElement !== actionSelect) actionSelect.value = next.autoContinue ? 'wait' : (next.rateLimitAction || 'none');
+    if (document.activeElement !== targetSelect && target && [...targetSelect.options].some((o) => o.value === target)) targetSelect.value = target;
     chainBtn.hidden = !next.providerSessionId;
     if (!next.providerSessionId) chainMenu.hidden = true;
     // Default the manual menu to the saved target, else the first option that
-    // is not this very session's provider/account.
-    if (target && [...chainMenuSelect.options].some((o) => o.value === target)) chainMenuSelect.value = target;
-    else {
-      const other = [...chainMenuSelect.options].find((o) => decodeTarget(o.value).provider !== next.provider);
-      if (other) chainMenuSelect.value = other.value;
+    // is not this very session's provider/account - only while it is closed,
+    // so an open menu keeps the user's pick.
+    if (chainMenu.hidden) {
+      if (target && [...chainMenuSelect.options].some((o) => o.value === target)) chainMenuSelect.value = target;
+      else {
+        const other = [...chainMenuSelect.options].find((o) => decodeTarget(o.value).provider !== next.provider);
+        if (other) chainMenuSelect.value = other.value;
+      }
     }
     offerBtn.hidden = !(next.chainOffer && next.chainTarget);
     if (!offerBtn.hidden) offerBtn.textContent = `Chain to ${labelFor(target)} now`;
     if (next.chainError) showError(`Chain failed: ${next.chainError}`);
+    else if (errorEl.dataset.fromSummary === '1') showError('');
+    errorEl.dataset.fromSummary = next.chainError ? '1' : '';
   }
 
   return { render, refreshTargets };

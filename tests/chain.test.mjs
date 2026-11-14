@@ -129,3 +129,37 @@ test('normalizeChainTarget rejects unknown providers and non-objects', () => {
   assert.deepEqual(normalizeChainTarget({ provider: 'grok' }), { provider: 'grok', subscription: null });
   assert.deepEqual(RATE_LIMIT_ACTIONS, ['none', 'wait', 'ask', 'chain']);
 });
+
+test('a second chain while one is in flight is refused, and the guard clears afterwards', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+  let release;
+  let ran = 0;
+  registry.setChainRunner(() => { ran += 1; return new Promise((resolve) => { release = () => resolve({ id: `n${ran}`, token: 't' }); }); });
+  const first = registry.chainSession(row.id, target);
+  await assert.rejects(() => registry.chainSession(row.id, target), /already in progress/);
+  release();
+  await first;
+  assert.equal(ran, 1);
+  assert.equal(row.chaining, false);
+  const again = registry.chainSession(row.id, target); // manual chains may repeat once the first is done
+  release();
+  await again;
+  assert.equal(ran, 2);
+});
+
+test('a failed chain clears the in-flight guard so it can be retried', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+  registry.setChainRunner(async () => { throw new Error('boom'); });
+  await assert.rejects(() => registry.chainSession(row.id, target), /boom/);
+  assert.equal(row.chaining, false);
+});
+
+test('choosing a new policy clears the previous attempt\'s error', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession() });
+  row.chainError = 'old failure';
+  await registry.setChainPolicy(row.id, { rateLimitAction: 'ask', chainTarget: target });
+  assert.equal(row.chainError, null);
+});

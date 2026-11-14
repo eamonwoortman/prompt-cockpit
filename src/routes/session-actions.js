@@ -318,9 +318,13 @@ const ACTIONS = {
   'POST auto-continue': async ({ id, row, req }) => {
     const body = await readJsonBody(req);
     await registry.setAutoContinue(id, Boolean(body.enabled));
+    // Wait-and-resume and chaining are alternatives (the settings select shows
+    // one of them), so turning auto-continue on stands the chain choice down.
+    const clearsChain = Boolean(body.enabled) && row.rateLimitAction !== 'none';
+    if (clearsChain) await registry.setChainPolicy(id, { rateLimitAction: 'none', chainTarget: row.chainTarget });
     // Awaited, same reasoning as the 'thinking' route above.
     try {
-      await setSessionDefaults(row.cwd, { autoContinue: Boolean(body.enabled) });
+      await setSessionDefaults(row.cwd, { autoContinue: Boolean(body.enabled), ...(clearsChain ? { rateLimitAction: 'none' } : {}) });
     } catch {
       // ignore - best-effort persistence, see 'thinking' route above
     }
@@ -365,12 +369,13 @@ const ACTIONS = {
     const action = wait ? 'none' : body.rateLimitAction;
     await registry.setAutoContinue(id, wait);
     await registry.setChainPolicy(id, { rateLimitAction: action, chainTarget });
+    let persisted = true;
     try {
       await setSessionDefaults(row.cwd, { autoContinue: wait, rateLimitAction: action, chainTarget });
     } catch {
-      // best-effort persistence, see 'thinking' route above
+      persisted = false; // the live session still has it; the client says it is not saved for the folder
     }
-    return { rateLimitAction: body.rateLimitAction, chainTarget };
+    return { rateLimitAction: body.rateLimitAction, chainTarget, persisted };
   },
 
   'POST approval-decision': async ({ id, row, req }) => {
@@ -434,6 +439,7 @@ const ACTIONS = {
         provider: row.provider,
         subscription: row.subscription,
         history: forkedHistory,
+        chainedFrom: row.chainedFrom, // a fork of a chained session is still one hop from the original
       });
       // Model carries forward via createSession above. Thinking budget and
       // auto-continue have no createSession param, so seedSessionDefaults()
