@@ -12,6 +12,7 @@ import { readGitGuardSettings, setGitGuardSettings, GIT_GUARD_MODES } from '../g
 import { setSessionDefaults } from '../session-defaults.js';
 import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
+import { readRawBody, saveUpload, UploadTooLargeError } from '../uploads.js';
 import { seedSessionDefaults } from './sessions.js';
 import { getProvider } from '../provider-registry.js';
 import { offBlockedReason, effortBlockedByOffReason } from '../thinking-rules.js';
@@ -423,6 +424,20 @@ const ACTIONS = {
   // supportedCommands() already tracks the latest commands_changed push
   // internally, so this never returns stale data after one.
   'GET commands': async ({ row }) => row.handle.query.supportedCommands(),
+
+  // Raw bytes in the body (not JSON), filename in ?name=. Backs browser
+  // drop/paste of screenshots and files; see uploads.js.
+  'POST upload': async ({ row, req, url }) => {
+    let data;
+    try {
+      data = await readRawBody(req);
+    } catch (err) {
+      if (err instanceof UploadTooLargeError) throw new RouteError(413, { error: err.message });
+      throw err;
+    }
+    if (data.length === 0) throw new RouteError(400, { error: 'empty upload' });
+    return { path: await saveUpload(row.cwd, url.searchParams.get('name'), data) };
+  },
 
   'GET diff': async ({ row, url }) => workspaceDiff(row.cwd, url.searchParams.get('mode') || undefined),
 

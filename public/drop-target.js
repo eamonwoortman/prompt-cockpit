@@ -1,8 +1,9 @@
-// Drag-and-drop from Finder onto the compose box, inserting a file
-// reference at the drop point (path-only, not content/image). The
-// browser can't expose the real filesystem path, so this is best-
-// effort: insert the basename, then resolve it via the same
-// file-suggestions search `@`-autocomplete uses (bare filename if outside cwd).
+// Drag-and-drop and paste onto the compose box, inserting an `@path`
+// reference at the caret. The browser can't expose a dropped file's real
+// path, so a drop first tries to resolve the basename inside cwd via the same
+// file-suggestions search `@`-autocomplete uses; anything that doesn't
+// resolve (and every pasted screenshot) is uploaded into the project's
+// .claude/cockpit-uploads/ (see src/uploads.js) and referenced from there.
 export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
   textarea.addEventListener('dragover', (event) => {
     event.preventDefault(); // required for 'drop' to fire at all
@@ -15,21 +16,30 @@ export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
     textarea.classList.remove('drag-over');
     const files = [...(event.dataTransfer?.files || [])];
     if (files.length === 0) return;
-    handleDrop(files);
+    handleFiles(files, { tryResolve: true });
   });
 
-  async function handleDrop(files) {
+  // Pasted files/screenshots only: plain-text pastes fall through untouched.
+  textarea.addEventListener('paste', (event) => {
+    const files = [...(event.clipboardData?.files || [])];
+    if (files.length === 0) return;
+    event.preventDefault();
+    handleFiles(files, { tryResolve: false }); // clipboard names ("image.png") are never real cwd paths
+  });
+
+  async function handleFiles(files, { tryResolve }) {
     const id = getSessionId();
     if (!id) return;
     for (const file of files) {
       // eslint-disable-next-line no-await-in-loop -- sequential so each
       // insertion's caret position is known before the next one starts.
-      await insertOne(id, file.name);
+      await insertOne(id, file, tryResolve);
     }
     textarea.focus();
   }
 
-  async function insertOne(sessionId, name) {
+  async function insertOne(sessionId, file, tryResolve) {
+    const name = file.name || 'image.png';
     const pos = textarea.selectionStart;
     const before = textarea.value.slice(0, pos);
     const after = textarea.value.slice(pos);
@@ -38,8 +48,8 @@ export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
     let caret = pos + name.length + 1;
     textarea.setSelectionRange(caret, caret);
 
-    const resolved = await resolve(sessionId, name);
-    if (!resolved) return; // no unambiguous match in cwd - stays a bare name, honestly
+    const resolved = (tryResolve && (await resolve(sessionId, name))) || (await upload(sessionId, file, name));
+    if (!resolved) return; // neither resolved nor uploaded - stays a bare name, honestly
 
     // Replace exactly the span this drop inserted (`name` plus its
     // trailing space), not a blind string search - the textarea may have
@@ -70,6 +80,22 @@ export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
       // only worked for files directly in cwd's root there.
       const exact = items.filter((item) => item.path.split(/[\\/]/).pop() === name);
       return exact.length === 1 ? exact[0].path : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Saves the file's bytes under cwd and returns the cwd-relative path, or
+  // null on any failure (too large, network, server error).
+  async function upload(sessionId, file, name) {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/upload?name=${encodeURIComponent(name)}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${getSessionToken()}`, 'content-type': 'application/octet-stream' },
+        body: file,
+      });
+      if (!res.ok) return null;
+      return (await res.json()).path;
     } catch {
       return null;
     }

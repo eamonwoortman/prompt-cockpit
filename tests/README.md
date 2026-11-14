@@ -393,6 +393,16 @@ button and the "Loading diff..." state in `detail-pane.js`. The session net
 diff is rebuilt from the edit calls, not read from disk, so edits made by
 Bash or outside the session only show under the Git sources.
 
+## Drop/paste uploads
+
+`uploads.test.mjs` covers `src/uploads.js`: filename sanitizing (path
+traversal, odd characters, length), the self-ignoring `.gitignore` in
+`.claude/cockpit-uploads/`, and the raw-body size cap.
+
+**Hand-verified only (no jsdom):** `public/drop-target.js`'s paste/drop
+handlers and caret-span replacement, and the `POST /api/sessions/:id/upload`
+route wiring in `session-actions.js` (413 on over-limit, 400 on empty body).
+
 ## Tab title states and tool-call visibility
 
 No unit tests: both are pure client-side DOM behavior (no jsdom here).
