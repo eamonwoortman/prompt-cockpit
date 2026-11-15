@@ -10,6 +10,8 @@ import { setSessionTitle } from '../session-titles.js';
 import { setPluginEnabled, readEnabledPlugins } from '../plugin-settings.js';
 import { readGitGuardSettings, setGitGuardSettings, GIT_GUARD_MODES } from '../git-commit-guard.js';
 import { setSessionDefaults } from '../session-defaults.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
 import { readRawBody, saveUpload, UploadTooLargeError } from '../uploads.js';
@@ -498,6 +500,15 @@ const ACTIONS = {
   // supportedCommands() already tracks the latest commands_changed push
   // internally, so this never returns stale data after one.
   'GET commands': async ({ row }) => row.handle.query.supportedCommands(),
+
+  // Size in bytes of a file under cwd, or null. Lets a drop confirm that a
+  // same-named project file really is the dropped one (drop-target.js).
+  'GET file-size': async ({ row, url }) => {
+    const target = path.resolve(row.cwd, url.searchParams.get('path') || '');
+    if (path.relative(row.cwd, target).startsWith('..') || path.isAbsolute(path.relative(row.cwd, target))) return { size: null };
+    const stat = await fs.stat(target).catch(() => null);
+    return { size: stat?.isFile() ? stat.size : null };
+  },
 
   // Raw bytes in the body (not JSON), filename in ?name=. Backs browser
   // drop/paste of screenshots and files; see uploads.js.

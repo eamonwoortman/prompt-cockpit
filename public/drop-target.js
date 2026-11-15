@@ -51,7 +51,7 @@ export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
     let caret = pos + name.length + 1;
     textarea.setSelectionRange(caret, caret);
 
-    const resolved = (tryResolve && (await resolve(sessionId, name))) || (await upload(sessionId, file, name));
+    const resolved = (tryResolve && (await resolve(sessionId, file, name))) || (await upload(sessionId, file, name));
     if (!resolved) return; // neither resolved nor uploaded - stays a bare name, honestly
 
     // Replace exactly the span this drop inserted (`name` plus its
@@ -70,8 +70,10 @@ export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
 
   // Reuses the exact endpoint `@`-autocomplete calls (file-picker.js) -
   // same cwd-glob fallback, same substring match. Only resolves when the
-  // basename is unambiguous: multiple hits (or none) means "don't guess".
-  async function resolve(sessionId, name) {
+  // basename is unambiguous and the project file is the same size as the
+  // dropped one: a same-named but different file (an external image.png vs.
+  // the project's own) is uploaded instead of silently swapped.
+  async function resolve(sessionId, file, name) {
     try {
       const res = await fetch(`/api/sessions/${sessionId}/file-suggestions?q=${encodeURIComponent(name)}`, {
         headers: { authorization: `Bearer ${getSessionToken()}` },
@@ -82,7 +84,12 @@ export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
       // which uses `\` on Windows - splitting on `/` alone (the old code)
       // only worked for files directly in cwd's root there.
       const exact = items.filter((item) => item.path.split(/[\\/]/).pop() === name);
-      return exact.length === 1 ? exact[0].path : null;
+      if (exact.length !== 1) return null;
+      const sizeRes = await fetch(`/api/sessions/${sessionId}/file-size?path=${encodeURIComponent(exact[0].path)}`, {
+        headers: { authorization: `Bearer ${getSessionToken()}` },
+      });
+      if (!sizeRes.ok) return null;
+      return (await sizeRes.json()).size === file.size ? exact[0].path : null;
     } catch {
       return null;
     }
