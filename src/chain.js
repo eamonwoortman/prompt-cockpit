@@ -39,6 +39,7 @@ export function normalizeChainList(list) {
 export async function chainSession(row, target, deps = {}) {
   const createSession = deps.createSession || registry.createSession;
   const sendInput = deps.sendInput || registry.sendInput;
+  const setPermissionMode = deps.setPermissionMode || registry.setPermissionMode;
   const seed = deps.seedSessionDefaults || seedSessionDefaults;
   if (!row) throw new Error('unknown session');
   if (!row.providerSessionId) throw new Error('session has no conversation yet to chain from');
@@ -66,6 +67,10 @@ export async function chainSession(row, target, deps = {}) {
   });
   try {
     await seed(created);
+    // Apply the mode through the live provider control path too: launch-time
+    // options alone do not confirm that the initialized session accepted it.
+    // Finish this before sending the summary so its first tools use the mode.
+    await setPermissionMode(created.id, mode);
     await sendInput(created.id, summary);
     // sendInput only queues the turn: a bad login or failed startup shows up
     // afterwards, so wait for the session to be running (or to die).

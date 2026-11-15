@@ -197,7 +197,7 @@ const READ_KINDS = new Set(['read', 'search', 'think', 'fetch']);
 // Grok has no server-side acceptEdits/plan policy. Decide here, fail closed.
 export function grokPermissionAction(mode, toolCall) {
   const kind = toolCall && toolCall.kind;
-  if (mode === 'bypassPermissions') return 'allow';
+  if (mode === 'bypassPermissions' || mode === 'auto') return 'allow';
   if (mode === 'acceptEdits') return kind === 'edit' ? 'allow' : 'ask';
   if (mode === 'plan') return READ_KINDS.has(kind) ? 'allow' : 'deny';
   return 'ask';

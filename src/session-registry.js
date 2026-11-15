@@ -899,11 +899,12 @@ function handleMessage(id, message) {
   const row = sessions.get(id);
   if (!row) return;
   if (message.session_id) row.providerSessionId = message.session_id;
-  // The CLI can move itself out of the mode it was started/set in (e.g.
+  // Startup can restore a persisted mode, and the CLI can move itself out
+  // of the mode it was started/set in (e.g.
   // accepting a plan exits `plan`) without a setPermissionMode() call from
   // us. Without syncing row.mode here, the client's mode button stays
   // stale and the next Shift+Tab computes its target off the wrong value.
-  if (message.type === 'system' && message.subtype === 'status' && message.permissionMode && message.permissionMode !== row.mode) {
+  if (message.type === 'system' && (message.subtype === 'init' || message.subtype === 'status') && message.permissionMode && message.permissionMode !== row.mode) {
     row.mode = message.permissionMode;
     broadcastSummary(id);
   }

@@ -11,6 +11,7 @@ import * as presence from '../src/presence.js';
 import { chainSession, normalizeChainTarget, normalizeChainList, RATE_LIMIT_ACTIONS } from '../src/chain.js';
 import { readChainLog } from '../src/chain-log.js';
 import { fakeStartSession, fakeWs } from './test-helpers.mjs';
+import { startCodexSession } from '../src/codex-session.js';
 
 const rejected = { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 3600 } };
 const own = { provider: 'claude', subscription: 'default' };
@@ -267,6 +268,7 @@ test('chainSession starts the target in the same folder with defaults, the folde
     fetchHistory: async (sid, cwd) => { assert.equal(sid, 'sid'); assert.equal(cwd, '/proj'); return [{ type: 'user', message: { content: 'do the thing' } }]; },
     createSession: (opts) => { created.push(opts); return { id: 'new', token: 'tok' }; },
     seedSessionDefaults: async () => {},
+    setPermissionMode: async () => {},
     sendInput: async (id, text) => { sent.push({ id, text }); },
     confirmStart: async () => {},
   });
@@ -287,6 +289,7 @@ test('permission mode "inherit" copies the source session\'s mode', async () => 
     fetchHistory: async () => [],
     createSession: (opts) => { mode = opts.permissionMode; return { id: 'n', token: 't' }; },
     seedSessionDefaults: async () => {},
+    setPermissionMode: async () => {},
     sendInput: async () => {},
     confirmStart: async () => {},
   });
@@ -296,14 +299,93 @@ test('permission mode "inherit" copies the source session\'s mode', async () => 
 test('a source in auto mode hands auto on, whatever the folder setting says', async () => {
   const row = { id: 's', cwd: '/p', provider: 'claude', subscription: 'default', mode: 'auto', providerSessionId: 'sid', chainOptions: { permissionMode: 'default' } };
   let mode;
+  const order = [];
   await chainSession(row, { provider: 'grok' }, {
     fetchHistory: async () => [],
     createSession: (opts) => { mode = opts.permissionMode; return { id: 'n', token: 't' }; },
     seedSessionDefaults: async () => {},
-    sendInput: async () => {},
+    setPermissionMode: async (id, value) => { assert.equal(id, 'n'); order.push(value); },
+    sendInput: async () => { order.push('send'); },
     confirmStart: async () => {},
   });
   assert.equal(mode, 'auto');
+  assert.deepEqual(order, ['auto', 'send']);
+});
+
+test('Claude startup auto mode reaches a chained Codex session and its first turn', async () => {
+  const { row, impl } = await chainRow({ chainOptions: { permissionMode: 'default' } });
+  impl.emitMessage({ type: 'system', subtype: 'init', session_id: 'claude-source', permissionMode: 'auto' });
+  const calls = [];
+  const manager = {
+    ready: async () => {},
+    subscribe: () => () => {},
+    onServerRequest: () => () => {},
+    onClose: () => () => {},
+    retainThread: () => {},
+    releaseThread: () => true,
+    request: async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'thread/start') return { thread: { id: 'codex-target' } };
+      if (method === 'turn/start') return { turn: { id: 'first-turn' } };
+      return {};
+    },
+  };
+  let created;
+  try {
+    const result = await chainSession(row, { provider: 'codex' }, {
+      fetchHistory: async () => [],
+      seedSessionDefaults: async () => {},
+      createSession: (opts) => {
+        created = registry.createSession({ ...opts, startSessionImpl: (options) => startCodexSession({ ...options, manager }) });
+        return created;
+      },
+    });
+    assert.equal(result.mode, 'auto');
+    assert.equal(registry.toSummary(created).mode, 'auto');
+    assert.equal(created.handle.getMode(), 'auto');
+    assert.ok(calls.some(({ method }) => method === 'turn/start'));
+  } finally {
+    if (created) registry.closeSession(created.id);
+    registry.closeSession(row.id);
+  }
+});
+
+test('a rejected permission mode aborts the chain before the summary is sent', async () => {
+  registry._reset();
+  let created;
+  await assert.rejects(() => chainSession({ id: 's', cwd: '/tmp', provider: 'claude', mode: 'auto', providerSessionId: 'sid' }, { provider: 'grok' }, {
+    fetchHistory: async () => [],
+    createSession: (opts) => { created = registry.createSession({ ...opts, startSessionImpl: fakeStartSession() }); return created; },
+    seedSessionDefaults: async () => {},
+    setPermissionMode: async () => { throw new Error('mode rejected'); },
+    sendInput: async () => { assert.fail('must not send before the mode is accepted'); },
+  }), /mode rejected/);
+  assert.equal(registry.get(created.id), undefined);
+});
+
+test('chaining applies auto to the live handle even when startup chose default', async () => {
+  registry._reset();
+  let created;
+  try {
+    await chainSession({ id: 's', cwd: '/tmp', provider: 'claude', mode: 'auto', providerSessionId: 'sid' }, { provider: 'grok' }, {
+      fetchHistory: async () => [],
+      createSession: (opts) => {
+        created = registry.createSession({ ...opts, startSessionImpl: fakeStartSession() });
+        // Simulate a provider reporting a different mode during startup.
+        created.mode = 'default';
+        created.handle.setMode('default');
+        return created;
+      },
+      seedSessionDefaults: async () => {},
+      sendInput: async () => {
+        assert.equal(created.mode, 'auto');
+        assert.equal(created.handle.getMode(), 'auto');
+      },
+      confirmStart: async () => {},
+    });
+  } finally {
+    if (created) registry.closeSession(created.id);
+  }
 });
 
 test('chainSession closes the new session and throws when it fails to start after the send', async () => {
@@ -312,6 +394,7 @@ test('chainSession closes the new session and throws when it fails to start afte
     fetchHistory: async () => [],
     createSession: () => ({ id: 'n', token: 't' }),
     seedSessionDefaults: async () => {},
+    setPermissionMode: async () => {},
     sendInput: async () => {},
     confirmStart: async () => { throw new Error('the new session failed to start'); },
   }), /failed to start/);

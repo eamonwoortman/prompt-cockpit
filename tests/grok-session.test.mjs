@@ -419,6 +419,23 @@ test('bypassPermissions auto-allows without asking the client', async () => {
   assert.equal(result.outcome.optionId, 'allow-once');
 });
 
+test('auto mode survives initialization and allows tools without asking the client', async () => {
+  const { session, messages, approvals, fake } = startFake({ permissionMode: 'auto' });
+  await flush();
+  await flush();
+  assert.equal(session.getMode(), 'auto');
+  assert.equal(messages.find((msg) => msg.subtype === 'init').permissionMode, 'auto');
+  for (const kind of ['edit', 'execute']) {
+    const result = await fake.permissionHandler.fn({
+      toolCall: { toolCallId: kind, kind },
+      options: [{ optionId: 'allow-once', kind: 'allow_once' }],
+    });
+    assert.equal(result.outcome.optionId, 'allow-once');
+  }
+  assert.equal(approvals.length, 0);
+  session.close();
+});
+
 test('acceptEdits auto-allows edits only; bash is asked', async () => {
   const { approvals, fake } = startFake({ permissionMode: 'acceptEdits' });
   await flush();
