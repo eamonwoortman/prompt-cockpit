@@ -47,9 +47,10 @@ export async function chainSession(row, target, deps = {}) {
   const history = await (deps.fetchHistory || source.fetchHistory)(row.providerSessionId, row.cwd, { subscription: row.subscription });
   const summary = buildChainSummary(history, { from: { providerLabel: source.label, name: row.name, cwd: row.cwd } });
   // Model and effort are the target's own defaults on purpose. The permission
-  // mode is the folder's chain setting: 'inherit' copies the source's.
+  // mode is the folder's chain setting: 'inherit' copies the source's. A
+  // source in auto mode always hands auto on, whatever the setting says.
   const choice = row.chainOptions?.permissionMode || 'default';
-  const mode = choice === 'inherit' ? (row.mode || 'default') : choice;
+  const mode = row.mode === 'auto' ? 'auto' : choice === 'inherit' ? (row.mode || 'default') : choice;
   const created = createSession({
     cwd: row.cwd,
     provider: targetId,
@@ -66,11 +67,28 @@ export async function chainSession(row, target, deps = {}) {
   try {
     await seed(created);
     await sendInput(created.id, summary);
+    // sendInput only queues the turn: a bad login or failed startup shows up
+    // afterwards, so wait for the session to be running (or to die).
+    await (deps.confirmStart || confirmStart)(created.id);
   } catch (err) {
     registry.closeSession(created.id);
     throw err;
   }
   return { id: created.id, token: created.token, mode };
+}
+
+// Resolves once the new row is running its first turn; rejects if the row
+// errors out or vanishes first. A start that is merely slow (no verdict by
+// the timeout) counts as started, rather than killing a healthy session.
+export async function confirmStart(id, { timeoutMs = 20_000, pollMs = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const live = registry.get(id);
+    if (!live || live.state === 'error' || live.state === 'closed') throw new Error('the new session failed to start');
+    if (live.state === 'running') return;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
 }
 
 // What server.js hands the registry.

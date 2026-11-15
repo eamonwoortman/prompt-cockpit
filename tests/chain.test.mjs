@@ -268,6 +268,7 @@ test('chainSession starts the target in the same folder with defaults, the folde
     createSession: (opts) => { created.push(opts); return { id: 'new', token: 'tok' }; },
     seedSessionDefaults: async () => {},
     sendInput: async (id, text) => { sent.push({ id, text }); },
+    confirmStart: async () => {},
   });
   assert.deepEqual(result, { id: 'new', token: 'tok', mode: 'acceptEdits' });
   assert.equal(created[0].cwd, '/proj');
@@ -287,8 +288,33 @@ test('permission mode "inherit" copies the source session\'s mode', async () => 
     createSession: (opts) => { mode = opts.permissionMode; return { id: 'n', token: 't' }; },
     seedSessionDefaults: async () => {},
     sendInput: async () => {},
+    confirmStart: async () => {},
   });
   assert.equal(mode, 'plan');
+});
+
+test('a source in auto mode hands auto on, whatever the folder setting says', async () => {
+  const row = { id: 's', cwd: '/p', provider: 'claude', subscription: 'default', mode: 'auto', providerSessionId: 'sid', chainOptions: { permissionMode: 'default' } };
+  let mode;
+  await chainSession(row, { provider: 'grok' }, {
+    fetchHistory: async () => [],
+    createSession: (opts) => { mode = opts.permissionMode; return { id: 'n', token: 't' }; },
+    seedSessionDefaults: async () => {},
+    sendInput: async () => {},
+    confirmStart: async () => {},
+  });
+  assert.equal(mode, 'auto');
+});
+
+test('chainSession closes the new session and throws when it fails to start after the send', async () => {
+  const row = { id: 's', cwd: '/p', provider: 'claude', subscription: 'default', mode: 'default', providerSessionId: 'sid' };
+  await assert.rejects(() => chainSession(row, { provider: 'grok' }, {
+    fetchHistory: async () => [],
+    createSession: () => ({ id: 'n', token: 't' }),
+    seedSessionDefaults: async () => {},
+    sendInput: async () => {},
+    confirmStart: async () => { throw new Error('the new session failed to start'); },
+  }), /failed to start/);
 });
 
 test('chainSession refuses a session with no conversation yet', async () => {
