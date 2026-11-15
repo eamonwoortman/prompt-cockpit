@@ -2,14 +2,10 @@
 // unfocused tab is scannable from the tab strip instead of needing a
 // terminal-bell substitute, plus a user-settable tab name that stops
 // getting overwritten once set (`userNamed`).
-const DOT = {
-  idle: '#8a8f98',
-  running: '#5b8cff',
-  attention: '#ff6b6b',
-};
+const IDLE_COLOR = '#8a8f98';
 
-// Title prefix per state, so a tab strip shows what each tab is doing
-// without opening it. Idle gets no prefix. Priority in render(): pending
+// Favicon emoji per state, so a tab strip shows what each tab is doing
+// without opening it. The title itself stays clean. Idle gets no prefix. Priority in render(): pending
 // approval/question > needs-attention > error > running.
 const STATE_TO_EMOJI = {
   running: '🔄',
@@ -18,12 +14,6 @@ const STATE_TO_EMOJI = {
 };
 const PENDING_EMOJI = '🔔'; // a permission request or question is waiting on the user
 const ATTENTION_EMOJI = '❗'; // finished while unfocused / session-list focus request
-
-const STATE_TO_DOT = {
-  running: 'running',
-  starting: 'running',
-  error: 'attention',
-};
 
 // An 8-point starburst glyph, alternating outer/inner radius vertices,
 // generated once by hand rather than computed at runtime - it's a fixed
@@ -34,12 +24,16 @@ function faviconDataUrl(color) {
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
-const FAVICONS = Object.fromEntries(Object.entries(DOT).map(([key, color]) => [key, faviconDataUrl(color)]));
+function emojiFaviconUrl(emoji) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><text x="8" y="13" font-size="13" text-anchor="middle">${emoji}</text></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+const IDLE_FAVICON = faviconDataUrl(IDLE_COLOR);
 
 export function initTabChrome({ faviconEl = document.getElementById('favicon'), defaultName = 'Prompt Cockpit' } = {}) {
   let autoName = defaultName;
   let userName = null; // set once the user renames the tab; auto-naming stops touching it from then on
-  let dotState = 'idle';
   let needsAttention = false;
   let pendingApproval = false; // unlike needsAttention, only cleared when the request is actually resolved - not on focus
   let sessionState = 'idle';
@@ -47,8 +41,8 @@ export function initTabChrome({ faviconEl = document.getElementById('favicon'), 
   function render() {
     const name = userName || autoName;
     const emoji = pendingApproval ? PENDING_EMOJI : needsAttention ? ATTENTION_EMOJI : STATE_TO_EMOJI[sessionState] || '';
-    document.title = emoji ? `${emoji} ${name}` : name;
-    faviconEl.href = FAVICONS[pendingApproval || needsAttention ? 'attention' : dotState] || FAVICONS.idle;
+    document.title = name;
+    faviconEl.href = emoji ? emojiFaviconUrl(emoji) : IDLE_FAVICON;
   }
 
   // Called whenever the session itself has an obvious name (cwd, mostly) -
@@ -66,7 +60,6 @@ export function initTabChrome({ faviconEl = document.getElementById('favicon'), 
 
   function setState(state) {
     sessionState = state;
-    dotState = STATE_TO_DOT[state] || 'idle';
     render();
   }
 

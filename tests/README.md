@@ -407,7 +407,7 @@ route wiring in `session-actions.js` (413 on over-limit, 400 on empty body).
 
 No unit tests: both are pure client-side DOM behavior (no jsdom here).
 
-**Hand-verified only:** `public/tab-chrome.js`'s emoji prefix priority
+**Hand-verified only:** `public/tab-chrome.js`'s favicon emoji priority
 (pending approval/question, then needs-attention, then error, then running;
 idle has none) and `approval-panel.js` driving `setPendingApproval` from the
 queue (stays set until the request resolves, not cleared on focus). The Settings >
