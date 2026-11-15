@@ -74,7 +74,7 @@ export function initChainUi({
   post, // async (action, body) => Response
   get, // async (action) => Response
   sendAway, // (boolean) => void
-  onChained, // ({ id, token }) => void - the tab jumps to the new session
+  onChained, // ({ id, token }) => void - opens the new session in a new tab
 }) {
   let session = null;
   let busy = false;

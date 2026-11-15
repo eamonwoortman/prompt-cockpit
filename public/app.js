@@ -443,6 +443,24 @@ function clearActiveSession() {
   history.replaceState(null, '', url);
 })();
 
+// A chain continues the work in a new browser tab, leaving this one on the old
+// session. A script-opened tab gets a copy of our sessionStorage, so point our
+// active-session entry at the new session just for the open, then put it back.
+// If the browser blocks the popup (no user gesture, e.g. an auto-chain), fall
+// back to switching this tab.
+function openChainedSession(newSession) {
+  let previous = null;
+  try { previous = sessionStorage.getItem(ACTIVE_SESSION_KEY); } catch { /* see saveActiveSession */ }
+  saveActiveSession(newSession.id, newSession.token);
+  const url = new URL(window.location.origin + window.location.pathname);
+  const opened = window.open(url, '_blank');
+  try {
+    if (previous === null) sessionStorage.removeItem(ACTIVE_SESSION_KEY);
+    else sessionStorage.setItem(ACTIVE_SESSION_KEY, previous);
+  } catch { /* see saveActiveSession */ }
+  if (!opened) connect(newSession.id, newSession.token);
+}
+
 // Last 3 unique folders a session was started in, most-recent-first, so the
 // launcher can offer them as a dropdown instead of retyping/re-browsing the
 // same path every time. Client-side only (localStorage) - the server has no
@@ -945,7 +963,7 @@ const chainUi = initChainUi({
   }),
   get: (action) => fetch(`/api/sessions/${sessionId}/${action}`, { headers: authHeaders() }),
   sendAway: (value) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'away', value })); },
-  onChained: (newSession) => connect(newSession.id, newSession.token),
+  onChained: openChainedSession,
 });
 
 // Presence for overnight chaining (presence.js on the server): real interaction
@@ -2496,7 +2514,7 @@ function connect(id, token, { reconnect = false } = {}) {
     } else if (payload.type === 'cockpit:chained') {
       // Auto-chain (rate limit hit with "Chain automatically"): jump to the
       // new session. The old one stays open and idle on the server.
-      if (payload.session) connect(payload.session.id, payload.session.token);
+      if (payload.session) openChainedSession(payload.session);
     } else if (payload.type === 'cockpit:approval-request') {
       approvalPanel.enqueue(payload.request);
     } else if (payload.type === 'cockpit:approval-resolved') {
