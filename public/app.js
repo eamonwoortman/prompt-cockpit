@@ -921,13 +921,21 @@ toolRevealBtn.addEventListener('click', () => {
 
 const chainUi = initChainUi({
   actionSelect: document.getElementById('rateLimitActionSelect'),
-  targetSelect: document.getElementById('chainTargetSelect'),
+  listEl: document.getElementById('chainListEl'),
+  addSelect: document.getElementById('chainAddSelect'),
+  addBtn: document.getElementById('chainAddBtn'),
+  askPresentCheckbox: document.getElementById('chainAskPresentBtn'),
+  awayMinutesInput: document.getElementById('chainAwayMinutesBtn'),
+  permissionSelect: document.getElementById('chainPermissionBtn'),
+  logBtn: document.getElementById('chainLogBtn'),
+  logEl: document.getElementById('chainLogEl'),
   settingsRows: document.getElementById('chainSettingsRows'),
   chainBtn: document.getElementById('chainBtn'),
   chainMenu: document.getElementById('chainMenu'),
   chainMenuSelect: document.getElementById('chainMenuSelect'),
   chainGoBtn: document.getElementById('chainGoBtn'),
   offerBtn: document.getElementById('chainOfferBtn'),
+  awayBtn: document.getElementById('awayBtn'),
   errorEl: document.getElementById('chainError'),
   getCatalog: () => providerCatalog,
   post: (action, body) => fetch(`/api/sessions/${sessionId}/${action}`, {
@@ -935,8 +943,24 @@ const chainUi = initChainUi({
     headers: { 'content-type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   }),
+  get: (action) => fetch(`/api/sessions/${sessionId}/${action}`, { headers: authHeaders() }),
+  sendAway: (value) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'away', value })); },
   onChained: (newSession) => connect(newSession.id, newSession.token),
 });
+
+// Presence for overnight chaining (presence.js on the server): real interaction
+// in a focused, visible tab, throttled. An open tab nobody touches sends nothing.
+let lastPresencePing = 0;
+function pingPresence() {
+  const now = Date.now();
+  if (now - lastPresencePing < 15000 || document.hidden || !document.hasFocus()) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  lastPresencePing = now;
+  ws.send(JSON.stringify({ type: 'presence' }));
+}
+for (const eventName of ['keydown', 'pointerdown', 'pointermove', 'wheel']) {
+  window.addEventListener(eventName, pingPresence, { passive: true });
+}
 
 // Cog button opens the modal instead of Close session sitting directly in
 // the header - see settings.js's module comment for why.

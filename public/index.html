@@ -193,6 +193,7 @@
     <button type="button" id="pendingTurnsBadge" class="session-chrome" hidden title="Turns cockpit still thinks are in flight. Click if nothing is actually running to force it back to idle."></button>
     <button type="button" id="stopBtn" class="session-chrome" hidden title="Cancel the running turn (Esc)">Stop</button>
     <button type="button" id="toolRevealBtn" class="btn session-chrome" hidden aria-pressed="false" title="Tool calls are hidden by your Settings > Display choice. Click to reveal them so you can open one in the detail pane.">Show tool calls</button>
+    <button type="button" id="awayBtn" class="btn session-chrome" aria-pressed="false" title="Force away: chaining after a rate limit then runs on its own, without waiting for you to go idle. Click again to turn it off.">🌙 Away</button>
     <button type="button" id="chainBtn" class="btn session-chrome" hidden title="Continue this session's work in a new session on another provider or account. This session stays open.">Chain to...</button>
     <span id="chainMenu" class="session-chrome" hidden>
       <label class="visually-hidden" for="chainMenuSelect">Chain target</label>
@@ -370,7 +371,7 @@
             <span class="hint" title="Sessions must share the same handshake value (Session list > Handshake) to send or receive /ask delegated tasks. Local sessions are trusted automatically when created; paste a value here to re-sync after a rotation, or an invalid value to revoke this session's own trust.">?</span>
           </div>
           <div id="handshakeError" class="mcp-error" hidden></div>
-          <div id="chainSettingsRows">
+          <div id="chainSettingsRows" hidden>
             <label class="settings-row">
               <span>When a rate limit hits</span>
               <select id="rateLimitActionSelect">
@@ -379,19 +380,40 @@
                 <option value="ask">Ask me to chain</option>
                 <option value="chain">Chain automatically</option>
               </select>
-              <span class="hint" title="Per folder. Wait and resume sends Continue once the limit resets (same as Auto-continue). Chaining starts a new session on the chain target, in this folder, with a text summary of this conversation sent as its first message (your messages, the replies, and one line per tool call, including shell commands and file paths; never tool output); this session stays open. A chained session never chains again. Only Claude sessions report rate limits.">?</span>
+              <span class="hint" title="Per folder. Wait and resume sends Continue once the limit resets (same as Auto-continue). Chaining starts a new session on the next account in the chain list, in this folder, with a text summary of this conversation sent as its first message (your messages, the replies, and one line per tool call, including shell commands and file paths; never tool output); this session stays open. Each account is used at most once; when the list runs out the chain stops. Only Claude, Grok and Codex sessions that report a limit trigger it.">?</span>
+            </label>
+            <div class="settings-section">
+              <div class="settings-section-header">
+                <strong>Chain list, in order</strong>
+                <span>
+                  <label class="visually-hidden" for="chainAddSelect">Account to add</label>
+                  <select id="chainAddSelect"></select>
+                  <button type="button" id="chainAddBtn" class="btn" title="Add this account to the end of the list">+ Add</button>
+                </span>
+              </div>
+              <ul id="chainListEl" class="settings-list"></ul>
+            </div>
+            <label class="settings-row">
+              <input type="checkbox" id="chainAskPresentBtn" />
+              <span>Ask me instead while I'm at the computer</span>
+              <span class="hint" title="With Chain automatically: while you are using the cockpit the limit only shows the Chain button, and it chains on its own once you are away. The Away button in the activity bar forces away, e.g. before you leave for the night.">?</span>
             </label>
             <label class="settings-row">
-              <span>Chain target</span>
-              <select id="chainTargetSelect"></select>
-              <span class="hint" title="Where a chain goes: another provider, or another Claude login folder from your cockpit settings. Used by Ask me / Chain automatically and offered first in the Chain to... menu. The new session starts at that target's default model and effort, in default permission mode.">?</span>
+              <span>Count me as away after (minutes)</span>
+              <input type="number" id="chainAwayMinutesBtn" min="1" max="1440" step="1" />
             </label>
-          </div>
-          <div class="settings-section">
-            <div class="settings-section-header">
-              <strong>Always-allowed tools in this project</strong>
+            <label class="settings-row">
+              <span>Permission mode for chained sessions</span>
+              <select id="chainPermissionBtn"></select>
+              <span class="hint" title="Applies to every session a chain starts. Asking for each action means an unattended chain stops at its first edit and waits for you. Bypass runs every tool without asking: only for a folder you trust to run overnight.">?</span>
+            </label>
+            <div class="settings-section">
+              <div class="settings-section-header">
+                <strong>Chain log</strong>
+                <button type="button" id="chainLogBtn" class="btn" title="What chaining did in this folder, newest first">Show log</button>
+              </div>
+              <ul id="chainLogEl" class="settings-list" hidden></ul>
             </div>
-            <ul id="permissionRulesList" class="settings-list"></ul>
           </div>
           <div class="settings-row settings-danger">
             <div>

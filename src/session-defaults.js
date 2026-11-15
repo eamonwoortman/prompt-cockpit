@@ -5,7 +5,7 @@
 // isn't tracked: a fork always carries it forward via createSession.
 import { readSettingsFile, updateSettingsFile } from './settings-file.js';
 
-const EMPTY_DEFAULTS = { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null, rateLimitAction: 'none', chainTarget: null };
+const EMPTY_DEFAULTS = { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null, rateLimitAction: 'none', chainList: [], chainOptions: null };
 
 export async function readSessionDefaults(cwd) {
   const settings = await readSettingsFile(cwd);

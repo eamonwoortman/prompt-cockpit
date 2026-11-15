@@ -12,6 +12,9 @@ import { contextPayload } from './context-usage.js';
 import { getProvider, parseProvider } from './provider-registry.js';
 import { createDelegation } from './delegation.js';
 import { accountUsageCache } from './account-usage-cache.js';
+import { nextTargets, ownTarget, normalizeChainOptions, looksLikeRateLimit } from './chain-policy.js';
+import { appendChainLog } from './chain-log.js';
+import * as presence from './presence.js';
 const sessions = new Map();
 
 // Cross-session delegation (handshake trust + `/ask`) lives in delegation.js,
@@ -26,7 +29,7 @@ export const setSessionHandshake = delegation.setSessionHandshake;
 export const isSessionTrusted = delegation.isSessionTrusted;
 export const delegateTask = delegation.delegateTask;
 
-export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, rateLimitAction, chainTarget, chainedFrom, startSessionImpl }) {
+export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, rateLimitAction, chainList, chainOptions, chainedFrom, startSessionImpl }) {
   // Authoritative uniqueness check for delegation names - this function has
   // no `await` before it and none until sessions.set() below, closing the
   // TOCTOU window server.js's own pre-check has (that check runs after
@@ -112,19 +115,25 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     rateLimitHit: null, // { resetsAt, rateLimitType } | null
     autoContinueTimer: null,
     // Chain-on-rate-limit (chain.js): what to do when the limit hits -
-    // 'none' | 'ask' | 'chain' - and where to chain to. `chainedFrom` marks a
-    // session that is itself the product of a chain: it never auto-chains
-    // again (one hop, so two limited accounts can't bounce a task forever).
-    // `chainOffer` is the 'ask' prompt state, `chainedTo` the auto-chain
-    // latch (both the rejected event and the CLI's limit text can fire for
-    // one hit), `chainError` the last failed attempt for the UI to show.
+    // 'none' | 'ask' | 'chain' - and the fixed, ordered list of accounts to
+    // chain through (chain-policy.js's nextTargets walks it forward, never
+    // reusing an account). `chainedFrom` marks a session that is the product
+    // of a chain and carries every account used so far (`visited`), which is
+    // what stops a loop. `chainOffer` is the ask-me prompt state, `chainedTo`
+    // the latch (both the rejected event and the CLI's limit text can fire
+    // for one hit), `chainError` the last failure/stop for the UI to show,
+    // `chaining`/`autoChaining` the in-flight guards, `chainWatchTimer` the
+    // poll that turns an offer into an automatic chain once the user leaves.
     rateLimitAction: rateLimitAction || 'none',
-    chainTarget: chainTarget || null,
+    chainList: Array.isArray(chainList) ? chainList : [],
+    chainOptions: normalizeChainOptions(chainOptions || {}),
     chainedFrom: chainedFrom || null,
     chainOffer: false,
     chainedTo: null,
     chainError: null,
     chaining: false,
+    autoChaining: false,
+    chainWatchTimer: null,
     // Throttling state for scheduleUsageBroadcast below - a Grok reply can
     // land dozens of assistant-message chunks a second, each one otherwise
     // triggering its own cockpit:usage broadcast. -Infinity (not 0) so the
@@ -239,7 +248,8 @@ export function resetSession(id, { startSessionImpl } = {}) {
     thinkingDisplay: row.thinkingDisplay,
     autoContinue: row.autoContinue,
     rateLimitAction: row.rateLimitAction,
-    chainTarget: row.chainTarget,
+    chainList: row.chainList,
+    chainOptions: row.chainOptions,
     chainedFrom: row.chainedFrom,
     permissionMode: row.mode,
     startSessionImpl,
@@ -306,6 +316,7 @@ export function closeSession(id) {
   const row = sessions.get(id);
   if (!row) return false;
   clearAutoContinueTimer(row);
+  clearChainWatch(row);
   clearUsageBroadcastTimer(row);
   row.unsubscribeAccountLimits?.();
   // session.js's close() only interrupts the current turn; its `result`
@@ -411,10 +422,13 @@ export function toSummary(row) {
     autoContinue: row.autoContinue,
     rateLimitHit: row.rateLimitHit,
     rateLimitAction: row.rateLimitAction,
-    chainTarget: row.chainTarget,
-    chainedFrom: row.chainedFrom,
+    chainList: row.chainList,
+    chainOptions: row.chainOptions,
+    chainNext: nextTargets(row.chainList, ownTarget(row), row.chainedFrom?.visited)[0] || null,
+    chainedFrom: row.chainedFrom ? { id: row.chainedFrom.id, name: row.chainedFrom.name, providerLabel: row.chainedFrom.providerLabel } : null,
     chainOffer: row.chainOffer,
     chainError: row.chainError,
+    presence: { forcedAway: presence.isForcedAway(), away: presence.isAway(row.chainOptions.awayMinutes) },
     // Whether this row is currently allowed to send/receive a delegated
     // task. The raw secret value itself is NOT included (only the server's
     // canonical copy is meant to be copied around, via /api/handshake).
@@ -598,64 +612,152 @@ export function setChainRunner(fn) {
   chainRunner = fn;
 }
 
-// Starts a session on `target` ({ provider, subscription? }) carrying this
-// row's conversation as a text summary. The source row is left untouched
-// (open, idle), like rewind's fork. Returns { id, token } of the new row.
-export async function chainSession(id, target) {
-  const row = sessions.get(id);
-  if (!row) throw new Error(`unknown session: ${id}`);
+// Starts a session on `target` ({ provider, subscription? }), or on the next
+// account in the chain list when none is given, carrying this row's
+// conversation as a text summary. The source row is left untouched (open,
+// idle), like rewind's fork. Returns { id, token } of the new row.
+export async function chainSession(idOrRow, target, { trigger = 'manual' } = {}) {
+  const row = typeof idOrRow === 'string' ? sessions.get(idOrRow) : idOrRow;
+  if (!row) throw new Error(`unknown session: ${idOrRow}`);
   if (!chainRunner) throw new Error('chaining is not available');
+  const to = target || nextTargets(row.chainList, ownTarget(row), row.chainedFrom?.visited)[0];
+  if (!to) throw new Error('no further account in the chain list');
   // One chain at a time per row: two tabs (or the ask-me button racing a
   // manual chain) must not each start a target session.
   if (row.chaining) throw new Error('a chain is already in progress for this session');
   row.chaining = true;
   try {
-    const result = await chainRunner(id, target);
+    const result = await chainRunner(row, to);
     row.chainedTo = { id: result.id };
     row.chainOffer = false;
     row.chainError = null;
+    clearChainWatch(row);
+    logChain(row, { event: 'chained', trigger, to: { ...to, sessionId: result.id }, mode: result.mode });
     return result;
   } finally {
     row.chaining = false;
-    broadcastSummary(id);
+    broadcastSummary(row.id);
   }
 }
 
-async function autoChain(id) {
-  const row = sessions.get(id);
-  if (!row || row.chaining || row.chainedTo || !row.chainTarget) return;
+function logChain(row, entry) {
+  appendChainLog(row.cwd, { from: { sessionId: row.id, name: row.name, provider: row.provider, subscription: row.subscription }, ...entry });
+}
+
+// Sends to a row's tabs even after the row has left the table (a Grok
+// session that died on its limit), which broadcast(id) cannot.
+function broadcastRow(row, payload) {
+  const data = JSON.stringify(payload);
+  for (const ws of row.clients) {
+    if (ws.readyState === ws.OPEN) ws.send(data);
+  }
+}
+
+// Automatic hop: walk the remaining accounts in list order and take the
+// first that can start. An account that is not installed or fails to start is
+// skipped (and logged); when none remain the chain stops, loudly.
+async function autoChain(idOrRow) {
+  const row = typeof idOrRow === 'string' ? sessions.get(idOrRow) : idOrRow;
+  if (!row || row.autoChaining || row.chaining || row.chainedTo) return;
+  row.autoChaining = true;
+  clearChainWatch(row);
   try {
-    const result = await chainSession(id, row.chainTarget);
-    broadcast(id, { type: 'cockpit:chained', session: { id: result.id, token: result.token }, auto: true });
-  } catch (err) {
-    row.chainError = String(err.message || err);
-    broadcastSummary(id);
+    const candidates = nextTargets(row.chainList, ownTarget(row), row.chainedFrom?.visited);
+    let lastError = null;
+    for (const candidate of candidates) {
+      try {
+        // eslint-disable-next-line no-await-in-loop -- strictly one attempt at a time, in list order
+        if (!(await getProvider(candidate.provider).isAvailable())) throw new Error(`${candidate.provider} is not available on this machine`);
+        // eslint-disable-next-line no-await-in-loop
+        const result = await chainSession(row, candidate, { trigger: 'auto' });
+        broadcastRow(row, { type: 'cockpit:chained', session: { id: result.id, token: result.token }, auto: true });
+        return;
+      } catch (err) {
+        lastError = err;
+        logChain(row, { event: 'chain-failed', to: candidate, detail: String(err.message || err) });
+      }
+    }
+    row.chainError = candidates.length
+      ? `No account in the chain list could take over: ${String(lastError?.message || lastError)}`
+      : 'The chain list is used up: no further account to chain to.';
+    logChain(row, { event: 'chain-stopped', detail: row.chainError });
+    if (sessions.get(row.id) === row) broadcastSummary(row.id);
+  } finally {
+    row.autoChaining = false;
   }
 }
 
-// Single entry point for a fresh rate-limit hit (called from both detection
-// sources). Wait-and-resume (autoContinue) is independent of the chain
-// choice; the UI keeps the two mutually exclusive.
-function onRateLimitHit(id) {
+function clearChainWatch(row) {
+  if (row.chainWatchTimer) {
+    clearInterval(row.chainWatchTimer);
+    row.chainWatchTimer = null;
+  }
+}
+
+// While the user is here, automatic chaining only offers. If they walk away
+// with the limit still standing, this turns the offer into the real chain.
+function startChainWatch(row) {
+  if (row.chainWatchTimer) return;
+  row.chainWatchTimer = setInterval(() => {
+    const live = sessions.get(row.id) === row;
+    if (!live || !row.rateLimitHit || row.chainedTo || row.rateLimitAction !== 'chain') {
+      clearChainWatch(row);
+      return;
+    }
+    if (presence.isAway(row.chainOptions.awayMinutes)) autoChain(row);
+  }, CHAIN_WATCH_MS);
+  row.chainWatchTimer.unref?.();
+}
+const CHAIN_WATCH_MS = 30_000;
+
+// Single entry point for a fresh rate-limit hit (all detection sources).
+// Wait-and-resume (autoContinue) is independent of the chain choice; the
+// routes keep the two mutually exclusive.
+function onRateLimitHit(id, { detail } = {}) {
   const row = sessions.get(id);
   if (!row) return;
+  logChain(row, { event: 'limit-hit', detail, action: row.autoContinue ? 'wait' : row.rateLimitAction });
   if (row.autoContinue) scheduleAutoContinue(id);
-  if (row.chainedFrom || row.chainedTo || !row.chainTarget) return; // one hop only
-  if (row.rateLimitAction === 'ask') row.chainOffer = true;
-  else if (row.rateLimitAction === 'chain') autoChain(id);
+  if (row.chainedTo || !row.chainList.length) return;
+  if (row.rateLimitAction !== 'ask' && row.rateLimitAction !== 'chain') return;
+  if (!nextTargets(row.chainList, ownTarget(row), row.chainedFrom?.visited).length) {
+    row.chainError = 'The chain list is used up: no further account to chain to.';
+    logChain(row, { event: 'chain-stopped', detail: row.chainError });
+    return;
+  }
+  if (row.rateLimitAction === 'ask') {
+    row.chainOffer = true;
+  } else if (row.chainOptions.askWhenPresent && !presence.isAway(row.chainOptions.awayMinutes)) {
+    row.chainOffer = true; // you are here: offer, and chain on its own if you leave
+    startChainWatch(row);
+  } else {
+    autoChain(row);
+  }
 }
 
 // Sets what happens on a rate limit. Like setAutoContinue, acts at once when
 // the limit has already been hit rather than waiting for another rejection.
-export async function setChainPolicy(id, { rateLimitAction, chainTarget }) {
+export async function setChainPolicy(id, { rateLimitAction, chainList, chainOptions }) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
   row.rateLimitAction = rateLimitAction;
-  row.chainTarget = chainTarget || null;
+  row.chainList = Array.isArray(chainList) ? chainList : [];
+  row.chainOptions = normalizeChainOptions(chainOptions || row.chainOptions);
   row.chainError = null; // a new choice supersedes the last attempt's failure
+  if (rateLimitAction !== 'chain') clearChainWatch(row);
   if (rateLimitAction === 'none') row.chainOffer = false;
-  if (row.rateLimitHit) onRateLimitHit(id);
+  if (row.rateLimitHit) onRateLimitHit(id, { detail: 'policy changed while limited' });
   broadcastSummary(id);
+}
+
+// The user's own signals (tab activity pings, the away switch). Every row's
+// tabs get a fresh summary so the away button and the offer state stay true.
+export function markPresence() {
+  presence.markActivity();
+}
+export function setAway(value) {
+  presence.setForcedAway(value);
+  for (const id of sessions.keys()) broadcastSummary(id);
 }
 
 // `decision` is a PermissionResult - {behavior:'allow', updatedInput?} or
@@ -841,11 +943,12 @@ function handleMessage(id, message) {
       // here so rateLimitHit.resetsAt is plain epoch-ms everywhere below and
       // in app.js, instead of every reader having to remember the *1000.
       row.rateLimitHit = { resetsAt: info.resetsAt ? info.resetsAt * 1000 : null, rateLimitType: info.rateLimitType || null };
-      onRateLimitHit(id);
+      onRateLimitHit(id, { detail: info.rateLimitType || 'rejected' });
     } else if (row.rateLimitHit) {
       row.rateLimitHit = null;
       row.chainOffer = false;
       clearAutoContinueTimer(row);
+      clearChainWatch(row);
     }
     broadcastSummary(id);
   }
@@ -859,9 +962,26 @@ function handleMessage(id, message) {
       const resetsAt = parseSessionLimitResetText(block.text);
       if (resetsAt != null) {
         row.rateLimitHit = { resetsAt: resetsAt + AUTO_CONTINUE_BUFFER_MS, rateLimitType: 'session_limit_text' };
-        onRateLimitHit(id);
+        onRateLimitHit(id, { detail: block.text });
         broadcastSummary(id);
       }
+    }
+  }
+  // Grok and Codex have no structured rate-limit event: a hit only shows up as
+  // an error result. Matched on its text (chain-policy.js's phrase list,
+  // unverified against the real CLIs - the raw text goes to the chain log).
+  // A later successful result lifts a hit recorded this way.
+  if (row.provider !== 'claude' && message.type === 'result') {
+    const text = message.is_error ? String(message.error || message.result || '') : '';
+    if (looksLikeRateLimit(text)) {
+      row.rateLimitHit = { resetsAt: null, rateLimitType: 'provider_error_text' };
+      onRateLimitHit(id, { detail: text });
+      broadcastSummary(id);
+    } else if (!message.is_error && row.rateLimitHit?.rateLimitType === 'provider_error_text') {
+      row.rateLimitHit = null;
+      row.chainOffer = false;
+      clearChainWatch(row);
+      broadcastSummary(id);
     }
   }
   const seq = appendEvent(row.eventLog, message);
@@ -1304,6 +1424,17 @@ function handleError(id, err) {
   // dies; left armed, it would later pushTurn 'Continue' into a dead handle
   // and broadcast a ghost 'running' state.
   clearAutoContinueTimer(row);
+  clearChainWatch(row);
+  // A Grok prompt failure ends the row here. If it was a rate limit and the
+  // user is away with automatic chaining on, hand the work on before the row
+  // disappears (a present user just sees the error; the row is dead, so there
+  // is nothing left to offer a button on).
+  if (row.provider !== 'claude' && looksLikeRateLimit(String((err && err.message) || err))) {
+    const detail = String((err && err.message) || err);
+    logChain(row, { event: 'limit-hit', detail });
+    if (row.rateLimitAction === 'chain' && !row.chainedTo && presence.isAway(row.chainOptions.awayMinutes)) autoChain(row);
+    else logChain(row, { event: 'chain-skipped', detail: 'session ended on a rate limit while you were present or chaining was not automatic' });
+  }
   row.state = 'error';
   row.unsubscribeAccountLimits?.();
   // A crashing row's for-await loop exits without ever emitting the

@@ -14,7 +14,9 @@ import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
 import { readRawBody, saveUpload, UploadTooLargeError } from '../uploads.js';
 import { seedSessionDefaults } from './sessions.js';
-import { RATE_LIMIT_ACTIONS, normalizeChainTarget } from '../chain.js';
+import { RATE_LIMIT_ACTIONS, normalizeChainTarget, normalizeChainList } from '../chain.js';
+import { normalizeChainOptions } from '../chain-policy.js';
+import { readChainLog } from '../chain-log.js';
 import { getProvider } from '../provider-registry.js';
 import { offBlockedReason, effortBlockedByOffReason } from '../thinking-rules.js';
 
@@ -46,7 +48,8 @@ const ACTIONS = {
         thinkingDisplay: row.thinkingDisplay,
         autoContinue: row.autoContinue,
         rateLimitAction: row.rateLimitAction,
-        chainTarget: row.chainTarget,
+        chainList: row.chainList,
+        chainOptions: row.chainOptions,
       });
     } catch (err) {
       registry.closeSession(replacement.id);
@@ -321,7 +324,7 @@ const ACTIONS = {
     // Wait-and-resume and chaining are alternatives (the settings select shows
     // one of them), so turning auto-continue on stands the chain choice down.
     const clearsChain = Boolean(body.enabled) && row.rateLimitAction !== 'none';
-    if (clearsChain) await registry.setChainPolicy(id, { rateLimitAction: 'none', chainTarget: row.chainTarget });
+    if (clearsChain) await registry.setChainPolicy(id, { rateLimitAction: 'none', chainList: row.chainList, chainOptions: row.chainOptions });
     // Awaited, same reasoning as the 'thinking' route above.
     try {
       await setSessionDefaults(row.cwd, { autoContinue: Boolean(body.enabled), ...(clearsChain ? { rateLimitAction: 'none' } : {}) });
@@ -331,52 +334,65 @@ const ACTIONS = {
     return { enabled: Boolean(body.enabled) };
   },
 
-  // Manual chain: continue this session's work in a new session on another
+  // Chain: continue this session's work in a new session on another
   // provider/account (same folder, target's default model/effort, summary
-  // auto-sent as its first message). The source session stays open.
+  // auto-sent as its first message). Without a target it takes the next
+  // account in the folder's chain list (the ask-me button). The source
+  // session stays open.
   'POST chain': async ({ id, req }) => {
     const body = await readJsonBody(req);
     let target;
-    try {
-      target = normalizeChainTarget(body.target);
-    } catch (err) {
-      throw new RouteError(400, { error: err.message });
+    if (body.target) {
+      try {
+        target = normalizeChainTarget(body.target);
+      } catch (err) {
+        throw new RouteError(400, { error: err.message });
+      }
     }
-    const created = await registry.chainSession(id, target);
+    let created;
+    try {
+      created = await registry.chainSession(id, target, { trigger: target ? 'manual' : 'offer' });
+    } catch (err) {
+      throw new RouteError(409, { error: err.message });
+    }
     return { newSession: { id: created.id, token: created.token } };
   },
 
-  // The "When a rate limit hits" choice. 'wait' is the existing
-  // auto-continue (kept as its own row flag); 'ask' and 'chain' need a
-  // target. Persisted per folder alongside the other session defaults.
+  // The "When a rate limit hits" choice plus the ordered chain list and its
+  // options. 'wait' is the existing auto-continue (kept as its own row flag);
+  // 'ask' and 'chain' need a non-empty list. Persisted per folder alongside
+  // the other session defaults.
   'POST chain-policy': async ({ id, row, req }) => {
     const body = await readJsonBody(req);
     if (!RATE_LIMIT_ACTIONS.includes(body.rateLimitAction)) {
       throw new RouteError(400, { error: `invalid rateLimitAction: ${body.rateLimitAction}` });
     }
-    let chainTarget = null;
-    if (body.chainTarget) {
-      try {
-        chainTarget = normalizeChainTarget(body.chainTarget);
-      } catch (err) {
-        throw new RouteError(400, { error: err.message });
-      }
+    let chainList = [];
+    let chainOptions;
+    try {
+      chainList = body.chainList == null ? [] : normalizeChainList(body.chainList);
+      chainOptions = normalizeChainOptions(body.chainOptions || {});
+    } catch (err) {
+      throw new RouteError(400, { error: err.message });
     }
-    if ((body.rateLimitAction === 'ask' || body.rateLimitAction === 'chain') && !chainTarget) {
-      throw new RouteError(400, { error: 'a chain target is required for this choice' });
+    if ((body.rateLimitAction === 'ask' || body.rateLimitAction === 'chain') && chainList.length === 0) {
+      throw new RouteError(400, { error: 'add at least one account to the chain list first' });
     }
     const wait = body.rateLimitAction === 'wait';
     const action = wait ? 'none' : body.rateLimitAction;
     await registry.setAutoContinue(id, wait);
-    await registry.setChainPolicy(id, { rateLimitAction: action, chainTarget });
+    await registry.setChainPolicy(id, { rateLimitAction: action, chainList, chainOptions });
     let persisted = true;
     try {
-      await setSessionDefaults(row.cwd, { autoContinue: wait, rateLimitAction: action, chainTarget });
+      await setSessionDefaults(row.cwd, { autoContinue: wait, rateLimitAction: action, chainList, chainOptions });
     } catch {
       persisted = false; // the live session still has it; the client says it is not saved for the folder
     }
-    return { rateLimitAction: body.rateLimitAction, chainTarget, persisted };
+    return { rateLimitAction: body.rateLimitAction, chainList, chainOptions, persisted };
   },
+
+  // What chaining has done in this folder, newest first (the morning-after view).
+  'GET chain-log': async ({ row }) => ({ entries: await readChainLog(row.cwd, 50) }),
 
   'POST approval-decision': async ({ id, row, req }) => {
     const body = await readJsonBody(req);
@@ -439,7 +455,7 @@ const ACTIONS = {
         provider: row.provider,
         subscription: row.subscription,
         history: forkedHistory,
-        chainedFrom: row.chainedFrom, // a fork of a chained session is still one hop from the original
+        chainedFrom: row.chainedFrom, // a fork of a chained session keeps its list of already-used accounts
       });
       // Model carries forward via createSession above. Thinking budget and
       // auto-continue have no createSession param, so seedSessionDefaults()
@@ -451,7 +467,8 @@ const ACTIONS = {
         thinkingDisplay: row.thinkingDisplay,
         autoContinue: row.autoContinue,
         rateLimitAction: row.rateLimitAction,
-        chainTarget: row.chainTarget,
+        chainList: row.chainList,
+        chainOptions: row.chainOptions,
       });
       return { ...result, newSession: { id: forked.id, token: forked.token } };
     }

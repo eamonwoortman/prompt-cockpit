@@ -112,7 +112,8 @@ test('concurrent addAllowRule and setSessionDefaults on the same cwd do not clob
       autoContinue: true,
       effort: null,
       rateLimitAction: 'none',
-      chainTarget: null,
+      chainList: [],
+      chainOptions: null,
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });

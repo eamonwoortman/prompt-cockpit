@@ -417,17 +417,24 @@ groups in Hide successful) in `style-transcript.css`.
 
 ## Chain
 
-`chain-summary.test.mjs` covers `src/chain-summary.js` (kept text, one line per
-tool call, dropped tool results/thinking, merged assistant chunks, newest-first
-budget with an omitted count, empty history). `chain.test.mjs` covers the
-registry triggers against a stubbed session (ask raises the offer, chain fires
-once and tells connected tabs, one hop for a chained session, failure surfaces
-`chainError`, a policy set after a hit acts at once, a lifted limit clears the
-offer, reset keeps the policy) and `chain.js`'s `chainSession` with injected
-deps (same folder, target defaults, default permission mode, summary sent).
+`chain-summary.test.mjs` covers `src/chain-summary.js` (kept text including
+multi-line replies, one line per tool call, dropped tool results/thinking,
+merged assistant chunks, newest-first budget with an omitted count, empty
+history). `chain-policy.test.mjs` covers the pure rules: list order and no
+revisits (`nextTargets`), option validation, the rate-limit phrase match for
+Grok/Codex, and `presence.js` (away after the threshold, the forced switch).
+`chain.test.mjs` covers the registry against a stubbed session: ask offers,
+chain while away, offer-then-chain once the user leaves (mock timers), the
+ask-when-present switch, skipping an account that fails to start, the stop at
+the end of the list, an account never reused, Grok/Codex error-text detection
+and its recovery, one in-flight chain per session, reset keeping the policy,
+the chain log, and `chain.js`'s session start (same folder, the folder's
+permission mode or inherit, accounts-used list passed on).
 
-**Hand-verified only (no jsdom, no live rate limit):** `public/chain-ui.js`
-(settings selects, the Chain to... menu, the ask-me button, the tab jumping to
-the new session on `cockpit:chained`) and the `POST chain` / `POST chain-policy`
-route wiring in `session-actions.js`. A real rate-limit hit and a real
-cross-provider start were not exercised.
+**Hand-verified only:** `public/chain-ui.js` was exercised in a real browser
+against a synthetic session summary (list edit, add, remove, away button, the
+offer label, option fields). Not exercised: a real rate limit, a real
+cross-provider start, the Grok/Codex limit wording (neither CLI was installed
+when this was written), the presence pings from real tab activity, the chain
+log's rendering, and the `POST chain` / `POST chain-policy` / `GET chain-log`
+route wiring in `session-actions.js`.

@@ -13,7 +13,7 @@ async function makeTmpDir() {
 test('readSessionDefaults returns the empty defaults when settings.local.json does not exist', async () => {
   const cwd = await makeTmpDir();
   try {
-    assert.deepEqual(await readSessionDefaults(cwd), { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null, rateLimitAction: 'none', chainTarget: null });
+    assert.deepEqual(await readSessionDefaults(cwd), { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null, rateLimitAction: 'none', chainList: [], chainOptions: null });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -24,7 +24,7 @@ test('readSessionDefaults returns the empty defaults on corrupt JSON rather than
   try {
     await mkdir(path.join(cwd, '.claude'), { recursive: true });
     await writeFile(path.join(cwd, '.claude', 'settings.local.json'), '{ not json', 'utf-8');
-    assert.deepEqual(await readSessionDefaults(cwd), { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null, rateLimitAction: 'none', chainTarget: null });
+    assert.deepEqual(await readSessionDefaults(cwd), { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: null, rateLimitAction: 'none', chainList: [], chainOptions: null });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -34,7 +34,7 @@ test('setSessionDefaults creates .claude/settings.local.json when absent', async
   const cwd = await makeTmpDir();
   try {
     const defaults = await setSessionDefaults(cwd, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized' });
-    assert.deepEqual(defaults, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized', autoContinue: false, effort: null, rateLimitAction: 'none', chainTarget: null });
+    assert.deepEqual(defaults, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized', autoContinue: false, effort: null, rateLimitAction: 'none', chainList: [], chainOptions: null });
     const onDisk = JSON.parse(await readFile(path.join(cwd, '.claude', 'settings.local.json'), 'utf-8'));
     assert.deepEqual(onDisk.sessionDefaults, defaults);
   } finally {
@@ -47,7 +47,7 @@ test('setSessionDefaults shallow-merges over what is already stored', async () =
   try {
     await setSessionDefaults(cwd, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized' });
     const defaults = await setSessionDefaults(cwd, { autoContinue: true });
-    assert.deepEqual(defaults, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized', autoContinue: true, effort: null, rateLimitAction: 'none', chainTarget: null });
+    assert.deepEqual(defaults, { maxThinkingTokens: 10000, thinkingDisplay: 'summarized', autoContinue: true, effort: null, rateLimitAction: 'none', chainList: [], chainOptions: null });
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -80,7 +80,7 @@ test('setSessionDefaults tracks effort the same way as thinking/auto-continue', 
   const cwd = await makeTmpDir();
   try {
     const defaults = await setSessionDefaults(cwd, { effort: 'high' });
-    assert.deepEqual(defaults, { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: 'high', rateLimitAction: 'none', chainTarget: null });
+    assert.deepEqual(defaults, { maxThinkingTokens: null, thinkingDisplay: null, autoContinue: false, effort: 'high', rateLimitAction: 'none', chainList: [], chainOptions: null });
     assert.deepEqual(await readSessionDefaults(cwd), defaults);
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -110,7 +110,8 @@ test('concurrent setSessionDefaults and setPluginEnabled on the same cwd do not 
       autoContinue: true,
       effort: null,
       rateLimitAction: 'none',
-      chainTarget: null,
+      chainList: [],
+      chainOptions: null,
     });
     assert.deepEqual(await readEnabledPlugins(cwd), {
       'formatter@anthropic-tools': true,

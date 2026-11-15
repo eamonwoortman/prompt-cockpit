@@ -7,8 +7,9 @@ import * as registry from './session-registry.js';
 import { buildChainSummary } from './chain-summary.js';
 import { getProvider, parseProvider, resolveProviderSubscription } from './provider-registry.js';
 import { seedSessionDefaults } from './routes/sessions.js';
+import { targetKey, ownTarget, RATE_LIMIT_ACTIONS } from './chain-policy.js';
 
-export const RATE_LIMIT_ACTIONS = ['none', 'wait', 'ask', 'chain'];
+export { RATE_LIMIT_ACTIONS };
 
 // Validates a { provider, subscription? } target from a request body or the
 // persisted per-folder setting. Throws on an unknown provider/account.
@@ -20,26 +21,47 @@ export function normalizeChainTarget(target) {
   return { provider: provider.id, subscription: account ? account.id : null };
 }
 
-export async function chainSession(id, target, deps = {}) {
-  const getRow = deps.get || registry.get;
+export function normalizeChainList(list) {
+  if (!Array.isArray(list)) throw new Error('chainList must be an array');
+  const seen = new Set();
+  const out = [];
+  for (const entry of list) {
+    const target = normalizeChainTarget(entry);
+    if (seen.has(targetKey(target))) continue; // an account appears once: it is only ever used once
+    seen.add(targetKey(target));
+    out.push(target);
+  }
+  return out;
+}
+
+// `row` is the live registry row (an object, not an id, so a session that has
+// just died on its limit can still be chained from).
+export async function chainSession(row, target, deps = {}) {
   const createSession = deps.createSession || registry.createSession;
   const sendInput = deps.sendInput || registry.sendInput;
   const seed = deps.seedSessionDefaults || seedSessionDefaults;
-  const row = getRow(id);
-  if (!row) throw new Error(`unknown session: ${id}`);
+  if (!row) throw new Error('unknown session');
   if (!row.providerSessionId) throw new Error('session has no conversation yet to chain from');
   const { provider: targetId, subscription } = normalizeChainTarget(target);
   const source = getProvider(row.provider);
   const history = await (deps.fetchHistory || source.fetchHistory)(row.providerSessionId, row.cwd, { subscription: row.subscription });
   const summary = buildChainSummary(history, { from: { providerLabel: source.label, name: row.name, cwd: row.cwd } });
+  // Model and effort are the target's own defaults on purpose. The permission
+  // mode is the folder's chain setting: 'inherit' copies the source's.
+  const choice = row.chainOptions?.permissionMode || 'default';
+  const mode = choice === 'inherit' ? (row.mode || 'default') : choice;
   const created = createSession({
     cwd: row.cwd,
     provider: targetId,
     subscription: subscription || undefined,
-    // Model and effort are the target's own defaults on purpose, and the
-    // permission mode starts at default (never copies bypassPermissions).
-    permissionMode: 'default',
-    chainedFrom: { id: row.id, name: row.name, providerLabel: source.label },
+    permissionMode: mode,
+    // Every account used so far, so no hop can ever return to one.
+    chainedFrom: {
+      id: row.id,
+      name: row.name,
+      providerLabel: source.label,
+      visited: [...(row.chainedFrom?.visited || []), targetKey(ownTarget(row))],
+    },
   });
   try {
     await seed(created);
@@ -48,10 +70,10 @@ export async function chainSession(id, target, deps = {}) {
     registry.closeSession(created.id);
     throw err;
   }
-  return { id: created.id, token: created.token };
+  return { id: created.id, token: created.token, mode };
 }
 
 // What server.js hands the registry.
-export function chainRunner(id, target) {
-  return chainSession(id, target);
+export function chainRunner(row, target) {
+  return chainSession(row, target);
 }

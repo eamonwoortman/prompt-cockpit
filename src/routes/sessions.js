@@ -23,9 +23,10 @@ export async function seedSessionDefaults(row, defaults) {
   if (d.autoContinue) {
     await registry.setAutoContinue(row.id, true).catch(() => {});
   }
-  // A session that is itself a chain product never auto-chains again.
-  if (!row.chainedFrom && (d.rateLimitAction === 'ask' || d.rateLimitAction === 'chain') && d.chainTarget) {
-    await registry.setChainPolicy(row.id, { rateLimitAction: d.rateLimitAction, chainTarget: d.chainTarget }).catch(() => {});
+  // Chained sessions get the folder's policy too, so the chain can continue
+  // down the list; the visited accounts (chainedFrom) keep it from looping.
+  if ((d.rateLimitAction === 'ask' || d.rateLimitAction === 'chain') && Array.isArray(d.chainList) && d.chainList.length) {
+    await registry.setChainPolicy(row.id, { rateLimitAction: d.rateLimitAction, chainList: d.chainList, chainOptions: d.chainOptions }).catch(() => {});
   }
 }
 

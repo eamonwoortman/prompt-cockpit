@@ -107,7 +107,8 @@ test('concurrent setSessionTitle and setSessionDefaults/setPluginEnabled on the 
       autoContinue: false,
       effort: null,
       rateLimitAction: 'none',
-      chainTarget: null,
+      chainList: [],
+      chainOptions: null,
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });

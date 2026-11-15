@@ -172,6 +172,10 @@ wss.on('connection', (ws, req, id, since) => {
     } catch {
       return;
     }
+    // Presence (presence.js): real interaction pings from a focused tab, and
+    // the manual away switch. Both feed overnight chaining's away-or-here rule.
+    if (payload.type === 'presence') registry.markPresence();
+    if (payload.type === 'away' && typeof payload.value === 'boolean') registry.setAway(payload.value);
     if (payload.type === 'input' && typeof payload.text === 'string' && payload.text.length > 0) {
       registry.sendInput(id, payload.text).catch((err) => {
         console.error(`sendInput failed for ${id}:`, err);
