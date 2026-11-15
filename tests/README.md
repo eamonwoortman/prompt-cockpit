@@ -417,7 +417,8 @@ groups in Hide successful) in `style-transcript.css`.
 
 ## Chain
 
-`chain-summary.test.mjs` covers `src/chain-summary.js` (kept text including
+`chain-transcript.test.mjs` covers `src/chain-transcript.js` (the full markdown transcript: numbered turns, capped tool results, thinking dropped; the pointer-plus-last-exchange handoff and its whole-read vs search threshold; the 0600 temp file and week-old pruning). Hand-verified only: that a real Claude session reads the temp file without a permission prompt via `additionalDirectories`, and that Codex/Grok can read it at all (they ignore `additionalDirectories` today).
+`chain-summary.test.mjs` covers `src/chain-summary.js` (now only the fallback recap when the transcript file cannot be written; kept text including
 multi-line replies, one line per tool call, dropped tool results/thinking,
 merged assistant chunks, newest-first budget with an omitted count, empty
 history). `chain-policy.test.mjs` covers the pure rules: list order and no

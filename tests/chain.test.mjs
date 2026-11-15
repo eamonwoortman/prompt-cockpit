@@ -264,6 +264,7 @@ test('chainSession starts the target in the same folder with defaults, the folde
   const row = { id: 'src', cwd: '/proj', name: 'main', provider: 'claude', subscription: 'default', mode: 'plan', providerSessionId: 'sid', chainOptions: { permissionMode: 'acceptEdits' }, chainedFrom: { visited: ['claude::second'] } };
   const created = [];
   const sent = [];
+  const written = [];
   const result = await chainSession(row, { provider: 'grok' }, {
     fetchHistory: async (sid, cwd) => { assert.equal(sid, 'sid'); assert.equal(cwd, '/proj'); return [{ type: 'user', message: { content: 'do the thing' } }]; },
     createSession: (opts) => { created.push(opts); return { id: 'new', token: 'tok' }; },
@@ -271,6 +272,7 @@ test('chainSession starts the target in the same folder with defaults, the folde
     setPermissionMode: async () => {},
     sendInput: async (id, text) => { sent.push({ id, text }); },
     confirmStart: async () => {},
+    writeTranscript: async (body, { id }) => { written.push({ body, id }); return { file: '/tmp/pc/t.md', dir: '/tmp/pc' }; },
   });
   assert.deepEqual(result, { id: 'new', token: 'tok', mode: 'acceptEdits' });
   assert.equal(created[0].cwd, '/proj');
@@ -279,7 +281,28 @@ test('chainSession starts the target in the same folder with defaults, the folde
   assert.equal(created[0].model, undefined);
   assert.equal(created[0].effort, undefined);
   assert.deepEqual(created[0].chainedFrom.visited, ['claude::second', 'claude::default']);
-  assert.match(sent[0].text, /User: do the thing/);
+  assert.deepEqual(created[0].additionalDirectories, ['/tmp/pc']);
+  assert.match(written[0].body, /\*\*User:\*\* do the thing/);
+  assert.equal(written[0].id, 'src');
+  assert.match(sent[0].text, /\/tmp\/pc\/t\.md/);
+  assert.match(sent[0].text, /Last user message:\ndo the thing/);
+});
+
+test('chainSession falls back to the inline recap when the transcript cannot be written', async () => {
+  const row = { id: 's', cwd: '/p', provider: 'claude', subscription: 'default', providerSessionId: 'sid' };
+  const sent = [];
+  let dirs = 'unset';
+  await chainSession(row, { provider: 'grok' }, {
+    fetchHistory: async () => [{ type: 'user', message: { content: 'do the thing' } }],
+    writeTranscript: async () => { throw new Error('disk full'); },
+    createSession: (opts) => { dirs = opts.additionalDirectories; return { id: 'n', token: 't' }; },
+    seedSessionDefaults: async () => {},
+    setPermissionMode: async () => {},
+    sendInput: async (id, text) => { sent.push(text); },
+    confirmStart: async () => {},
+  });
+  assert.equal(dirs, undefined);
+  assert.match(sent[0], /User: do the thing/);
 });
 
 test('permission mode "inherit" copies the source session\'s mode', async () => {

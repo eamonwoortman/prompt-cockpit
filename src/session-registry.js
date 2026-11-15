@@ -29,7 +29,7 @@ export const setSessionHandshake = delegation.setSessionHandshake;
 export const isSessionTrusted = delegation.isSessionTrusted;
 export const delegateTask = delegation.delegateTask;
 
-export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, rateLimitAction, chainList, chainOptions, chainedFrom, startSessionImpl }) {
+export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, rateLimitAction, chainList, chainOptions, chainedFrom, additionalDirectories, startSessionImpl }) {
   // Authoritative uniqueness check for delegation names - this function has
   // no `await` before it and none until sessions.set() below, closing the
   // TOCTOU window server.js's own pre-check has (that check runs after
@@ -186,7 +186,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
   for (const message of tail) appendEvent(row.eventLog, message);
   sessions.set(id, row);
 
-  row.handle = startSessionImpl({
+  row.handle = startSessionImpl({ additionalDirectories,
     cwd,
     subscription: row.subscription,
     resume,

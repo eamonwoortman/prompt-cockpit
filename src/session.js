@@ -162,7 +162,7 @@ function createInputQueue() {
  * setMode/resolveApproval and queue-pane ops (listQueue/removeQueued/
  * reorderQueue/sendNow). `onApprovalRequest` fires for any gated tool.
  */
-export function startSession({ cwd, resume, model, effort, subscription, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query, readGitGuardSettingsImpl = readGitGuardSettings, validateCommitCommandImpl = validateCommitCommand }) {
+export function startSession({ cwd, additionalDirectories, resume, model, effort, subscription, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query, readGitGuardSettingsImpl = readGitGuardSettings, validateCommitCommandImpl = validateCommitCommand }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const resultEpoch = createResultEpochTracker();
@@ -201,6 +201,7 @@ export function startSession({ cwd, resume, model, effort, subscription, maxThin
     prompt: inputQueue,
     options: {
       cwd,
+      additionalDirectories,
       env: claudeSubscriptionEnv(subscription),
       resume,
       model,

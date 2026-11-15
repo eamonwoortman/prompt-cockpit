@@ -1,10 +1,12 @@
 // Chain: continue one session's work in a new session on another provider or
-// account, in the same folder, by sending a text summary of the conversation
-// as the new session's first message (chain-summary.js). The source session
+// account, in the same folder, by pointing it at a text copy of the conversation
+// as the new session's first message (chain-transcript.js: a pointer to the
+// full transcript in a temp file; chain-summary.js is the fallback recap). The source session
 // is left open and idle. Wired into the registry via setChainRunner() so the
 // registry doesn't import this module back (see session-registry.js).
 import * as registry from './session-registry.js';
 import { buildChainSummary } from './chain-summary.js';
+import { renderChainTranscript, buildChainHandoff, writeChainTranscript } from './chain-transcript.js';
 import { getProvider, parseProvider, resolveProviderSubscription } from './provider-registry.js';
 import { seedSessionDefaults } from './routes/sessions.js';
 import { targetKey, ownTarget, RATE_LIMIT_ACTIONS } from './chain-policy.js';
@@ -46,7 +48,19 @@ export async function chainSession(row, target, deps = {}) {
   const { provider: targetId, subscription } = normalizeChainTarget(target);
   const source = getProvider(row.provider);
   const history = await (deps.fetchHistory || source.fetchHistory)(row.providerSessionId, row.cwd, { subscription: row.subscription });
-  const summary = buildChainSummary(history, { from: { providerLabel: source.label, name: row.name, cwd: row.cwd } });
+  const from = { providerLabel: source.label, name: row.name, cwd: row.cwd };
+  // Full transcript in a temp file, first message = pointer + last exchange.
+  // If the file cannot be written, fall back to the old inline recap.
+  let handoff;
+  let readDir = null;
+  try {
+    const rendered = renderChainTranscript(history, { from });
+    const { file, dir } = await (deps.writeTranscript || writeChainTranscript)(rendered.text, { id: row.id });
+    handoff = buildChainHandoff(history, { from, filePath: file, chars: rendered.text.length, turns: rendered.turns });
+    readDir = dir;
+  } catch {
+    handoff = buildChainSummary(history, { from });
+  }
   // Model and effort are the target's own defaults on purpose. The permission
   // mode is the folder's chain setting: 'inherit' copies the source's. A
   // source in auto mode always hands auto on, whatever the setting says.
@@ -57,6 +71,8 @@ export async function chainSession(row, target, deps = {}) {
     provider: targetId,
     subscription: subscription || undefined,
     permissionMode: mode,
+    // The temp folder holding the transcript, readable without a prompt.
+    additionalDirectories: readDir ? [readDir] : undefined,
     // Every account used so far, so no hop can ever return to one.
     chainedFrom: {
       id: row.id,
@@ -73,7 +89,7 @@ export async function chainSession(row, target, deps = {}) {
     // and would overwrite one set while it was still starting up.
     await (deps.awaitInit || awaitInit)(created.id);
     await setPermissionMode(created.id, mode);
-    await sendInput(created.id, summary);
+    await sendInput(created.id, handoff);
     // sendInput only queues the turn: a bad login or failed startup shows up
     // afterwards, so wait for the session to be running (or to die).
     await (deps.confirmStart || confirmStart)(created.id);
