@@ -56,3 +56,14 @@ const LIMIT_PHRASES = /usage limit|rate[ -]?limit|quota (?:exceeded|reached|exha
 export function looksLikeRateLimit(text) {
   return typeof text === 'string' && LIMIT_PHRASES.test(text);
 }
+
+// Codex reports the cause structurally (TurnError.codexErrorInfo, from its
+// generated app-server schema). The account-level ones count; a context
+// window overflow or a per-session budget does not, since another account
+// would not help.
+const LIMIT_ERROR_CODES = new Set(['usageLimitExceeded', 'rateLimitExceeded']);
+
+export function isRateLimitFailure({ code, text } = {}) {
+  if (typeof code === 'string' && LIMIT_ERROR_CODES.has(code)) return true;
+  return looksLikeRateLimit(text);
+}

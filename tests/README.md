@@ -426,8 +426,8 @@ Grok/Codex, and `presence.js` (away after the threshold, the forced switch).
 `chain.test.mjs` covers the registry against a stubbed session: ask offers,
 chain while away, offer-then-chain once the user leaves (mock timers), the
 ask-when-present switch, skipping an account that fails to start, the stop at
-the end of the list, an account never reused, Grok/Codex error-text detection
-and its recovery, one in-flight chain per session, reset keeping the policy,
+the end of the list, an account never reused, Codex's structured limit cause, Grok error-text
+detection and its recovery, one in-flight chain per session, reset keeping the policy,
 the chain log, and `chain.js`'s session start (same folder, the folder's
 permission mode or inherit, accounts-used list passed on).
 

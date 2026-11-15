@@ -237,3 +237,12 @@ test('item started/completed generic items stay pending until completed', () => 
   assert.equal(completed[0].message.content[0].type, 'tool_result');
   assert.equal(completed[0].message.content[0].tool_use_id, 'ws-live');
 });
+
+test('a failed Codex turn carries its structured error cause for chaining', () => {
+  const [named] = codexNotificationToMessages('turn/completed', { turn: { id: 't', status: 'failed', error: { message: 'x', codexErrorInfo: 'usageLimitExceeded' } } }, 'th');
+  assert.equal(named.codex_error_info, 'usageLimitExceeded');
+  const [objectForm] = codexNotificationToMessages('turn/completed', { turn: { id: 't', status: 'failed', error: { message: 'x', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 500 } } } } }, 'th');
+  assert.equal(objectForm.codex_error_info, 'httpConnectionFailed');
+  const [ok] = codexNotificationToMessages('turn/completed', { turn: { id: 't', status: 'completed' } }, 'th');
+  assert.equal(ok.codex_error_info, undefined);
+});

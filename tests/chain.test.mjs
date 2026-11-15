@@ -159,6 +159,20 @@ test('Grok/Codex detection: an error result that reads like a limit counts as a 
   assert.equal(row.chainOffer, false);
 });
 
+test('a Codex failed turn with a usage-limit cause counts even when the message has no limit wording', async () => {
+  away();
+  registry._reset();
+  const impl = fakeStartSession();
+  const cwd = await tmpCwd();
+  const row = registry.createSession({ cwd, provider: 'codex', startSessionImpl: impl, rateLimitAction: 'ask', chainList: [{ provider: 'claude', subscription: 'default' }] });
+  registry.setChainRunner(async () => ({ id: 'n', token: 't', mode: 'default' }));
+  impl.emitMessage({ type: 'result', subtype: 'error', is_error: true, error: 'Something went wrong', codex_error_info: 'contextWindowExceeded' });
+  assert.equal(row.rateLimitHit, null, 'a context overflow is not an account limit');
+  impl.emitMessage({ type: 'result', subtype: 'error', is_error: true, error: 'Something went wrong', codex_error_info: 'usageLimitExceeded' });
+  assert.equal(row.rateLimitHit.rateLimitType, 'provider_error_text');
+  assert.equal(row.chainOffer, true);
+});
+
 test('a Claude error result is never read as a rate limit (it has its own detection)', async () => {
   const { row, impl } = await chainRow({ rateLimitAction: 'ask' });
   impl.emitMessage({ type: 'result', subtype: 'error', is_error: true, error: 'rate limit in some tool output' });

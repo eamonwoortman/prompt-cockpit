@@ -342,9 +342,20 @@ export function codexNotificationToMessages(method, params, sessionId, {
       type: 'result', subtype: ok ? 'success' : 'error', is_error: !ok,
       session_id: sessionId, num_turns: 1, stop_reason: status, result: '',
       error: ok ? undefined : (params.turn?.error?.message || 'Codex turn failed'),
+      // Structured cause from the app-server's TurnError.codexErrorInfo (a
+      // string like 'usageLimitExceeded', or a one-key object such as
+      // { httpConnectionFailed: ... }, reduced to its key): chaining reads
+      // this instead of guessing from the message text.
+      codex_error_info: ok ? undefined : codexErrorCode(params.turn?.error?.codexErrorInfo),
     }];
   }
   return [];
+}
+
+function codexErrorCode(info) {
+  if (typeof info === 'string') return info;
+  if (info && typeof info === 'object') return Object.keys(info)[0] || undefined;
+  return undefined;
 }
 
 // thread.model here reads as undefined on a real app-server response - the

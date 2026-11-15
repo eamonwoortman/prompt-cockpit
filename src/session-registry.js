@@ -12,7 +12,7 @@ import { contextPayload } from './context-usage.js';
 import { getProvider, parseProvider } from './provider-registry.js';
 import { createDelegation } from './delegation.js';
 import { accountUsageCache } from './account-usage-cache.js';
-import { nextTargets, ownTarget, normalizeChainOptions, looksLikeRateLimit } from './chain-policy.js';
+import { nextTargets, ownTarget, normalizeChainOptions, looksLikeRateLimit, isRateLimitFailure } from './chain-policy.js';
 import { appendChainLog } from './chain-log.js';
 import * as presence from './presence.js';
 const sessions = new Map();
@@ -967,15 +967,16 @@ function handleMessage(id, message) {
       }
     }
   }
-  // Grok and Codex have no structured rate-limit event: a hit only shows up as
-  // an error result. Matched on its text (chain-policy.js's phrase list,
-  // unverified against the real CLIs - the raw text goes to the chain log).
-  // A later successful result lifts a hit recorded this way.
+  // Grok and Codex have no rate-limit event like Claude's. Codex's failed turn
+  // carries a structured cause (codex_error_info, read from its protocol
+  // schema); anything else is matched on the error text (chain-policy.js's
+  // phrase list, still unverified for Grok - the raw text goes to the chain
+  // log). A later successful result lifts a hit recorded this way.
   if (row.provider !== 'claude' && message.type === 'result') {
     const text = message.is_error ? String(message.error || message.result || '') : '';
-    if (looksLikeRateLimit(text)) {
+    if (isRateLimitFailure({ code: message.codex_error_info, text })) {
       row.rateLimitHit = { resetsAt: null, rateLimitType: 'provider_error_text' };
-      onRateLimitHit(id, { detail: text });
+      onRateLimitHit(id, { detail: message.codex_error_info ? `${message.codex_error_info}: ${text}` : text });
       broadcastSummary(id);
     } else if (!message.is_error && row.rateLimitHit?.rateLimitType === 'provider_error_text') {
       row.rateLimitHit = null;

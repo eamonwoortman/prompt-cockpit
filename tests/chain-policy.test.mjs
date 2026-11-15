@@ -56,3 +56,13 @@ test('presence: away after the threshold, present just after activity, forced aw
   assert.equal(presence.isAway(10, 1_000_000 + 1000), false);
   presence._reset();
 });
+
+test('isRateLimitFailure trusts Codex\'s structured cause, and ignores causes another account would not fix', async () => {
+  const { isRateLimitFailure } = await import('../src/chain-policy.js');
+  assert.equal(isRateLimitFailure({ code: 'usageLimitExceeded', text: 'Something went wrong' }), true);
+  assert.equal(isRateLimitFailure({ code: 'rateLimitExceeded' }), true);
+  for (const code of ['contextWindowExceeded', 'sessionBudgetExceeded', 'unauthorized', 'serverOverloaded', 'other']) {
+    assert.equal(isRateLimitFailure({ code, text: 'plain failure' }), false, code);
+  }
+  assert.equal(isRateLimitFailure({ text: 'You hit your usage limit' }), true, 'no code: fall back to the text');
+});
