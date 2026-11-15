@@ -69,7 +69,9 @@ export async function chainSession(row, target, deps = {}) {
     await seed(created);
     // Apply the mode through the live provider control path too: launch-time
     // options alone do not confirm that the initialized session accepted it.
-    // Finish this before sending the summary so its first tools use the mode.
+    // Wait for the provider's init first: Claude reports its own mode there
+    // and would overwrite one set while it was still starting up.
+    await (deps.awaitInit || awaitInit)(created.id);
     await setPermissionMode(created.id, mode);
     await sendInput(created.id, summary);
     // sendInput only queues the turn: a bad login or failed startup shows up
@@ -80,6 +82,21 @@ export async function chainSession(row, target, deps = {}) {
     throw err;
   }
   return { id: created.id, token: created.token, mode };
+}
+
+// Resolves once the row has left 'starting' (the provider's init arrived).
+// An unknown row or a slow init just resolves; a dead row rejects.
+export async function awaitInit(id, { timeoutMs = 10_000, pollMs = 50 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const live = registry.get(id);
+    if (!live || live.state !== 'starting') {
+      if (live && (live.state === 'error' || live.state === 'closed')) throw new Error('the new session failed to start');
+      return;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
 }
 
 // Resolves once the new row is running its first turn; rejects if the row
