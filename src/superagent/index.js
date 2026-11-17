@@ -644,9 +644,18 @@ export function createSuperagent({
     }
   }
 
-  function accept(jobId) {
+  // `needsYouSeq`, when given, is the needs-you the caller saw (the view
+  // sends it): a job that has since moved on is refused, never acted on.
+  function requireSeen(job, needsYouSeq) {
+    if (needsYouSeq !== undefined && needsYouSeq !== job.needsYouSeq) {
+      throw fail('ERR_INVALID_STATE', `superagent: job ${job.jobId} no longer needs what was shown (needs-you ${needsYouSeq}, now ${job.needsYouSeq ?? 'none'})`);
+    }
+  }
+
+  function accept(jobId, { needsYouSeq } = {}) {
     return withJob(jobId, async () => {
       const job = await requireJob(jobId);
+      requireSeen(job, needsYouSeq);
       if (job.state !== 'needs-you' || job.reason !== 'ready-to-try') {
         throw fail('ERR_INVALID_STATE', `superagent: job ${jobId} is ${job.state}${job.reason ? ` (${job.reason})` : ''}, not ready to try`);
       }
@@ -658,9 +667,10 @@ export function createSuperagent({
 
   // Plan 5: an answer resumes the scope that asked. A budget refusal has no
   // asking attempt and is not answerable.
-  function answerQuestion(jobId, text) {
+  function answerQuestion(jobId, text, { needsYouSeq } = {}) {
     return withJob(jobId, async () => {
       const job = await requireJob(jobId);
+      requireSeen(job, needsYouSeq);
       const forAttemptId = job.detail?.attemptId ?? null;
       if (
         job.state !== 'needs-you' || job.reason !== 'question' || forAttemptId == null

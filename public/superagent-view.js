@@ -12,7 +12,7 @@
 // operator wrote.
 import { initOperatorGate } from '/operator-auth.js';
 import { initDirBrowser } from '/dir-browser.js';
-import { initNotificationsPanel, requestBrowserNotifications, SUPERAGENT_TAB } from '/notifications-panel.js';
+import { initNotificationsPanel, requestBrowserNotifications, SUPERAGENT_TAB, SUPERAGENT_SELECT_MESSAGE } from '/notifications-panel.js';
 
 const POLL_MS = 5_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -83,11 +83,18 @@ export function initSuperagentView() {
   let refreshing = null;
   let pollAgain = false;
   const artifactCache = new Map();
+  // Draft answers by needs-you key, so switching jobs and back keeps them.
+  const answerDrafts = new Map();
 
   document.title = 'Superagent - Prompt Cockpit';
-  // Lets the bell, other tabs' Superagent button and notification clicks
-  // re-target this tab instead of opening another one.
+  // Lets other tabs' bell, Superagent button and notification clicks find
+  // this tab (openSuperagentView), which then asks it to select a job instead
+  // of reloading it.
   window.name = SUPERAGENT_TAB;
+  window.addEventListener('message', (event) => {
+    if (event.origin !== location.origin || event.data?.type !== SUPERAGENT_SELECT_MESSAGE) return;
+    if (typeof event.data.jobId === 'string') select(event.data.jobId);
+  });
 
   const gate = initOperatorGate({
     banner: document.getElementById('operatorGate'),
@@ -105,6 +112,11 @@ export function initSuperagentView() {
     superagentButton: superagentBtn,
     // This tab has no auto-pilot pane; a pilot entry opens a regular Cockpit tab.
     onOpenPilots: () => window.open('/', '_blank'),
+    // A superagent entry selects its job here, never reloading this tab.
+    onOpenSuperagent: (jobId) => {
+      window.focus();
+      select(jobId);
+    },
   });
 
   const dirBrowser = initDirBrowser({
@@ -241,11 +253,11 @@ export function initSuperagentView() {
     target.hidden = !err;
   }
 
-  async function act(name, target) {
+  async function act(name, target, payload = {}) {
     const jobId = selectedId;
     showError(target, null);
     try {
-      await postJson(`/api/superagent/jobs/${encodeURIComponent(jobId)}/${name}`, name === 'answer' ? { text: answerInput?.value ?? '' } : {});
+      await postJson(`/api/superagent/jobs/${encodeURIComponent(jobId)}/${name}`, payload);
       return true;
     } catch (err) {
       showError(target, err);
@@ -378,7 +390,8 @@ export function initSuperagentView() {
   }
 
   // Ready to try shows two artifacts inline; each is fetched once per
-  // needs-you entry, then the pane re-renders.
+  // needs-you entry, then the pane re-renders. A failed fetch is shown, then
+  // dropped by the next poll (dropFailedArtifacts) so it is tried again.
   function cachedArtifact(jobId, entryKey, key) {
     const cacheKey = `${entryKey}|${key}`;
     if (!artifactCache.has(cacheKey)) {
@@ -393,6 +406,10 @@ export function initSuperagentView() {
     return artifactCache.get(cacheKey);
   }
 
+  function dropFailedArtifacts() {
+    for (const [cacheKey, value] of artifactCache) if (value?.error) artifactCache.delete(cacheKey);
+  }
+
   // --- Right: needs you, router, browser notifications ---
 
   const notifyRow = right.appendChild(el('div', 'sa-notify'));
@@ -401,7 +418,6 @@ export function initSuperagentView() {
   const needsYouBox = right.appendChild(el('div'));
   const routerBox = right.appendChild(el('div'));
   let needsYouShown = null;
-  let answerInput = null;
 
   function renderNotifyControl() {
     notifyRow.textContent = '';
@@ -438,7 +454,6 @@ export function initSuperagentView() {
   }
 
   function buildNeedsYou(needsYou) {
-    answerInput = null;
     const box = el('div', 'sa-needs-you');
     if (needsYou.type === 'question') {
       box.append(el('h3', 'sa-subheading', 'Question'), preBlock(needsYou.text, 'sa-question'));
@@ -447,13 +462,17 @@ export function initSuperagentView() {
         input.maxLength = ANSWER_MAX_CHARS;
         input.rows = 5;
         input.placeholder = 'Your answer';
-        answerInput = input;
+        input.value = answerDrafts.get(needsYou.key) ?? '';
         const send = button('Send', 'btn-primary', async () => {
           send.disabled = true;
-          if (!(await act('answer', rightError))) send.disabled = !input.value.trim();
+          if (await act('answer', rightError, { text: input.value, needsYouSeq: needsYou.seq })) answerDrafts.delete(needsYou.key);
+          else send.disabled = !input.value.trim();
         });
-        send.disabled = true;
-        input.addEventListener('input', () => { send.disabled = !input.value.trim(); });
+        send.disabled = !input.value.trim();
+        input.addEventListener('input', () => {
+          answerDrafts.set(needsYou.key, input.value);
+          send.disabled = !input.value.trim();
+        });
         const row = el('div', 'sa-actions');
         row.append(send, stopButton(rightError));
         box.append(input, row);
@@ -472,7 +491,7 @@ export function initSuperagentView() {
       const row = el('div', 'sa-actions');
       const accept = button('Accept', 'btn-primary', async () => {
         accept.disabled = true;
-        if (!(await act('accept', rightError))) accept.disabled = false;
+        if (!(await act('accept', rightError, { needsYouSeq: needsYou.seq }))) accept.disabled = false;
       });
       accept.title = 'Mark the job done. Nothing is merged or pushed.';
       row.append(accept, stopButton(rightError));
@@ -521,10 +540,7 @@ export function initSuperagentView() {
       needsYouShown = shown;
       needsYouBox.textContent = '';
       if (needsYou) needsYouBox.append(buildNeedsYou(needsYou));
-      else {
-        answerInput = null;
-        if (selectedId && detail) needsYouBox.append(el('div', 'sa-placeholder', 'Nothing needs you on this job.'));
-      }
+      else if (selectedId && detail) needsYouBox.append(el('div', 'sa-placeholder', 'Nothing needs you on this job.'));
     }
     renderRouter();
   }
@@ -612,6 +628,7 @@ export function initSuperagentView() {
         }
       }
     }
+    dropFailedArtifacts();
     render();
   }
 

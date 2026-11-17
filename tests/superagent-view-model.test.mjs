@@ -57,6 +57,7 @@ test('needsYou.answerable is false for a budget question and true for any other 
   const d = jobDetail(asked, notLive);
   assert.equal(d.needsYou.answerable, true);
   assert.equal(d.needsYou.key, `superagent:${asked.jobId}:${asked.needsYouSeq}`);
+  assert.equal(d.needsYou.seq, asked.needsYouSeq);
   assert.equal(d.needsYou.text, 'which?');
   assert.equal(jobDetail(m2([]), notLive).needsYou, null);
 });

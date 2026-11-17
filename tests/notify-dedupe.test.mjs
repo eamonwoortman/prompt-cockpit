@@ -113,3 +113,28 @@ test('a throwing setItem still returns the planned entries', async () => {
   const out = await claimNotifications({ entries: [entry('a')], firstPoll: false, storage, locks: serialLocks() });
   assert.deepEqual(out.map((e) => e.key), ['a']);
 });
+
+test('keep preserves matching keys absent from the entries', () => {
+  const keep = (key) => key.startsWith('superagent:');
+  const out = planNotifications({ entries: [entry('pilot:2')], record: ['superagent:j:4', 'pilot:1'], firstPoll: false, keep });
+  assert.deepEqual(out.notify.map((e) => e.key), ['pilot:2']);
+  assert.deepEqual(out.record, ['pilot:2', 'superagent:j:4']);
+});
+
+test('a superagent key survives a restart and is not notified again', async () => {
+  const storage = fakeStorage(undefined);
+  const locks = serialLocks();
+  const isSuperagentKey = (key) => key.startsWith('superagent:');
+  const known = entry('superagent:j:4');
+  const pilot = { kind: 'needs-input', key: 'pilot:1', message: 'm' };
+
+  assert.deepEqual(await claimNotifications({ entries: [known], firstPoll: false, storage, locks }), [known]);
+  // Cockpit restarts: the superagent is not ready yet and has no entries, but
+  // a non-superagent entry is still claimed and notified.
+  const whileBooting = await claimNotifications({ entries: [pilot], firstPoll: false, storage, locks, keep: isSuperagentKey });
+  assert.deepEqual(whileBooting, [pilot]);
+  assert.deepEqual(JSON.parse(storage.data.get(KEY)), ['pilot:1', 'superagent:j:4']);
+  // Ready again with the same entry: nothing new.
+  assert.deepEqual(await claimNotifications({ entries: [known], firstPoll: false, storage, locks }), []);
+  assert.deepEqual(JSON.parse(storage.data.get(KEY)), ['superagent:j:4']);
+});

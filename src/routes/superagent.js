@@ -89,14 +89,21 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
     }
   });
 
+  // An answer names the needs-you it was written for (`needsYouSeq`, from the
+  // detail's needsYou.seq), so text a stale view wrote for one question can
+  // never reach the next one: the supervisor refuses a mismatch with 409
+  // ERR_INVALID_STATE before appending anything. Accept checks it when given.
   const actions = {
-    answer: (supervisor, id, body) => supervisor.answerQuestion(id, body.text),
-    accept: (supervisor, id) => supervisor.accept(id),
+    answer: (supervisor, id, body) => supervisor.answerQuestion(id, body.text, { needsYouSeq: body.needsYouSeq }),
+    accept: (supervisor, id, body) => supervisor.accept(id, { needsYouSeq: body.needsYouSeq }),
     stop: (supervisor, id) => supervisor.stopJob(id),
   };
   for (const [name, act] of Object.entries(actions)) {
     router.post(`/api/superagent/jobs/:id/${name}`, async (req, res, url, { id }) => {
       const body = await readJsonBody(req);
+      if (name === 'answer' && !Number.isInteger(body.needsYouSeq)) {
+        return respondJson(res, 400, { error: 'needsYouSeq is required: the needs-you this answer was written for', code: 'ERR_INVALID_ANSWER' });
+      }
       try {
         return respondJson(res, 200, jobSummary(await host.admit((supervisor) => act(supervisor, id, body))));
       } catch (err) {

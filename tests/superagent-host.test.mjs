@@ -74,6 +74,7 @@ test('a constructed host is off and refuses everything', async () => {
   assert.equal(host.read(() => 1), null);
   assert.equal(host.ownsSession('worker-1'), false);
   assert.deepEqual(host.notifications(), []);
+  assert.equal(host.notificationsReady(), false);
   assert.deepEqual(calls, []);
 });
 
@@ -121,6 +122,7 @@ test('not owner when another Cockpit holds the lock', async () => {
   await assertUnavailable(host.admit(() => 1), { state: 'not-owner', status: 409, ownerPort: 4400 });
   assert.deepEqual(calls, ['acquire']);
   assert.deepEqual(host.notifications(), []);
+  assert.equal(host.notificationsReady(), false);
 });
 
 test('not owner with an unknown owner reports no port', async () => {
@@ -192,6 +194,48 @@ test('read and notifications use the supervisor once it exists', async () => {
   assert.deepEqual(host.notifications(), [{
     kind: 'superagent', type: 'ready-to-try', key: 'superagent:j1:4', jobId: 'j1', title: 'Add hello', message: '"Add hello" is ready to try',
   }]);
+});
+
+test('notifications are ready only once start() has resolved, and through stopping', async () => {
+  const calls = [];
+  const acquired = deferred();
+  const startGate = deferred();
+  const supervisor = fakeSupervisor(calls, { start: () => { calls.push('start'); return startGate.promise; } });
+  const { host } = makeHost({ calls, supervisor, lock: fakeLock(calls, () => acquired.promise) });
+  const init = host.init();
+  assert.equal(host.status().state, 'initialising');
+  assert.equal(host.notificationsReady(), false, 'initialising');
+  acquired.resolve({ owned: true });
+  await tick();
+  assert.equal(calls.at(-1), 'start');
+  assert.equal(host.notificationsReady(), false, 'start() pending');
+  startGate.resolve();
+  await init;
+  assert.equal(host.status().state, 'ready');
+  assert.equal(host.notificationsReady(), true, 'ready');
+  await host.stop();
+  assert.equal(host.status().state, 'stopping');
+  assert.equal(host.notificationsReady(), true, 'stopping with every job loaded');
+  await host.afterClose();
+  assert.equal(host.notificationsReady(), false, 'stopped');
+});
+
+test('a stop while start() is pending keeps notifications ready once it resolves', async () => {
+  const calls = [];
+  const startGate = deferred();
+  const supervisor = fakeSupervisor(calls, { start: () => { calls.push('start'); return startGate.promise; } });
+  const { host } = makeHost({ calls, supervisor });
+  const init = host.init();
+  await tick();
+  assert.equal(calls.at(-1), 'start');
+  const stopped = host.stop();
+  assert.equal(host.notificationsReady(), false, 'stopping before start() resolved');
+  startGate.resolve();
+  await init;
+  await stopped;
+  assert.equal(host.status().state, 'stopping');
+  assert.equal(host.notificationsReady(), true);
+  await host.afterClose();
 });
 
 test('stop blocks new launches at once and waits for admitted actions', async () => {
@@ -304,6 +348,7 @@ test('a supervisor that fails to start is stopped within the deadline, disposed 
   assert.equal(host.status().state, 'error');
   assert.match(host.status().error, /start blew up/);
   assert.deepEqual(host.notifications(), [], 'no bell entries for a host in error');
+  assert.equal(host.notificationsReady(), false);
   assert.equal(host.ownsSession('worker-1'), true, 'worker rows stay watch-only until the supervisor is disposed');
   stopGate.resolve();
   await init;
@@ -357,6 +402,7 @@ test('shutdown during initialisation never starts the supervisor', async () => {
     assert.ok(!calls.includes('build'), `${pendingAt}: no supervisor built`);
     assert.ok(!calls.includes('start'), `${pendingAt}: no supervisor started`);
     assert.equal(host.status().state, 'stopping', pendingAt);
+    assert.equal(host.notificationsReady(), false, pendingAt);
     await host.afterClose();
     assert.equal(host.status().state, 'stopped', pendingAt);
     assert.equal(calls.at(-1), 'release', `${pendingAt}: lock released`);

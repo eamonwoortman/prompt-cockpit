@@ -1036,3 +1036,29 @@ test('repeated answer, accept and stop append nothing', async () => {
     await h.sa.stop();
   } finally { registry._reset(); }
 });
+
+test('an answer or accept for a needs-you the job has left is refused and appends nothing', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h);
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'question', detail: { attemptId: 'a1', question: 'Which file?' } });
+    const first = h.store.get(job.jobId).needsYouSeq;
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'question', detail: { attemptId: 'a2', question: 'Which folder?' } });
+    const second = h.store.get(job.jobId).needsYouSeq;
+    assert.notEqual(first, second);
+
+    let lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.answerQuestion(job.jobId, 'hello.txt', { needsYouSeq: first }), { code: 'ERR_INVALID_STATE' });
+    assert.equal(lineCount(h, job.jobId), lines);
+    const answered = await h.sa.answerQuestion(job.jobId, 'src/', { needsYouSeq: second });
+    assert.deepEqual(answered.answers.map((a) => [a.forAttemptId, a.answer]), [['a2', 'src/']]);
+
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+    const ready = h.store.get(job.jobId).needsYouSeq;
+    lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.accept(job.jobId, { needsYouSeq: second }), { code: 'ERR_INVALID_STATE' });
+    assert.equal(lineCount(h, job.jobId), lines);
+    assert.equal((await h.sa.accept(job.jobId, { needsYouSeq: ready })).state, 'done');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});

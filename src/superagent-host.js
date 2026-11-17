@@ -58,6 +58,7 @@ export function createSuperagentHost({
   let router = null;
   let lock = null;
   let supervisor = null;
+  let started = false;
   let disposed = false;
   let stopRequested = false;
   let shutdownDeadline = null;
@@ -141,6 +142,7 @@ export function createSuperagentHost({
       supervisor = superagentFactory({ registry, store, config, router: chosen });
       if (stopRequested) return;
       await supervisor.start();
+      started = true;
       if (stopRequested) return;
       state = 'ready';
     } catch (err) {
@@ -227,5 +229,8 @@ export function createSuperagentHost({
     read,
     ownsSession: (id) => (supervisor && !disposed ? supervisor.ownsSession(id) : false),
     notifications: () => (supervisor && state !== 'error' ? superagentNotifications(supervisor.listJobs()) : []),
+    // True only once start() has loaded every job, so a client may treat a key
+    // missing from notifications() as gone rather than not loaded yet.
+    notificationsReady: () => started && (state === 'ready' || state === 'stopping'),
   };
 }

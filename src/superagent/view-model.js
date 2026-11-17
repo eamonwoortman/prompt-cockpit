@@ -111,6 +111,7 @@ function needsYouView(job) {
   return {
     type: job.reason,
     key: `superagent:${job.jobId}:${job.needsYouSeq}`,
+    seq: job.needsYouSeq,
     text: job.reason === 'question' ? needsYouQuestionText(job) : null,
     detail: d,
     answerable: job.reason === 'question' && d?.kind !== 'budget',

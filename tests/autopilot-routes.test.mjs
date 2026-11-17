@@ -156,7 +156,7 @@ test('POST /api/autopilot-settings validates', async () => {
 test('GET /api/notifications returns a derived list', async () => {
   const res = await api('/api/notifications');
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { entries: [] });
+  assert.deepEqual(await res.json(), { entries: [], superagentReady: false });
 });
 
 test('importing the server leaves the superagent host off and the superagent folder untouched', async () => {

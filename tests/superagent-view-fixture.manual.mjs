@@ -224,26 +224,36 @@ const registry = {
   addApprovalInterceptor: () => () => {},
   addSessionRemovedListener: () => () => {},
 };
-const config = createSuperagentConfig({ filePath: path.join(root, 'config.json') });
-await config.load();
-const guardStore = createSuperagentStore({ rootDir: path.join(root, 'jobs') });
-const supervisor = createSuperagent({ registry, store: guardStore, config, worktreesRoot, logImpl: (line) => console.log(`[supervisor] ${line}`) });
-await supervisor.start();
-for (let i = 0; i < 3; i++) await supervisor.tick();
-await supervisor.stop();
-supervisor.dispose();
-
+// A guard that throws proves nothing, so a crash anywhere in it fails the
+// check loudly instead of leaving a bare stack trace.
 const grown = [];
-for (const jobId of seeded) {
-  const job = await createSuperagentStore({ rootDir: path.join(root, 'jobs') }).load(jobId);
-  if (job.lastSeq !== before.get(jobId)) grown.push(`${job.title}: seq ${before.get(jobId)} -> ${job.lastSeq}`);
+let crashed = null;
+try {
+  const config = createSuperagentConfig({ filePath: path.join(root, 'config.json') });
+  await config.load();
+  const guardStore = createSuperagentStore({ rootDir: path.join(root, 'jobs') });
+  const supervisor = createSuperagent({ registry, store: guardStore, config, worktreesRoot, logImpl: (line) => console.log(`[supervisor] ${line}`) });
+  try {
+    await supervisor.start();
+    for (let i = 0; i < 3; i++) await supervisor.tick();
+  } finally {
+    await supervisor.stop();
+    supervisor.dispose();
+  }
+  for (const jobId of seeded) {
+    const job = await createSuperagentStore({ rootDir: path.join(root, 'jobs') }).load(jobId);
+    if (job.lastSeq !== before.get(jobId)) grown.push(`${job.title}: seq ${before.get(jobId)} -> ${job.lastSeq}`);
+  }
+} catch (err) {
+  crashed = err;
 }
-if (launches.length || grown.length) {
+if (crashed || launches.length || grown.length) {
   console.error('\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
   console.error('!!! NO-LAUNCH CHECK FAILED - DO NOT START COCKPIT ON THIS HOME !!!');
   console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
   for (const l of launches) console.error(`createSession called: ${JSON.stringify(l)}`);
   for (const g of grown) console.error(`event log grew: ${g}`);
+  if (crashed) console.error(`the check itself crashed: ${crashed?.stack || crashed}`);
   console.error('Change the seed, not the guard.');
   process.exit(1);
 }

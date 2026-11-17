@@ -11,7 +11,7 @@ import { registerNotificationRoutes } from '../src/routes/notifications.js';
 
 const job = (over = {}) => ({ jobId: 'job-1', title: 'Login page', state: 'running', phaseId: 'spec', pipeline: [], attempts: [], repos: [], ...over });
 
-function fakeHost({ supervisor = {}, refusal = null, readable = true, notifications = [] } = {}) {
+function fakeHost({ supervisor = {}, refusal = null, readable = true, notifications = [], notificationsReady = true } = {}) {
   return {
     status: () => ({ state: refusal?.state ?? 'ready', ownerPort: refusal?.ownerPort ?? null, error: null, router: 'off' }),
     admit: async (fn) => {
@@ -19,14 +19,15 @@ function fakeHost({ supervisor = {}, refusal = null, readable = true, notificati
       return fn(supervisor);
     },
     read: (fn) => (readable ? fn(supervisor) : null),
-    notifications: () => notifications,
+    notifications: () => (typeof notifications === 'function' ? notifications() : notifications),
+    notificationsReady: () => notificationsReady,
   };
 }
 
-async function serve(t, { host, registry = { get: () => undefined }, autopilot = { notifications: async () => ({ entries: [] }) }, readArtifactImpl }) {
+async function serve(t, { host, registry = { get: () => undefined }, autopilot = { notifications: async () => ({ entries: [] }) }, readArtifactImpl, logImpl }) {
   const router = createRouter();
   registerSuperagentRoutes(router, { host, registry, readArtifactImpl });
-  registerNotificationRoutes(router, { autopilot, host });
+  registerNotificationRoutes(router, { autopilot, host, logImpl });
   const server = createServer((req, res) => {
     router.handle(req, res, new URL(req.url, 'http://127.0.0.1')).then((handled) => {
       if (!handled) { res.writeHead(404); res.end(); }
@@ -136,20 +137,46 @@ test("createJob's coded errors come back as 400 with their code", async (t) => {
 test('a second answer to the same question is a 409 and appends nothing', async (t) => {
   const appended = [];
   const supervisor = {
-    answerQuestion: async (jobId, text) => {
+    answerQuestion: async (jobId, text, seen) => {
       if (appended.length) throw Object.assign(new Error('no question to answer'), { code: 'ERR_INVALID_STATE' });
-      appended.push({ jobId, text });
+      appended.push({ jobId, text, seen });
       return job({ jobId });
     },
   };
   const api = await serve(t, { host: fakeHost({ supervisor }) });
-  const first = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies' } });
+  const first = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies', needsYouSeq: 4 } });
   assert.equal(first.status, 200);
   assert.equal(first.body.jobId, 'job-1');
-  const second = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies' } });
+  const second = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies', needsYouSeq: 4 } });
   assert.equal(second.status, 409);
   assert.equal(second.body.code, 'ERR_INVALID_STATE');
-  assert.deepEqual(appended, [{ jobId: 'job-1', text: 'Use cookies' }]);
+  assert.deepEqual(appended, [{ jobId: 'job-1', text: 'Use cookies', seen: { needsYouSeq: 4 } }]);
+});
+
+test('an answer must name the needs-you it was written for; a stale one is a 409', async (t) => {
+  const calls = [];
+  const supervisor = {
+    answerQuestion: async (jobId, text, { needsYouSeq }) => {
+      calls.push(needsYouSeq);
+      if (needsYouSeq !== 7) throw Object.assign(new Error('job job-1 no longer needs what was shown'), { code: 'ERR_INVALID_STATE' });
+      return job({ jobId });
+    },
+    accept: async (jobId, seen) => { calls.push(seen); return job({ jobId, state: 'done' }); },
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  for (const needsYouSeq of [undefined, null, '7', 7.5]) {
+    const res = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies', needsYouSeq } });
+    assert.equal(res.status, 400, String(needsYouSeq));
+    assert.equal(res.body.code, 'ERR_INVALID_ANSWER');
+  }
+  assert.deepEqual(calls, [], 'nothing reaches the supervisor without a needs-you');
+  const stale = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies', needsYouSeq: 4 } });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.code, 'ERR_INVALID_STATE');
+  const current = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies', needsYouSeq: 7 } });
+  assert.equal(current.status, 200);
+  await api('/api/superagent/jobs/job-1/accept', { method: 'POST', body: { needsYouSeq: 9 } });
+  assert.deepEqual(calls, [4, 7, { needsYouSeq: 9 }]);
 });
 
 test('accept and stop return the job summary; an unknown job is 404', async (t) => {
@@ -224,5 +251,42 @@ test('notifications merge both sources', async (t) => {
   });
   const res = await api('/api/notifications');
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body, { entries: [pilotEntry, superagentEntry] });
+  assert.deepEqual(res.body, { entries: [pilotEntry, superagentEntry], superagentReady: true });
+});
+
+test('notifications say when the superagent entries are not the full list yet', async (t) => {
+  const pilotEntry = { kind: 'needs-input', pilotId: 'p1', message: 'waiting' };
+  const api = await serve(t, {
+    host: fakeHost({ notifications: [], notificationsReady: false }),
+    autopilot: { notifications: async () => ({ entries: [pilotEntry] }) },
+  });
+  const res = await api('/api/notifications');
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { entries: [pilotEntry], superagentReady: false });
+});
+
+test('one throwing notification source does not blank the other', async (t) => {
+  const pilotEntry = { kind: 'needs-input', pilotId: 'p1', message: 'waiting' };
+  const superagentEntry = { kind: 'superagent', type: 'stuck', key: 'superagent:job-1:9', jobId: 'job-1', title: 'Login page', message: 'stuck' };
+  const logged = [];
+  const logImpl = (m) => logged.push(m);
+
+  const pilotsDown = await serve(t, {
+    host: fakeHost({ notifications: [superagentEntry] }),
+    autopilot: { notifications: async () => { throw new Error('pilots down'); } },
+    logImpl,
+  });
+  const first = await pilotsDown('/api/notifications');
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.body, { entries: [superagentEntry], superagentReady: true });
+
+  const superagentDown = await serve(t, {
+    host: fakeHost({ notifications: () => { throw new Error('jobs down'); } }),
+    autopilot: { notifications: async () => ({ entries: [pilotEntry] }) },
+    logImpl,
+  });
+  const second = await superagentDown('/api/notifications');
+  assert.equal(second.status, 200);
+  assert.deepEqual(second.body, { entries: [pilotEntry], superagentReady: false });
+  assert.deepEqual(logged, ['auto-pilot notifications failed: pilots down', 'superagent notifications failed: jobs down']);
 });
