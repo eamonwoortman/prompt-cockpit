@@ -496,10 +496,6 @@ export function createSuperagent({
       clearIntervalImpl(timer);
       timer = null;
     }
-    if (unintercept) {
-      unintercept();
-      unintercept = null;
-    }
     if (ticking) {
       let handle;
       const deadline = new Promise((resolve) => {
@@ -508,6 +504,14 @@ export function createSuperagent({
       await Promise.race([ticking, deadline]).finally(() => clearTimeout(handle));
     }
     await drain();
+  }
+
+  // Not part of stop(): shutdown closes worker rows after stop(), and their
+  // asks must stay denied until then.
+  function dispose() {
+    if (!unintercept) return;
+    unintercept();
+    unintercept = null;
   }
 
   // Decision 11: a project override template (under projectDir) counts.
@@ -710,5 +714,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, tick, drain, createJob, accept, answerQuestion, stopJob, listJobs, getJob, orphanWorktrees };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, accept, answerQuestion, stopJob, listJobs, getJob, orphanWorktrees };
 }

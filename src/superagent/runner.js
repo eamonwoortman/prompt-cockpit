@@ -83,6 +83,7 @@ export function createRunner({
 }) {
   const lives = new Map();
   const bySession = new Map();
+  const ownedRoles = new Map();
   const tracked = new Set();
   let stopping = false;
 
@@ -478,6 +479,7 @@ export function createRunner({
     } catch (err) {
       return endLaunch(live, err);
     }
+    ownedRoles.set(row.id, live.role);
     live.sessionId = row.id;
     live.promptSeq = live.scannedThrough = row.eventLog.nextSeq - 1;
     live.lastProgressAt = now();
@@ -531,14 +533,16 @@ export function createRunner({
 
   // In `auto` mode the SDK does not call canUseTool for ordinary tools
   // (confirmed by the 2026-11-04 probe), so this deny rule only covers the
-  // asks the SDK actually makes.
+  // asks the SDK actually makes. Ownership outlives the attempt: a row whose
+  // close failed, or that shutdown has yet to close, is still denied.
   function onApprovalRequest({ row }) {
-    const live = bySession.get(row?.id);
-    if (!live) return null;
-    return { behavior: 'deny', message: denyMessageFor(live.role) };
+    const role = ownedRoles.get(row?.id);
+    if (role === undefined) return null;
+    return { behavior: 'deny', message: denyMessageFor(role) };
   }
 
   function onSessionRemoved({ id, reason }) {
+    ownedRoles.delete(id);
     const live = bySession.get(id);
     if (!live) return;
     removed(live, reason);
@@ -555,6 +559,7 @@ export function createRunner({
     stopAttempt,
     onApprovalRequest,
     onSessionRemoved,
+    ownsSession: (sessionId) => ownedRoles.has(sessionId),
     liveCount: () => lives.size,
     isLive: (jobId) => lives.has(jobId),
     setStopping(flag) {

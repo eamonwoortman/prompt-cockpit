@@ -472,6 +472,40 @@ test('a valid result at turn end ends the attempt done and closes the session', 
   } finally { registry._reset(); }
 });
 
+test('an ask on a row whose close threw is still denied', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended } = await setup();
+    const factory = sessionFactory(registry);
+    let stuckId = null;
+    const reg = {
+      ...factory.registry,
+      closeSession(id) {
+        if (id === stuckId) throw new Error('injected close failure');
+        return registry.closeSession(id);
+      },
+    };
+    const runner = createRunner({ registry: reg, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    registry.addSessionRemovedListener(runner.onSessionRemoved);
+    await runner.launch(job, launchAction());
+    const attempt = lastAttempt(store, job.jobId);
+    stuckId = attempt.sessionId;
+    await writeValidResult(job, attempt);
+    endTurn(factory.impls.get(stuckId));
+    await runner.review(job);
+    await runner.drain();
+    assert.deepEqual((await ended()).map((e) => e.outcome), ['done']);
+    assert.equal(runner.isLive(job.jobId), false);
+    const row = registry.get(stuckId);
+    assert.ok(row, 'the row whose close threw is still in the registry');
+    assert.deepEqual(runner.onApprovalRequest({ row }), { behavior: 'deny', message: UNATTENDED_DENY_MESSAGE });
+    assert.equal(runner.ownsSession(row.id), true);
+    runner.onSessionRemoved({ id: row.id, reason: 'closed' });
+    assert.equal(runner.ownsSession(row.id), false);
+    assert.equal(runner.onApprovalRequest({ row }), null);
+  } finally { registry._reset(); }
+});
+
 test('no result: one nudge, then no-result', async () => {
   registry._reset();
   try {

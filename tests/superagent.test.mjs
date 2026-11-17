@@ -447,7 +447,7 @@ test('a rejected attempt-started that landed is reconciled, never launched besid
   assert.deepEqual(spy.seen, []);
 });
 
-test('start and stop are idempotent and own exactly one interceptor while started', async () => {
+test('start, stop and dispose are idempotent and own exactly one interceptor until disposed', async () => {
   try {
     const counts = { interceptors: 0, interceptorAdds: 0, removalAdds: 0, timers: 0, cleared: 0 };
     const factory = sessionFactory(registry);
@@ -481,12 +481,56 @@ test('start and stop are idempotent and own exactly one interceptor while starte
     assert.deepEqual([counts.interceptors, counts.interceptorAdds, counts.timers], [1, 1, 1]);
     await h.sa.stop();
     await h.sa.stop();
-    assert.deepEqual([counts.interceptors, counts.cleared], [0, 1]);
+    assert.deepEqual([counts.interceptors, counts.cleared], [1, 1], 'stop keeps the interceptor');
+    h.sa.dispose();
+    h.sa.dispose();
+    assert.equal(counts.interceptors, 0);
     await h.sa.start();
     assert.deepEqual([counts.interceptors, counts.interceptorAdds, counts.timers], [1, 2, 2]);
     await h.sa.stop();
+    h.sa.dispose();
     assert.equal(counts.interceptors, 0);
     assert.equal(counts.removalAdds, 1);
+  } finally { registry._reset(); }
+});
+
+test('an ask during stop is denied until dispose', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h);
+    await h.sa.start();
+    await h.sa.tick();
+    const { sessionId } = h.store.get(job.jobId).attempts.at(-1);
+    const worker = h.factory.impls.get(sessionId);
+    await h.sa.stop();
+    assert.ok(registry.get(sessionId), 'stop leaves the row for shutdown to close');
+    const asked = worker.emitApprovalRequest({ questions: [{ question: 'Which?' }] }, 'AskUserQuestion');
+    assert.equal(registry.get(sessionId).pendingApprovals.length, 0, 'nothing reaches the human during stop');
+    assert.equal((await asked).behavior, 'deny');
+    h.sa.dispose();
+    worker.emitApprovalRequest({ questions: [{ question: 'Which?' }] }, 'AskUserQuestion');
+    assert.equal(registry.get(sessionId).pendingApprovals.length, 1, 'after dispose the registry default applies');
+  } finally { registry._reset(); }
+});
+
+test('ownsSession is true from launch until removal', async () => {
+  try {
+    const factory = sessionFactory(registry);
+    const h = await harness({ registry: { ...factory.registry, closeSession: () => false } });
+    const job = await create(h);
+    await h.sa.start();
+    assert.equal(h.sa.ownsSession('not-a-session'), false);
+    await h.sa.tick();
+    const attempt = h.store.get(job.jobId).attempts.at(-1);
+    assert.ok(h.events(job.jobId).some((e) => e.type === 'attempt-session' && e.sessionId === attempt.sessionId));
+    assert.equal(h.sa.ownsSession(attempt.sessionId), true);
+    await h.sa.stopJob(job.jobId);
+    assert.ok(registry.get(attempt.sessionId), 'the row lingers');
+    assert.equal(h.sa.ownsSession(attempt.sessionId), true);
+    registry.closeSession(attempt.sessionId);
+    assert.equal(h.sa.ownsSession(attempt.sessionId), false);
+    await h.sa.stop();
+    h.sa.dispose();
   } finally { registry._reset(); }
 });
 
