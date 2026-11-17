@@ -68,7 +68,8 @@ export function initChainUi({
   chainMenuSelect,
   chainGoBtn,
   offerBtn, // appears when a limit is hit and chaining is waiting on you
-  awayBtn, // activity bar away switch
+  awayCheckbox, // settings: temporary "I'm away now" switch
+  awayRow, // its row, shown only for Chain automatically
   errorEl,
   getCatalog,
   post, // async (action, body) => Response
@@ -248,7 +249,13 @@ export function initChainUi({
     }
   }
 
-  actionSelect.addEventListener('change', savePolicy);
+  actionSelect.addEventListener('change', () => {
+    // The away flag is global and invisible outside chain mode, so it must not
+    // outlive the mode it only makes sense in.
+    if (actionSelect.value !== 'chain' && awayCheckbox.checked) sendAway(false);
+    awayRow.hidden = actionSelect.value !== 'chain';
+    savePolicy();
+  });
   askPresentCheckbox.addEventListener('change', savePolicy);
   awayMinutesInput.addEventListener('change', savePolicy);
   permissionSelect.addEventListener('change', savePolicy);
@@ -264,7 +271,7 @@ export function initChainUi({
   });
   chainGoBtn.addEventListener('click', () => chainNow(chainMenuSelect.value));
   offerBtn.addEventListener('click', () => chainNow(''));
-  awayBtn.addEventListener('click', () => sendAway(awayBtn.getAttribute('aria-pressed') !== 'true'));
+  awayCheckbox.addEventListener('change', () => sendAway(awayCheckbox.checked));
 
   // Idempotent: runs on every session summary, so a choice changed in another
   // tab (or an offer raised server-side) shows up here without a refresh.
@@ -289,10 +296,8 @@ export function initChainUi({
     if (chainMenu.hidden && next.chainNext) chainMenuSelect.value = encodeTarget(next.chainNext);
     offerBtn.hidden = !(next.chainOffer && next.chainNext);
     if (!offerBtn.hidden) offerBtn.textContent = `Chain to ${labelFor(next.chainNext)} now`;
-    const forced = Boolean(next.presence?.forcedAway);
-    awayBtn.setAttribute('aria-pressed', forced ? 'true' : 'false');
-    awayBtn.classList.toggle('on', forced);
-    awayBtn.textContent = forced ? '🌙 Away: on' : '🌙 Away';
+    awayRow.hidden = actionSelect.value !== 'chain';
+    if (active !== awayCheckbox) awayCheckbox.checked = Boolean(next.presence?.forcedAway);
     if (next.chainError) showError(next.chainError.startsWith('Chain') ? next.chainError : `Chain stopped: ${next.chainError}`);
     else if (errorEl.dataset.fromSummary === '1') showError('');
     errorEl.dataset.fromSummary = next.chainError ? '1' : '';

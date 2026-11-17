@@ -188,7 +188,6 @@
     <button type="button" id="pendingTurnsBadge" class="session-chrome" hidden title="Turns cockpit still thinks are in flight. Click if nothing is actually running to force it back to idle."></button>
     <button type="button" id="stopBtn" class="session-chrome" hidden title="Cancel the running turn (Esc)">Stop</button>
     <button type="button" id="toolRevealBtn" class="btn session-chrome" hidden aria-pressed="false" title="Tool calls are hidden by your Settings > Display choice. Click to reveal them so you can open one in the detail pane.">Show tool calls</button>
-    <button type="button" id="awayBtn" class="btn session-chrome" aria-pressed="false" title="Force away: chaining after a rate limit then runs on its own, without waiting for you to go idle. Click again to turn it off.">🌙 Away</button>
     <button type="button" id="chainBtn" class="btn session-chrome" hidden title="Continue this session's work in a new session on another provider or account. This session stays open.">Chain to...</button>
     <span id="chainMenu" class="session-chrome" hidden>
       <label class="visually-hidden" for="chainMenuSelect">Chain target</label>
@@ -197,7 +196,6 @@
     </span>
     <span id="statsPanel" hidden></span>
     <button type="button" id="compactBtn" class="btn session-chrome" title="Run /compact now to free up context">Compact</button>
-    <button type="button" id="reportStuckBtn" class="btn session-chrome" title="Copy a diagnostic snapshot of the live session state (for reporting a stuck spinner or similar)">🐛 Report state</button>
     <button type="button" id="copyLastBtn" class="btn session-chrome" title="Copy the most recent reply">Copy reply</button>
     <button type="button" id="exportBtn" class="btn session-chrome" title="Download the whole transcript as markdown">Export .md</button>
   </div>
@@ -391,11 +389,16 @@
             <label class="settings-row">
               <input type="checkbox" id="chainAskPresentBtn" />
               <span>Ask me instead while I'm at the computer</span>
-              <span class="hint" title="With Chain automatically: while you are using the cockpit the limit only shows the Chain button, and it chains on its own once you are away. The Away button in the activity bar forces away, e.g. before you leave for the night.">?</span>
+              <span class="hint" title="With Chain automatically: while you are using the cockpit the limit only shows the Chain button, and it chains on its own once you are away. "I'm away now" below forces away, e.g. before you leave for the night.">?</span>
             </label>
             <label class="settings-row">
               <span>Count me as away after (minutes)</span>
               <input type="number" id="chainAwayMinutesBtn" min="1" max="1440" step="1" />
+            </label>
+            <label class="settings-row" id="chainAwayNowRow" hidden>
+              <input type="checkbox" id="chainAwayNowCheckbox" />
+              <span>I'm away now: chain without asking</span>
+              <span class="hint" title="Temporary and global: while ticked, a rate limit chains on its own in every folder, without waiting for you to go idle (e.g. before you leave for the night). It is not saved: it clears when you untick it, switch the limit action away from Chain automatically, or restart the server.">?</span>
             </label>
             <label class="settings-row">
               <span>Permission mode for chained sessions</span>
@@ -409,6 +412,10 @@
               </div>
               <ul id="chainLogEl" class="settings-list" hidden></ul>
             </div>
+          </div>
+          <div class="settings-row">
+            <span>Diagnostics</span>
+            <button type="button" id="reportStuckBtn" class="btn session-chrome" title="Copy a diagnostic snapshot of the live session state (for reporting a stuck spinner or similar)">🐛 Report state</button>
           </div>
           <div class="settings-row settings-danger">
             <div>

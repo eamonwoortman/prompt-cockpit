@@ -949,7 +949,8 @@ const chainUi = initChainUi({
   chainMenuSelect: document.getElementById('chainMenuSelect'),
   chainGoBtn: document.getElementById('chainGoBtn'),
   offerBtn: document.getElementById('chainOfferBtn'),
-  awayBtn: document.getElementById('awayBtn'),
+  awayCheckbox: document.getElementById('chainAwayNowCheckbox'),
+  awayRow: document.getElementById('chainAwayNowRow'),
   errorEl: document.getElementById('chainError'),
   getCatalog: () => providerCatalog,
   post: (action, body) => fetch(`/api/sessions/${sessionId}/${action}`, {
