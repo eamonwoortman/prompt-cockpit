@@ -33,12 +33,14 @@ const lockB = (file, over = {}) => makeLock(file, { token: 'tok-b', pid: 222, po
 
 const readLock = async (file) => JSON.parse(await fs.readFile(file, 'utf8'));
 const writeStale = (file, token = 'tok-s') => fs.writeFile(file, JSON.stringify({ pid: STALE_PID, osStartedAt: STARTED, port: 4000, token }));
-const claimFiles = async (file) => (await fs.readdir(path.dirname(file))).filter((n) => n.endsWith('.claim'));
+const leftovers = async (file) => (await fs.readdir(path.dirname(file))).filter((n) => n.endsWith('.claim') || n.endsWith('.tmp'));
+const ownerOf = (r) => (r.token === 'tok-a' ? { pid: 111, port: 4317 } : { pid: 222, port: 4318 });
 
 test('the first acquire owns the lock and writes its identity', async () => {
   const file = await lockFile();
   assert.deepEqual(await lockA(file).acquire(), { owned: true });
   assert.deepEqual(await readLock(file), { pid: 111, osStartedAt: STARTED, port: 4317, token: 'tok-a' });
+  assert.deepEqual(await leftovers(file), []);
 });
 
 test("a live owner's lock is refused", async () => {
@@ -59,18 +61,20 @@ test("a dead owner's lock is taken over", async () => {
     await writeStale(file);
     assert.deepEqual(await lockA(file, { verify: staleUnlessPid(status) }).acquire(), { owned: true }, status);
     assert.equal((await readLock(file)).token, 'tok-a');
-    assert.deepEqual(await claimFiles(file), []);
+    assert.deepEqual(await leftovers(file), []);
   }
 });
 
 test('simultaneous acquisition has exactly one winner', async () => {
-  const file = await lockFile();
-  const a = lockA(file);
-  const b = lockB(file);
-  const results = await Promise.all([a.acquire(), b.acquire()]);
-  assert.equal(results.filter((r) => r.owned).length, 1);
-  const winner = results[0].owned ? 'tok-a' : 'tok-b';
-  assert.equal((await readLock(file)).token, winner);
+  for (let i = 0; i < 20; i++) {
+    const file = await lockFile();
+    const results = await Promise.all([lockA(file).acquire(), lockB(file).acquire()]);
+    const lock = await readLock(file);
+    const winner = lock.token === 'tok-a' ? 0 : 1;
+    assert.deepEqual(results[winner], { owned: true });
+    assert.deepEqual(results[1 - winner], { owned: false, owner: ownerOf(lock) });
+    assert.deepEqual(await leftovers(file), []);
+  }
 });
 
 test('simultaneous stale takeover has exactly one winner', async () => {
@@ -78,10 +82,11 @@ test('simultaneous stale takeover has exactly one winner', async () => {
     const file = await lockFile();
     await writeStale(file);
     const results = await Promise.all([lockA(file).acquire(), lockB(file).acquire()]);
-    assert.equal(results.filter((r) => r.owned).length, 1, JSON.stringify(results));
-    const winner = results[0].owned ? 'tok-a' : 'tok-b';
-    assert.equal((await readLock(file)).token, winner);
-    assert.deepEqual(await claimFiles(file), []);
+    const lock = await readLock(file);
+    const winner = lock.token === 'tok-a' ? 0 : 1;
+    assert.deepEqual(results[winner], { owned: true }, JSON.stringify(results));
+    assert.deepEqual(results[1 - winner], { owned: false, owner: ownerOf(lock) }, JSON.stringify(results));
+    assert.deepEqual(await leftovers(file), []);
   }
 });
 
@@ -98,14 +103,17 @@ test('a contender that moved a fresh lock puts it back', async () => {
       bResult = await b.acquire();
       return fs.rename(from, to);
     },
-    async link(from, to) { ops.push('link'); return fs.link(from, to); },
+    async link(from, to) {
+      if (from.endsWith('.claim')) ops.push('put back');
+      return fs.link(from, to);
+    },
   };
   const aResult = await lockA(file, { fsImpl }).acquire();
   assert.deepEqual(bResult, { owned: true });
   assert.deepEqual(aResult, { owned: false, owner: { pid: 222, port: 4318 } });
-  assert.deepEqual(ops, ['rename', 'link']);
+  assert.deepEqual(ops, ['rename', 'put back']);
   assert.equal((await readLock(file)).token, 'tok-b');
-  assert.deepEqual(await claimFiles(file), []);
+  assert.deepEqual(await leftovers(file), []);
 });
 
 test('a claim emptied after a successful rename is a lost race', async () => {
@@ -120,13 +128,16 @@ test('a claim emptied after a successful rename is a lost race', async () => {
       await fs.rename(to, from);
       bResult = await b.acquire();
     },
-    async link() { assert.fail('a lost race must not put anything back'); },
+    async link(from, to) {
+      if (from.endsWith('.claim')) assert.fail('a lost race must not put anything back');
+      return fs.link(from, to);
+    },
   };
   const aResult = await lockA(file, { fsImpl }).acquire();
   assert.deepEqual(bResult, { owned: true });
   assert.deepEqual(aResult, { owned: false, owner: { pid: 222, port: 4318 } });
   assert.equal((await readLock(file)).token, 'tok-b');
-  assert.deepEqual(await claimFiles(file), []);
+  assert.deepEqual(await leftovers(file), []);
 });
 
 test('a fresh lock moved on from our claim before we put it back is left alone', async () => {
@@ -141,7 +152,7 @@ test('a fresh lock moved on from our claim before we put it back is left alone',
       return fs.rename(from, to);
     },
     async link(from, to) {
-      await fs.rename(from, to);
+      if (from.endsWith('.claim')) await fs.rename(from, to);
       return fs.link(from, to);
     },
   };
@@ -149,7 +160,56 @@ test('a fresh lock moved on from our claim before we put it back is left alone',
   assert.deepEqual(bResult, { owned: true });
   assert.deepEqual(aResult, { owned: false, owner: { pid: 222, port: 4318 } });
   assert.equal((await readLock(file)).token, 'tok-b');
-  assert.deepEqual(await claimFiles(file), []);
+  assert.deepEqual(await leftovers(file), []);
+});
+
+test('a takeover rename refused while racing an unlink is a lost race, once', async () => {
+  const file = await lockFile();
+  await writeStale(file);
+  const b = lockB(file);
+  let bResult;
+  const fsImpl = {
+    ...fs,
+    async rename() {
+      bResult = await b.acquire();
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    },
+  };
+  assert.deepEqual(await lockA(file, { fsImpl }).acquire(), { owned: false, owner: { pid: 222, port: 4318 } });
+  assert.deepEqual(bResult, { owned: true });
+
+  const stuck = await lockFile();
+  await writeStale(stuck);
+  let renames = 0;
+  const busy = {
+    ...fs,
+    async rename() {
+      renames++;
+      throw Object.assign(new Error('resource busy'), { code: 'EBUSY' });
+    },
+  };
+  await assert.rejects(lockA(stuck, { fsImpl: busy }).acquire(), { code: 'EBUSY' });
+  assert.equal(renames, 2);
+  assert.equal((await readLock(stuck)).token, 'tok-s');
+});
+
+test('a failed identity write publishes nothing and surfaces the write error', async () => {
+  const file = await lockFile();
+  const fsImpl = {
+    ...fs,
+    async open(target, flags) {
+      const handle = await fs.open(target, flags);
+      return {
+        writeFile: async () => { throw Object.assign(new Error('no space'), { code: 'ENOSPC' }); },
+        datasync: () => handle.datasync(),
+        close: async () => { await handle.close(); throw Object.assign(new Error('bad fd'), { code: 'EBADF' }); },
+      };
+    },
+  };
+  await assert.rejects(lockA(file, { fsImpl }).acquire(), { code: 'ENOSPC' });
+  await assert.rejects(fs.access(file), { code: 'ENOENT' });
+  assert.deepEqual(await leftovers(file), []);
+  assert.deepEqual(await lockA(file).acquire(), { owned: true });
 });
 
 test("a faster contender's new lock makes the slower one occupied", async () => {
@@ -168,19 +228,20 @@ test("a faster contender's new lock makes the slower one occupied", async () => 
   assert.deepEqual(bResult, { owned: true });
   assert.deepEqual(aResult, { owned: false, owner: { pid: 222, port: 4318 } });
   assert.equal((await readLock(file)).token, 'tok-b');
-  assert.deepEqual(await claimFiles(file), []);
+  assert.deepEqual(await leftovers(file), []);
 });
 
-test('a leftover claim file from a crash is ignored', async () => {
+test('leftover claim and tmp files from a crash are ignored', async () => {
   const live = await lockFile();
   await lockB(live).acquire();
-  const liveLeftover = `${live}.x.claim`;
-  await fs.writeFile(liveLeftover, JSON.stringify({ pid: STALE_PID, osStartedAt: STARTED, port: 4000, token: 'x' }));
+  await fs.writeFile(`${live}.x.claim`, JSON.stringify({ pid: STALE_PID, osStartedAt: STARTED, port: 4000, token: 'x' }));
+  await fs.writeFile(`${live}.x.tmp`, 'garbage');
   assert.deepEqual(await lockA(live).acquire(), { owned: false, owner: { pid: 222, port: 4318 } });
   assert.equal((await readLock(live)).token, 'tok-b');
 
   const free = await lockFile();
   await fs.writeFile(`${free}.x.claim`, 'garbage');
+  await fs.writeFile(`${free}.x.tmp`, 'garbage');
   assert.deepEqual(await lockA(free).acquire(), { owned: true });
   assert.equal((await readLock(free)).token, 'tok-a');
 });

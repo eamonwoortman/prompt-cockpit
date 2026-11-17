@@ -2,22 +2,28 @@
 // machine shares ~/.prompt-cockpit/superagent/, so only the one holding
 // owner.lock runs the supervisor; the others point at it.
 //
-// Acquisition is create-if-absent (`open(file, 'wx')`), so two Cockpits
-// booting together cannot both win. A lock whose owner is provably dead
-// ('gone' or 'mismatch' from child-tracker's verifyEntry) is taken over by
-// renaming it to a claim file only we name, then checking that the claim
-// still carries the token judged dead before deleting it and creating ours
-// with 'wx' again. A contender that moved a fresh lock instead puts it back
-// with `link`, which fails rather than overwrite (unlike `rename` on Windows).
-// On Windows two concurrent renames of one file can BOTH succeed, the second
-// moving it on from the first one's claim, so a claim found empty after a
-// successful rename is the same lost race as a rename that gets ENOENT. An
-// owner that cannot be verified, or a lock that cannot be parsed, counts as
-// occupied.
+// The identity is written in full to a tmp file only we name, then published
+// with `link(tmp, file)`, which is create-if-absent (it fails with EEXIST
+// rather than overwrite, unlike `rename` on Windows): two Cockpits booting
+// together cannot both win, and nobody ever reads a half-written lock. A lock
+// whose owner is provably dead ('gone' or 'mismatch' from child-tracker's
+// verifyEntry) is taken over by renaming it to a claim file only we name,
+// then checking that the claim still carries the token judged dead before
+// deleting it and publishing ours again. A contender that moved a fresh lock
+// instead puts it back with `link`. On Windows two concurrent renames of one
+// file can BOTH succeed, the second moving it on from the first one's claim,
+// so a claim found empty after a successful rename is the same lost race as a
+// rename that gets ENOENT (or EPERM/EBUSY, racing an unlink). An owner that
+// cannot be verified, or a lock that cannot be parsed, counts as occupied.
+// Leftover `*.tmp` and `*.claim` files from a crash are ignored.
 //
 // Residual: three or more Cockpits booting within the same instant over a
 // stale lock can still interleave badly (one moves a fresh lock aside while
-// another finds the path empty and creates its own). Out of scope.
+// another finds the path empty and publishes its own). So can any error other
+// than the tolerated race codes between moving a fresh lock into our claim and
+// putting it back (antivirus EBUSY on the read, `link` EPERM without hard
+// links): the lock stays in the claim, and a later boot can become a second
+// owner. Out of scope.
 import { randomUUID } from 'node:crypto';
 import fsPromises from 'node:fs/promises';
 import { probeProcessStartTime, verifyEntry } from '../child-tracker.js';
@@ -34,24 +40,31 @@ export function createOwnerLock({
 }) {
   const token = idImpl();
   const claim = `${file}.${token}.claim`;
+  const tmp = `${file}.${token}.tmp`;
   let identity = null;
 
   async function create() {
     identity ??= { pid, osStartedAt: (await probeStartTime(pid)) ?? null, port, token };
-    let handle;
     try {
-      handle = await fsImpl.open(file, 'wx');
-    } catch (err) {
-      if (err.code === 'EEXIST') return false;
-      throw err;
-    }
-    try {
-      await handle.writeFile(JSON.stringify(identity));
-      await handle.datasync();
-    } finally {
+      const handle = await fsImpl.open(tmp, 'w');
+      try {
+        await handle.writeFile(JSON.stringify(identity));
+        await handle.datasync();
+      } catch (err) {
+        await handle.close().catch(() => {});
+        throw err;
+      }
       await handle.close();
+      try {
+        await fsImpl.link(tmp, file);
+      } catch (err) {
+        if (err.code === 'EEXIST') return false;
+        throw err;
+      }
+      return true;
+    } finally {
+      await unlinkIfPresent(tmp).catch((err) => logImpl(`superagent: could not remove ${tmp}: ${err.message}`));
     }
-    return true;
   }
 
   async function read(target) {
@@ -91,8 +104,9 @@ export function createOwnerLock({
     try {
       await fsImpl.rename(file, claim);
     } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-      return lostRace();
+      if (err.code === 'ENOENT') return lostRace();
+      if ((err.code === 'EPERM' || err.code === 'EBUSY') && mayRetry) return attempt(false);
+      throw err;
     }
     const claimed = await read(claim);
     if (claimed.missing) return lostRace();
