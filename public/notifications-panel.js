@@ -13,7 +13,7 @@
 import { claimNotifications } from '/notify-dedupe.js';
 
 const POLL_MS = 10_000;
-const SUPERAGENT_TAB = 'cockpit-superagent';
+export const SUPERAGENT_TAB = 'cockpit-superagent';
 
 // One named tab for the Superagent view: a second click, or a browser
 // notification, re-targets that tab instead of stacking new ones.

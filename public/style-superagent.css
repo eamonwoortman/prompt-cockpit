@@ -1,0 +1,159 @@
+/* The Superagent tab (public/superagent-view.js). body.view-superagent is set
+   by entry.js; in that mode the transcript UI and the session-only header
+   controls are hidden, since app.js never runs there to drive them. */
+
+#superagentView { display: none; }
+
+body.view-superagent > :not(.app-header, #operatorGate, #superagentView, #notificationsPanel, dialog, script),
+body.view-superagent .app-header > :not(h1, .spacer, #superagentBtn, #notificationsBtn) {
+  display: none !important;
+}
+
+body.view-superagent #superagentView {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  font-size: 13px;
+}
+
+.sa-notice {
+  padding: 24px 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.sa-notice a { color: var(--accent); }
+.sa-error-text { color: var(--error); white-space: pre-wrap; }
+
+.sa-panes {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(280px, 380px);
+  flex: 1;
+  min-height: 0;
+}
+.sa-pane {
+  overflow-y: auto;
+  padding: 12px 16px;
+  min-width: 0;
+}
+.sa-pane + .sa-pane { border-left: 1px solid var(--border); }
+
+.sa-heading { margin: 0 0 8px; font-size: 14px; font-weight: 700; }
+.sa-subheading { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.sa-section { margin-top: 14px; }
+.sa-placeholder { color: var(--muted); padding: 6px 0; }
+.sa-muted { color: var(--muted); }
+.sa-error { color: var(--error); margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sa-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.sa-list { list-style: none; margin: 0; padding: 0; }
+.sa-list > li { padding: 3px 0; overflow-wrap: anywhere; }
+.sa-pre, .sa-question {
+  margin: 0;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* --- left: jobs + New job form --- */
+
+.sa-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.sa-field { display: flex; flex-direction: column; gap: 4px; }
+.sa-field-label { font-size: 12px; color: var(--muted); }
+.sa-form textarea, .sa-form input[type="text"], .sa-answer {
+  width: 100%;
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+.sa-folder-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.sa-folder-row { display: flex; gap: 6px; align-items: center; }
+.sa-folder-row input { flex: 1; min-width: 0; }
+.sa-path { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.sa-mode { color: var(--muted); }
+
+.sa-job-list { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; }
+.sa-job-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.sa-job-row:hover { border-color: var(--border); }
+.sa-job-row.selected { border-color: var(--accent); background: var(--panel); }
+.sa-job-title { font-weight: 600; overflow-wrap: anywhere; }
+.sa-job-meta { display: flex; gap: 8px; font-size: 12px; color: var(--muted); }
+
+.sa-status { font-size: 12px; color: var(--muted); }
+.status-running .sa-status, .sa-status.status-running { color: var(--accent); }
+.status-needs-you .sa-status, .sa-status.status-needs-you { color: var(--warn); }
+.status-done .sa-status, .sa-status.status-done { color: var(--ok); }
+.status-failed .sa-status, .sa-status.status-failed { color: var(--error); }
+
+/* --- middle: the selected job --- */
+
+.sa-job-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sa-job-head .sa-heading { margin: 0; overflow-wrap: anywhere; }
+.sa-job-head .btn-danger { margin-left: auto; }
+.sa-idea { margin-top: 6px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.sa-chips { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 12px; }
+.sa-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.sa-chip.chip-done { color: var(--ok); border-color: var(--ok); }
+.sa-chip.chip-running { color: var(--accent); border-color: var(--accent); }
+.sa-chip.chip-waiting { color: var(--warn); border-color: var(--warn); }
+
+.sa-tasks li.done { color: var(--muted); }
+.sa-attempt { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.sa-attempt-scope { font-weight: 600; }
+.sa-attempt-meta { color: var(--muted); }
+.sa-artifacts { display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* --- right: needs you, router --- */
+
+.sa-notify { margin-bottom: 10px; }
+.sa-needs-you { display: flex; flex-direction: column; gap: 6px; }
+.sa-reason { font-weight: 600; color: var(--warn); }
+.sa-router-log li { font-size: 12px; }
+
+#superagentArtifactModal .modal-box { width: min(900px, 92vw); }
+#superagentArtifactText { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+
+@media (max-width: 900px) {
+  body.view-superagent #superagentView { overflow-y: auto; }
+  .sa-panes { display: flex; flex-direction: column; flex: none; }
+  .sa-pane { overflow: visible; }
+  .sa-pane + .sa-pane { border-left: none; border-top: 1px solid var(--border); }
+}

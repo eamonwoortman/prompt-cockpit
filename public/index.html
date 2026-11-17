@@ -19,6 +19,7 @@
 <link rel="stylesheet" href="/style-compose.css" />
 <link rel="stylesheet" href="/style-overlays.css" />
 <link rel="stylesheet" href="/style-autopilot.css" />
+<link rel="stylesheet" href="/style-superagent.css" />
 </head>
 <body data-screen="launcher">
   <header class="app-header">
@@ -46,6 +47,8 @@
     <button type="submit" id="operatorTokenSave" class="btn btn-primary">Save</button>
   </form>
   <div id="watchOnlyBanner" class="session-chrome" hidden>Superagent worker — watch only</div>
+  <!-- Shown only in the Superagent tab (body.view-superagent, set by entry.js); superagent-view.js builds its panes. -->
+  <main id="superagentView"></main>
 
   <div id="launcher" class="launcher-chrome">
     <form id="launcherForm">
@@ -245,6 +248,19 @@
       <footer>
         <button type="button" id="dirCancelBtn" class="btn" title="Cancel folder selection">Cancel</button>
         <button type="button" id="dirSelectBtn" class="btn btn-primary" title="Use this folder as the session's working directory">Select this folder</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog id="superagentArtifactModal" class="modal" aria-labelledby="superagentArtifactTitle">
+    <div class="modal-box">
+      <header class="modal-header"><strong id="superagentArtifactTitle"></strong></header>
+      <div class="modal-body">
+        <div id="superagentArtifactNote" class="sa-muted" hidden></div>
+        <pre id="superagentArtifactText"></pre>
+      </div>
+      <footer>
+        <button type="button" id="superagentArtifactClose" class="btn" title="Close the artifact">Close</button>
       </footer>
     </div>
   </dialog>
