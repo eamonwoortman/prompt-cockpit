@@ -69,7 +69,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 test('a constructed host is off and refuses everything', async () => {
   const { host, calls } = makeHost();
-  assert.deepEqual(host.status(), { state: 'off', ownerPort: null, error: null, router: 'off' });
+  assert.deepEqual(host.status(), { state: 'off', ownerPort: null, error: null, router: null });
   await assertUnavailable(host.admit(() => 1), { state: 'off', status: 503 });
   assert.equal(host.read(() => 1), null);
   assert.equal(host.ownsSession('worker-1'), false);
@@ -105,6 +105,7 @@ test('a corrupt config leaves the superagent in error and the rest untouched', a
   const status = host.status();
   assert.equal(status.state, 'error');
   assert.ok(status.error.includes(filePath), status.error);
+  assert.equal(status.router, null);
   await assertUnavailable(host.admit(() => 1), { state: 'error', status: 503 });
   assert.equal(host.read(() => 1), null);
   assert.deepEqual(calls, ['acquire', 'release']);
@@ -116,7 +117,7 @@ test('not owner when another Cockpit holds the lock', async () => {
   const lock = fakeLock(calls, async () => ({ owned: false, owner: { pid: 9, port: 4400 } }));
   const { host } = makeHost({ calls, lock });
   await host.init();
-  assert.deepEqual(host.status(), { state: 'not-owner', ownerPort: 4400, error: null, router: 'off' });
+  assert.deepEqual(host.status(), { state: 'not-owner', ownerPort: 4400, error: null, router: null });
   await assertUnavailable(host.admit(() => 1), { state: 'not-owner', status: 409, ownerPort: 4400 });
   assert.deepEqual(calls, ['acquire']);
   assert.deepEqual(host.notifications(), []);
@@ -171,6 +172,7 @@ test('actions are refused while initialising and admitted once ready', async () 
   const { host, supervisor } = makeHost({ calls, lock: fakeLock(calls, () => acquired.promise) });
   const init = host.init();
   assert.equal(host.status().state, 'initialising');
+  assert.equal(host.status().router, null);
   await assertUnavailable(host.admit(() => 1), { state: 'initialising', status: 503 });
   acquired.resolve({ owned: true });
   await init;
@@ -236,6 +238,92 @@ test('stop is bounded', async () => {
   await host.afterClose();
   assert.equal(calls.at(-1), 'release');
   assert.equal(host.status().state, 'stopped');
+});
+
+test('stop and afterClose share one deadline', async () => {
+  const calls = [];
+  const never = () => new Promise(() => {});
+  const supervisor = fakeSupervisor(calls, {
+    stop: () => { calls.push('stop'); return never(); },
+    drain: () => { calls.push('drain'); return never(); },
+  });
+  const { host, logged } = makeHost({ calls, supervisor, stopDeadlineMs: 400 });
+  await host.init();
+  calls.length = 0;
+  const started = Date.now();
+  await host.stop();
+  await host.afterClose();
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 700, `stop + afterClose took ${elapsed}ms, more than one deadline`);
+  assert.deepEqual(calls, ['stop', 'drain', 'dispose', 'release']);
+  assert.match(logged.join('\n'), /superagent drain did not settle/);
+  assert.equal(host.status().state, 'stopped');
+});
+
+test('a fast stop leaves the drain the rest of the deadline', async () => {
+  const calls = [];
+  const supervisor = fakeSupervisor(calls, {
+    drain: () => {
+      calls.push('drain');
+      return new Promise((resolve) => { setTimeout(() => { calls.push('drained'); resolve(); }, 50); });
+    },
+  });
+  const { host, logged } = makeHost({ calls, supervisor, stopDeadlineMs: 2000 });
+  await host.init();
+  await host.stop();
+  calls.length = 0;
+  await host.afterClose();
+  assert.deepEqual(calls, ['drain', 'drained', 'dispose', 'release']);
+  assert.deepEqual(logged, []);
+});
+
+test('afterClose without stop starts the deadline itself', async () => {
+  const calls = [];
+  const supervisor = fakeSupervisor(calls, { drain: () => { calls.push('drain'); return new Promise(() => {}); } });
+  const { host } = makeHost({ calls, supervisor, stopDeadlineMs: 50 });
+  await host.init();
+  calls.length = 0;
+  const started = Date.now();
+  await host.afterClose();
+  assert.ok(Date.now() - started < 1000, `afterClose took ${Date.now() - started}ms`);
+  assert.deepEqual(calls, ['drain', 'dispose', 'release']);
+});
+
+test('a supervisor that fails to start is stopped within the deadline, disposed and silenced', async () => {
+  const calls = [];
+  const stopGate = deferred();
+  const job = { jobId: 'j1', title: 'Add hello', state: 'needs-you', reason: 'ready-to-try', needsYouSeq: 1 };
+  const supervisor = fakeSupervisor(calls, {
+    start: async () => { calls.push('start'); throw new Error('start blew up'); },
+    stop: () => { calls.push('stop'); return stopGate.promise; },
+    listJobs: () => [job],
+  });
+  const { host } = makeHost({ calls, supervisor, stopDeadlineMs: 2000 });
+  const init = host.init();
+  await tick();
+  assert.equal(host.status().state, 'error');
+  assert.match(host.status().error, /start blew up/);
+  assert.deepEqual(host.notifications(), [], 'no bell entries for a host in error');
+  assert.equal(host.ownsSession('worker-1'), true, 'worker rows stay watch-only until the supervisor is disposed');
+  stopGate.resolve();
+  await init;
+  assert.deepEqual(calls.slice(-4), ['start', 'stop', 'dispose', 'release']);
+  assert.equal(host.ownsSession('worker-1'), false);
+});
+
+test('a failed start whose stop never settles still releases the lock', async () => {
+  const calls = [];
+  const supervisor = fakeSupervisor(calls, {
+    start: async () => { throw new Error('start blew up'); },
+    stop: () => { calls.push('stop'); return new Promise(() => {}); },
+  });
+  const { host, logged } = makeHost({ calls, supervisor, stopDeadlineMs: 50 });
+  const started = Date.now();
+  await host.init();
+  assert.ok(Date.now() - started < 1000, `init took ${Date.now() - started}ms`);
+  assert.deepEqual(calls.slice(-3), ['stop', 'dispose', 'release']);
+  assert.match(logged.join('\n'), /superagent stop did not settle within 50ms/);
+  assert.equal(host.status().state, 'error');
 });
 
 test('afterClose bounds a drain that never settles', async () => {

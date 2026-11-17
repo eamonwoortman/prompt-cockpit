@@ -55,10 +55,12 @@ export function createSuperagentHost({
   let state = 'off';
   let ownerPort = null;
   let error = null;
-  let routerOn = false;
+  let router = null;
   let lock = null;
   let supervisor = null;
+  let disposed = false;
   let stopRequested = false;
+  let shutdownDeadline = null;
   let initializing = null;
   let stopping = null;
   let closing = null;
@@ -70,13 +72,38 @@ export function createSuperagentHost({
     } catch { /* logging must never break shutdown */ }
   }
 
-  async function within(promise) {
+  async function within(promise, ms) {
     let timer;
-    const deadline = new Promise((resolve) => { timer = setTimeout(resolve, stopDeadlineMs, TIMED_OUT); });
+    const deadline = new Promise((resolve) => { timer = setTimeout(resolve, ms, TIMED_OUT); });
     try {
       return await Promise.race([promise, deadline]);
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  // stop() and afterClose() share one budget, started by whichever runs first.
+  function shutdownRemaining() {
+    shutdownDeadline ??= Date.now() + stopDeadlineMs;
+    return Math.max(0, shutdownDeadline - Date.now());
+  }
+
+  function stopSupervisor() {
+    let stopped;
+    try {
+      stopped = Promise.resolve(supervisor.stop());
+    } catch (err) {
+      stopped = Promise.reject(err);
+    }
+    return stopped.catch((err) => log(`superagent stop failed: ${messageOf(err)}`));
+  }
+
+  function disposeSupervisor() {
+    disposed = true;
+    try {
+      supervisor.dispose();
+    } catch (err) {
+      log(`superagent dispose failed: ${messageOf(err)}`);
     }
   }
 
@@ -108,10 +135,10 @@ export function createSuperagentHost({
       await config.load();
       if (stopRequested) return;
       const store = storeFactory();
-      const router = await routerFactory();
+      const chosen = await routerFactory();
       if (stopRequested) return;
-      routerOn = router != null;
-      supervisor = superagentFactory({ registry, store, config, router });
+      router = chosen != null ? 'on' : 'off';
+      supervisor = superagentFactory({ registry, store, config, router: chosen });
       if (stopRequested) return;
       await supervisor.start();
       if (stopRequested) return;
@@ -124,7 +151,12 @@ export function createSuperagentHost({
       state = 'error';
       error = messageOf(err);
       log(`superagent init failed: ${error}`);
-      if (supervisor) await Promise.resolve().then(() => supervisor.stop()).catch((e) => log(`superagent stop failed: ${messageOf(e)}`));
+      if (supervisor) {
+        if (await within(stopSupervisor(), stopDeadlineMs) === TIMED_OUT) {
+          log(`superagent stop did not settle within ${stopDeadlineMs}ms - releasing the lock anyway`);
+        }
+        disposeSupervisor();
+      }
       await lock?.release();
     }
   }
@@ -148,17 +180,10 @@ export function createSuperagentHost({
   }
 
   async function settleStop() {
-    let supervisorStopped = null;
-    if (supervisor) {
-      try {
-        supervisorStopped = Promise.resolve(supervisor.stop());
-      } catch (err) {
-        supervisorStopped = Promise.reject(err);
-      }
-      supervisorStopped = supervisorStopped.catch((err) => log(`superagent stop failed: ${messageOf(err)}`));
-    }
+    const budget = shutdownRemaining();
+    const supervisorStopped = supervisor && !disposed ? stopSupervisor() : null;
     const settled = Promise.allSettled([...admitted, supervisorStopped]);
-    if (await within(settled) === TIMED_OUT) {
+    if (await within(settled, budget) === TIMED_OUT) {
       log(`superagent stop did not settle within ${stopDeadlineMs}ms - closing sessions anyway`);
     }
   }
@@ -175,18 +200,14 @@ export function createSuperagentHost({
   async function close() {
     stopRequested = true;
     if (state !== 'stopped') state = 'stopping';
-    if (initializing && await within(initializing) === TIMED_OUT) {
+    if (initializing && await within(initializing, shutdownRemaining()) === TIMED_OUT) {
       log(`superagent init did not settle within ${stopDeadlineMs}ms - releasing the lock anyway`);
     }
-    if (supervisor) {
+    if (supervisor && !disposed) {
       const drained = Promise.resolve().then(() => supervisor.drain())
         .catch((err) => log(`superagent drain failed: ${messageOf(err)}`));
-      if (await within(drained) === TIMED_OUT) log(`superagent drain did not settle within ${stopDeadlineMs}ms`);
-      try {
-        supervisor.dispose();
-      } catch (err) {
-        log(`superagent dispose failed: ${messageOf(err)}`);
-      }
+      if (await within(drained, shutdownRemaining()) === TIMED_OUT) log(`superagent drain did not settle within ${stopDeadlineMs}ms`);
+      disposeSupervisor();
     }
     await lock?.release();
     state = 'stopped';
@@ -198,13 +219,13 @@ export function createSuperagentHost({
   }
 
   return {
-    status: () => ({ state, ownerPort, error, router: routerOn ? 'on' : 'off' }),
+    status: () => ({ state, ownerPort, error, router }),
     init,
     stop,
     afterClose,
     admit,
     read,
-    ownsSession: (id) => (supervisor ? supervisor.ownsSession(id) : false),
-    notifications: () => (supervisor ? superagentNotifications(supervisor.listJobs()) : []),
+    ownsSession: (id) => (supervisor && !disposed ? supervisor.ownsSession(id) : false),
+    notifications: () => (supervisor && state !== 'error' ? superagentNotifications(supervisor.listJobs()) : []),
   };
 }
