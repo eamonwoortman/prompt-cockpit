@@ -25,7 +25,7 @@ export function formatSubscriptionLimits(rateLimits) {
   return parts;
 }
 
-export function initSubscriptionLimits({ selectEl, getProvider, shouldRefresh = () => true, fetchImpl = (...args) => fetch(...args), setIntervalImpl = setInterval, clearIntervalImpl = clearInterval }) {
+export function initSubscriptionLimits({ selectEl, getProvider, optionValue = (provider, account) => account.id, optionLabel = (provider, account) => account.label, shouldRefresh = () => true, fetchImpl = (...args) => fetch(...args), setIntervalImpl = setInterval, clearIntervalImpl = clearInterval }) {
   const refreshMs = 60_000;
   const cached = new Map();
   let generation = 0;
@@ -69,10 +69,10 @@ export function initSubscriptionLimits({ selectEl, getProvider, shouldRefresh = 
     await Promise.all(accounts.map(async (account) => {
       const rateLimits = await load(provider, account);
       if (gen !== generation) return;
-      const option = Array.from(selectEl.options).find((option) => option.value === account.id);
+      const option = Array.from(selectEl.options).find((option) => option.value === optionValue(provider, account));
       if (!option) return;
       const parts = formatSubscriptionLimits(rateLimits);
-      option.textContent = `${account.label}${parts.length ? ` - ${parts.map((part) => part.text).join(', ')}` : ''}`;
+      option.textContent = `${optionLabel(provider, account)}${parts.length ? ` - ${parts.map((part) => part.text).join(', ')}` : ''}`;
       option.title = [account.configDir, ...parts.map((part) => part.title)].filter(Boolean).join('\n');
     }));
   }

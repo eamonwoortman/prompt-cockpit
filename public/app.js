@@ -47,15 +47,11 @@ const stateIconEl = document.getElementById('stateIcon');
 const cwdInput = document.getElementById('cwdInput');
 const startNameInput = document.getElementById('startNameInput');
 
-const startProviderSelect = document.getElementById('startProviderSelect');
-const startSubscriptionControl = document.getElementById('startSubscriptionControl');
-const startSubscriptionSelect = document.getElementById('startSubscriptionSelect');
+// One dropdown for the agent and its account: option values are
+// `<providerId>:<accountId>` (see targetValue/splitTarget below).
+const startTargetSelect = document.getElementById('startTargetSelect');
 const startSubscriptionError = document.getElementById('startSubscriptionError');
-const subscriptionLimits = initSubscriptionLimits({
-  selectEl: startSubscriptionSelect,
-  getProvider: () => providerCatalog.get(selectedProvider()),
-  shouldRefresh: () => document.body.dataset.screen === 'launcher' && !document.hidden,
-});
+const targetLimits = new Map(); // providerId -> initSubscriptionLimits instance
 const startModelSelect = document.getElementById('startModelSelect');
 const startEffortSelect = document.getElementById('startEffortSelect');
 const startClaudeEffortSelect = document.getElementById('startClaudeEffortSelect');
@@ -1259,7 +1255,7 @@ function returnToLauncher() {
   const settingsModal = document.getElementById('settingsModal');
   if (settingsModal.open) settingsModal.close();
   loadResumable();
-  subscriptionLimits.refresh();
+  refreshTargetLimits();
 }
 
 // Best guess at the terminal's own per-mode colors, matched to this app's
@@ -1892,38 +1888,78 @@ function formatRelativeTime(ms) {
   return new Date(ms).toLocaleDateString();
 }
 
+function targetValue(providerId, accountId) {
+  return `${providerId}:${accountId || ''}`;
+}
+
+function splitTarget(value) {
+  const text = String(value || '');
+  const at = text.indexOf(':');
+  return at < 0 ? [text, ''] : [text.slice(0, at), text.slice(at + 1)];
+}
+
 function selectedProvider() {
-  return providerCatalog.validate(startProviderSelect.value);
+  return providerCatalog.validate(splitTarget(startTargetSelect.value)[0]);
 }
 
 function selectedSubscription() {
   return launchConfig(selectedProvider()).subscriptions?.length
-    ? startSubscriptionSelect.value || undefined : undefined;
+    ? splitTarget(startTargetSelect.value)[1] || undefined : undefined;
 }
 
-function fillStartSubscriptions() {
-  const provider = selectedProvider();
-  const launch = launchConfig(provider);
-  const subscriptions = launch.subscriptions || (launch.accountLimits ? [{ id: '', label: providerCatalog.label(provider) }] : []);
-  const previous = startSubscriptionSelect.value;
+// A provider with several accounts lists each as "Provider - Account"; one
+// with a single account (or none) is just its own name.
+function targetAccounts(provider) {
+  const subscriptions = launchConfig(provider).subscriptions;
+  return subscriptions?.length ? subscriptions : [{ id: '', label: providerCatalog.label(provider) }];
+}
+
+function targetLabel(provider, account) {
+  const subscriptions = launchConfig(provider.id).subscriptions;
+  return subscriptions?.length > 1 ? `${providerCatalog.label(provider.id)} - ${account.label}` : providerCatalog.label(provider.id);
+}
+
+function fillStartTargets() {
+  const previous = startTargetSelect.value;
   let remembered;
-  try { remembered = localStorage.getItem('cockpit:claudeSubscription'); } catch { /* storage unavailable */ }
-  startSubscriptionSelect.innerHTML = '';
-  for (const account of subscriptions) {
-    const option = document.createElement('option');
-    option.value = account.id;
-    option.textContent = account.label;
-    option.title = account.configDir;
-    startSubscriptionSelect.append(option);
+  try { remembered = localStorage.getItem('cockpit:startTarget'); } catch { /* storage unavailable */ }
+  startTargetSelect.innerHTML = '';
+  for (const provider of providerCatalog.list()) {
+    for (const account of targetAccounts(provider.id)) {
+      const option = document.createElement('option');
+      option.value = targetValue(provider.id, account.id);
+      option.textContent = targetLabel(provider, account);
+      option.title = account.configDir || '';
+      startTargetSelect.append(option);
+    }
   }
-  const selected = subscriptions.find((account) => account.id === (previous || remembered)) || subscriptions[0];
-  if (selected) startSubscriptionSelect.value = selected.id;
+  const values = Array.from(startTargetSelect.options, (option) => option.value);
+  const selected = [previous, remembered].find((value) => values.includes(value)) || values[0];
+  if (selected) startTargetSelect.value = selected;
+  startTargetSelect.hidden = values.length <= 1;
   // A broken accounts file leaves only Default; say so rather than letting
   // a remembered account silently turn into Default.
   const error = launchConfig(selectedProvider()).subscriptionsError;
   startSubscriptionError.hidden = !error;
   startSubscriptionError.textContent = error ? `Account config error - only Default available: ${error}` : '';
-  startSubscriptionControl.hidden = subscriptions.length <= 1 && !error && !launch.accountLimits;
+}
+
+// One limits poller per provider that reports account usage; each rewrites
+// its own options' labels in the shared dropdown.
+function refreshTargetLimits() {
+  for (const provider of providerCatalog.list()) {
+    if (!launchConfig(provider.id).accountLimits) continue;
+    if (!targetLimits.has(provider.id)) {
+      targetLimits.set(provider.id, initSubscriptionLimits({
+        selectEl: startTargetSelect,
+        getProvider: () => providerCatalog.get(provider.id),
+        optionValue: (owner, account) => targetValue(owner.id, account.id),
+        optionLabel: targetLabel,
+        shouldRefresh: () => document.body.dataset.screen === 'launcher' && !document.hidden,
+      }));
+    }
+    targetLimits.get(provider.id).refresh();
+  }
 }
 
 let resumableGen = 0;
@@ -2145,16 +2181,11 @@ function fillStartEffort() {
   }
 }
 
-startProviderSelect.addEventListener('change', () => {
-  fillStartSubscriptions();
-  subscriptionLimits.refresh();
+startTargetSelect.addEventListener('change', () => {
+  try { localStorage.setItem('cockpit:startTarget', startTargetSelect.value); } catch { /* storage unavailable */ }
+  refreshTargetLimits();
   fillStartModels();
   fillStartEffort();
-  loadResumable();
-});
-startSubscriptionSelect.addEventListener('change', () => {
-  try { localStorage.setItem('cockpit:claudeSubscription', startSubscriptionSelect.value); } catch { /* storage unavailable */ }
-  fillStartModels();
   loadResumable();
 });
 startModelSelect.addEventListener('change', fillStartEffort);
@@ -2179,18 +2210,8 @@ async function applyAvailableProviders() {
     const providers = catalog.list();
     if (!providers.length) return;
     providerCatalog = catalog;
-    const selected = providerCatalog.validate(startProviderSelect.value) || providers[0].id;
-    startProviderSelect.innerHTML = '';
-    for (const provider of providers) {
-      const option = document.createElement('option');
-      option.value = provider.id;
-      option.textContent = provider.label;
-      startProviderSelect.append(option);
-    }
-    startProviderSelect.value = selected;
-    startProviderSelect.hidden = providers.length <= 1;
-    fillStartSubscriptions();
-    if (document.body.dataset.screen === 'launcher') subscriptionLimits.refresh();
+    fillStartTargets();
+    if (document.body.dataset.screen === 'launcher') refreshTargetLimits();
     fillStartModels();
     fillStartEffort();
     loadResumable();

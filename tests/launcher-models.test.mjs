@@ -6,7 +6,7 @@ import { supportedEffortsForModel } from '../public/provider-catalog.js';
 
 const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const sourceStart = app.indexOf('let startModelsRequest =');
-const source = app.slice(sourceStart, app.indexOf('startProviderSelect.addEventListener', sourceStart));
+const source = app.slice(sourceStart, app.indexOf('startTargetSelect.addEventListener', sourceStart));
 const settingsSourceStart = app.indexOf('function dynamicModelCatalog');
 const settingsSource = app.slice(settingsSourceStart, app.indexOf('async function selectEffort', settingsSourceStart));
 function selectStub() {

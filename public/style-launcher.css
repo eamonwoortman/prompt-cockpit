@@ -5,10 +5,7 @@
     padding: 0 16px;
   }
   #launcher h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 24px 0 8px; }
-  #startSubscriptionControl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
-  #startSubscriptionSelect { flex: 1; min-width: 0; padding: 8px; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 6px; font-size: 12px; }
-  #startSubscriptionControl .subscription-error { color: var(--danger, #c0392b); font-size: 12px; margin-left: 8px; }
-  #startSubscriptionControl label { color: var(--muted); font-size: 13px; margin-right: 4px; }
+  #launcherForm .subscription-error { color: var(--danger, #c0392b); font-size: 12px; margin-left: 8px; }
   #launcher .cwd-row { display: flex; align-items: center; gap: 8px; }
   #launcher input[type=text] {
     flex: 1;
@@ -36,7 +33,7 @@
   #browseBtn, #startBtn { width: 96px; text-align: center; padding: 8px 14px; font-size: 14px; }
   #startBtn { margin-top: 8px; }
   #launcher .start-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 6px; }
-  #startProviderSelect {
+  #startTargetSelect {
     width: 100%;
     margin: 0 0 16px;
     padding: 10px 12px;

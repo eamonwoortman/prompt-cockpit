@@ -46,16 +46,11 @@
 
   <div id="launcher" class="launcher-chrome">
     <form id="launcherForm">
-      <label class="visually-hidden" for="startProviderSelect">Provider</label>
-      <select id="startProviderSelect" title="Which coding agent to use">
-        <option value="claude">Claude</option>
-        <option value="grok">Grok</option>
+      <label class="visually-hidden" for="startTargetSelect">Agent and account</label>
+      <select id="startTargetSelect" title="Which coding agent and account to use for this session">
+        <option value="claude:">Claude</option>
       </select>
-      <span id="startSubscriptionControl" hidden>
-        <label for="startSubscriptionSelect">Subscription</label>
-        <select id="startSubscriptionSelect" title="Account and subscription usage for this session"></select>
-        <span id="startSubscriptionError" class="subscription-error" role="alert" hidden></span>
-      </span>
+      <span id="startSubscriptionError" class="subscription-error" role="alert" hidden></span>
       <h2>Start a session</h2>
       <div class="cwd-row">
         <label class="visually-hidden" for="cwdInput">Project folder</label>

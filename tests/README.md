@@ -18,7 +18,8 @@ transcripts in two config directories, including duplicate session IDs
 and concurrent reads. It also covers subagent lookup and earlier-history
 account propagation. Registry tests check that reset preserves Gmail;
 model tests check per-account discovery caching. `launcher-subscriptions.test.mjs`
-exercises the hidden selector for a sole default account, remembered selection,
+exercises the single agent-and-account dropdown (provider:account values,
+hidden with one choice, remembered target, fallback for an obsolete one),
 provider switching, and stale model responses
 with a DOM stub. Server route tests reject unknown or unsupported selections.
 These tests do not launch Claude or use either account's credentials.

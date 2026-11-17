@@ -124,3 +124,18 @@ test('polling skips hidden/session screens and retains the last quota when refre
   ui.panel.destroy();
   assert.equal(ui.cleared.length, 1);
 });
+
+test('a shared dropdown can key options by provider and label them its own way', async () => {
+  const provider = { id: 'claude', label: 'Claude', launch: { accountLimits: true, subscriptions: [{ id: 'default', label: 'Default' }] } };
+  const selectEl = { options: [{ value: 'codex:', textContent: 'Codex' }, { value: 'claude:default', textContent: 'Claude' }] };
+  const panel = initSubscriptionLimits({
+    selectEl, getProvider: () => provider,
+    optionValue: (owner, account) => `${owner.id}:${account.id}`,
+    optionLabel: (owner) => owner.label,
+    fetchImpl: async () => response({ five_hour: { utilization: 10 } }),
+    setIntervalImpl: () => ({}), clearIntervalImpl() {},
+  });
+  await panel.refresh();
+  assert.equal(selectEl.options[0].textContent, 'Codex');
+  assert.equal(selectEl.options[1].textContent, 'Claude - 10% 5h');
+});
