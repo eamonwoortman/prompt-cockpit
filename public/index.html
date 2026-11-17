@@ -35,7 +35,8 @@
     <button type="button" id="sessionCountBtn" class="btn" title="All sessions on this server">… sessions</button>
     <button type="button" id="newSessionTabBtn" class="btn" title="Open a new tab to start another session">+ New tab</button>
     <button type="button" id="autopilotBtn" class="btn" title="Auto-pilot: scheduled unattended sessions">🛫 Auto-pilot</button>
-    <button type="button" id="notificationsBtn" class="btn" title="Auto-pilot notifications needing your attention" hidden>🔔</button>
+    <button type="button" id="superagentBtn" class="btn" title="Open the Superagent view in its own tab">Superagent</button>
+    <button type="button" id="notificationsBtn" class="btn" title="Notifications" hidden>🔔</button>
     <button type="button" id="settingsBtn" class="btn session-chrome" title="Settings" aria-label="Settings">⚙</button>
   </header>
   <form id="operatorGate" hidden>
@@ -44,6 +45,7 @@
     <input id="operatorTokenInput" type="password" autocomplete="off" spellcheck="false" />
     <button type="submit" id="operatorTokenSave" class="btn btn-primary">Save</button>
   </form>
+  <div id="watchOnlyBanner" class="session-chrome" hidden>Superagent worker — watch only</div>
 
   <div id="launcher" class="launcher-chrome">
     <form id="launcherForm">
@@ -551,7 +553,7 @@
 
   <!-- Prism.js (MIT, vendor/prism/LICENSE), self-hosted - classic non-module
        scripts so Prism.languages.* is a plain global by the time app.js
-       (type=module, deferred by default) runs. Load order matters: each
+       (imported by entry.js, type=module, deferred by default) runs. Load order matters: each
        language after core/markup/css/clike extends an earlier one. -->
   <script src="/vendor/prism/prism-core.js"></script>
   <script src="/vendor/prism/prism-markup.js"></script>
@@ -574,6 +576,6 @@
   <script src="/vendor/prism/prism-yaml.js"></script>
   <script src="/vendor/prism/prism-markdown.js"></script>
 
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/entry.js"></script>
 </body>
 </html>

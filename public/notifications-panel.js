@@ -1,18 +1,62 @@
-// The notifications bell. Two entry kinds, both DERIVED server-side from live
-// state (src/autopilot.js's notifications()): a pilot run blocked on a
-// question a human has to answer, and a pilot auto-disabled after repeated
-// failures. Nothing is stored and nothing is marked read - an entry vanishes
-// when the state it was computed from is gone.
+// The notifications bell. Every entry is DERIVED server-side from live state
+// (GET /api/notifications merges src/autopilot.js's notifications() with
+// src/superagent/notifications.js's): a pilot run blocked on a question a
+// human has to answer, a pilot auto-disabled after repeated failures, and a
+// superagent job that needs you (question, ready to try, stuck). Nothing is
+// stored and nothing is marked read - an entry vanishes when the state it was
+// computed from is gone.
 //
 // A POLL, not a socket: each tab's WebSocket is scoped to the one session it
 // is attached to, and a pilot's session is by definition one it is NOT
 // attached to. Same 10s cadence as the "All sessions" pane
 // (public/session-list-pane.js:211-218).
-const POLL_MS = 10_000;
+import { claimNotifications } from '/notify-dedupe.js';
 
-export function initNotificationsPanel({ button, panel, headerEl, onOpenPilots }) {
+const POLL_MS = 10_000;
+const SUPERAGENT_TAB = 'cockpit-superagent';
+
+// One named tab for the Superagent view: a second click, or a browser
+// notification, re-targets that tab instead of stacking new ones.
+export function openSuperagentView(jobId) {
+  const url = jobId ? `/?view=superagent&job=${encodeURIComponent(jobId)}` : '/?view=superagent';
+  window.open(url, SUPERAGENT_TAB);
+}
+
+// Called from the Superagent view's own control, on a click; the poll below
+// never asks, it only shows once permission is granted.
+export async function requestBrowserNotifications() {
+  if (typeof Notification === 'undefined') return 'unsupported';
+  return Notification.requestPermission();
+}
+
+// Every open tab polls, so which tab shows a given entry is decided by
+// claimNotifications (src/notify-dedupe.js) under a Web Lock; `tag` makes a
+// duplicate replace rather than stack if the lock is unavailable.
+async function showBrowserNotifications(superagentEntries, firstPoll) {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  let fresh;
+  try {
+    fresh = await claimNotifications({ entries: superagentEntries, firstPoll, storage: localStorage, locks: navigator.locks });
+  } catch {
+    return;
+  }
+  for (const entry of fresh) {
+    try {
+      const notification = new Notification(entry.message, { tag: entry.key });
+      notification.onclick = () => {
+        openSuperagentView(entry.jobId);
+        notification.close();
+      };
+    } catch {
+      // Some browsers (Android Chrome) refuse the constructor outright.
+    }
+  }
+}
+
+export function initNotificationsPanel({ button, panel, headerEl, onOpenPilots, superagentButton }) {
   let open = false;
   let entries = [];
+  let polled = false;
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -20,6 +64,9 @@ export function initNotificationsPanel({ button, panel, headerEl, onOpenPilots }
     if (text != null) node.textContent = text;
     return node;
   }
+
+  const superagentBadge = superagentButton ? superagentButton.appendChild(el('span', 'superagent-badge')) : null;
+  if (superagentBadge) superagentBadge.hidden = true;
 
   // Opens a NEW tab attached to a pilot's running session. The token stays out
   // of the URL: `?session=<id>&token=<t>` would put a credential somewhere it
@@ -56,6 +103,13 @@ export function initNotificationsPanel({ button, panel, headerEl, onOpenPilots }
           onOpenPilots?.();
           closePanel();
         });
+      } else if (entry.kind === 'superagent') {
+        row.classList.add('clickable');
+        row.append(el('div', 'notification-hint', 'Click to open this job in the Superagent tab.'));
+        row.addEventListener('click', () => {
+          openSuperagentView(entry.jobId);
+          closePanel();
+        });
       }
       panel.append(row);
     }
@@ -66,8 +120,13 @@ export function initNotificationsPanel({ button, panel, headerEl, onOpenPilots }
     button.classList.toggle('has-entries', entries.length > 0);
     button.textContent = entries.length ? `🔔 ${entries.length}` : '🔔';
     button.title = entries.length
-      ? `${entries.length} auto-pilot item${entries.length === 1 ? '' : 's'} needs your attention`
-      : 'Auto-pilot notifications';
+      ? `${entries.length} item${entries.length === 1 ? ' needs' : 's need'} your attention`
+      : 'Notifications';
+    if (superagentBadge) {
+      const count = entries.filter((entry) => entry.kind === 'superagent').length;
+      superagentBadge.hidden = count === 0;
+      superagentBadge.textContent = String(count);
+    }
   }
 
   async function refresh() {
@@ -78,8 +137,11 @@ export function initNotificationsPanel({ button, panel, headerEl, onOpenPilots }
     } catch {
       return; // best-effort; keep showing the last-known list
     }
+    const firstPoll = !polled;
+    polled = true;
     applyBadge();
     if (open) render();
+    showBrowserNotifications(entries.filter((entry) => entry.kind === 'superagent'), firstPoll);
   }
 
   function openPanel() {

@@ -25,7 +25,7 @@ import { initDetailPane } from '/detail-pane.js';
 import { initSessionListPane } from '/session-list-pane.js';
 import { initAutopilotPanel } from '/autopilot-panel.js';
 import { initAutopilotForm } from '/autopilot-form.js';
-import { initNotificationsPanel } from '/notifications-panel.js';
+import { initNotificationsPanel, openSuperagentView } from '/notifications-panel.js';
 import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
@@ -217,10 +217,14 @@ const autopilotForm = initAutopilotForm({
   },
 });
 
+const superagentBtn = document.getElementById('superagentBtn');
+superagentBtn.addEventListener('click', () => openSuperagentView());
+
 initNotificationsPanel({
   button: document.getElementById('notificationsBtn'),
   panel: document.getElementById('notificationsPanel'),
   headerEl: document.querySelector('.app-header'),
+  superagentButton: superagentBtn,
   // Not `autopilotBtn.click()`: that toggles, so it would CLOSE the pane
   // whenever it was already open. Open explicitly and force the Pilots tab,
   // since an operator sitting on Logs would otherwise see no pilot list.
@@ -1247,6 +1251,7 @@ function returnToLauncher() {
   setState('idle'); // stops the spinner interval too (stopSpinner), so hiding activityBar below doesn't leave a dead interval running behind it
   tabChrome.setNeedsAttention(false);
   statsPanel.reset();
+  setWatchOnly(false);
   document.body.dataset.screen = 'launcher';
   autoContinueLabel.hidden = true;
   rateLimitBanner.hidden = true;
@@ -1491,6 +1496,7 @@ function showThinkingError(message) {
   thinkingErrorEl.hidden = false;
 }
 document.addEventListener('keydown', (event) => {
+  if (document.body.classList.contains('watch-only')) return; // both shortcuts POST to the session
   if (event.key === 'Tab' && event.shiftKey && sessionId) {
     event.preventDefault();
     cycleMode();
@@ -2429,6 +2435,10 @@ function connect(id, token, { reconnect = false } = {}) {
         settings.setDetailPaneEnabled(true);
       }
       detailPane.setTasks(payload.tasks);
+    } else if (payload.type === 'cockpit:watch-only') {
+      // Normally already set from the summary at rejoin; this covers a tab
+      // that reached a superagent worker some other way.
+      setWatchOnly(true);
     } else if (payload.type === 'cockpit:error') {
       renderMessage(streamEl, { type: 'result', subtype: 'error', error: payload.error });
     }
@@ -2692,6 +2702,14 @@ function computePromptSuggestion() {
   return match ? match[1].trim() : null;
 }
 
+// A superagent worker is watched, never driven: the server refuses its input
+// and POSTs (ERR_WATCH_ONLY), and body.watch-only (style-autopilot.css) hides
+// the controls that would only earn that refusal.
+function setWatchOnly(on) {
+  document.body.classList.toggle('watch-only', on);
+  document.getElementById('watchOnlyBanner').hidden = !on;
+}
+
 // Reconnect-on-reload: if this browser tab already had a live
 // session open, rejoin it instead of showing the launcher. `GET
 // /api/sessions/:id` confirms it is still live before attempting the
@@ -2705,6 +2723,8 @@ async function rejoinActiveSession() {
       clearActiveSession();
       return false;
     }
+    const summary = await res.json().catch(() => ({}));
+    setWatchOnly(summary.watchOnly === true);
     connect(saved.id, saved.token);
     return true;
   } catch {

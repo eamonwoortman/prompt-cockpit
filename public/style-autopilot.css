@@ -1,4 +1,5 @@
-/* Auto-pilot pane, form modal and notifications bell.
+/* Auto-pilot pane, form modal, notifications bell, the Superagent button's
+   badge and the watch-only mode of a superagent worker's tab.
    LOADED LAST in index.html's ordered stylesheet list, deliberately: the CSS
    split is cascade-ordered, so a later file's rule wins an equal-specificity
    tie against an earlier one. These rules extend .detail-pane / .btn from
@@ -104,6 +105,44 @@
 .notification-row.clickable:hover { background: var(--hover-bg, #232323); }
 .notification-message { font-size: 0.88em; }
 .notification-hint { font-size: 0.76em; opacity: 0.6; }
+
+/* --- Superagent button badge (count of superagent bell entries) --- */
+
+.superagent-badge {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 1.4em;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--error);
+  color: #fff;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* --- superagent worker tab: watch only (app.js's setWatchOnly) --- */
+
+#watchOnlyBanner {
+  padding: 6px 16px;
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-border);
+  font-size: 13px;
+}
+body.watch-only #compose,
+body.watch-only #queueList .btn,
+body.watch-only #approvalDecisionRow,
+body.watch-only #planReviewControls,
+body.watch-only #questionForm,
+body.watch-only .msg-action,
+body.watch-only #stopBtn,
+body.watch-only #pendingTurnsBadge,
+body.watch-only #compactBtn,
+body.watch-only #autoContinueLabel,
+body.watch-only #resetSessionBtn,
+body.watch-only #closeSessionBtn,
+body.watch-only #thinkingControlsGroup,
+body.watch-only #effortControlsGroup { display: none !important; }
+body.watch-only #sessionLabel { pointer-events: none; } /* click renames the session */
 
 /* --- create/edit form modal --- */
 
