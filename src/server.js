@@ -34,6 +34,7 @@ import { registerNotificationRoutes } from './routes/notifications.js';
 import { registerSuperagentRoutes } from './routes/superagent.js';
 import { createSuperagentHost } from './superagent-host.js';
 import { wireSuperagent } from './superagent-wiring.js';
+import { handleClientMessage } from './ws-input.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
@@ -60,18 +61,22 @@ const isPilotOwned = (sessionId) => autopilot.status().some((run) => run.session
 // Constructed `off`, with no side effects; wireSuperagent's init() in the
 // listen callback is what takes the lock and starts the supervisor.
 const superagentHost = createSuperagentHost({ registry, port: PORT });
+// Either supervisor's sessions can be attached to from the bell; only the
+// superagent's are watch only (a pilot's keep their current behaviour).
+const isSupervisorOwned = (sessionId) => isPilotOwned(sessionId) || superagentHost.ownsSession(sessionId);
+const isWatchOnly = (sessionId) => superagentHost.ownsSession(sessionId);
 
 const router = createRouter();
 // ORDER MATTERS: registerSessionRoutes must come before
 // registerSessionActionRoutes, whose any('/api/sessions/:id/:action')
 // catch-all would otherwise swallow GET /api/sessions/:id/attach-token.
-registerSessionRoutes(router, { isPilotOwned });
+registerSessionRoutes(router, { isSupervisorOwned, isWatchOnly });
 registerHistoryRoutes(router);
 registerSystemRoutes(router);
 registerAutopilotRoutes(router, { store: autopilotStore, log: autopilotLog, supervisor: autopilot, registry });
 registerSuperagentRoutes(router, { host: superagentHost, registry });
 registerNotificationRoutes(router, { autopilot, host: superagentHost });
-registerSessionActionRoutes(router);
+registerSessionActionRoutes(router, { isWatchOnly });
 
 const server = createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
@@ -184,43 +189,7 @@ wss.on('connection', (ws, req, id, since) => {
     } catch {
       return;
     }
-    if (payload.type === 'input' && typeof payload.text === 'string' && payload.text.length > 0) {
-      registry.sendInput(id, payload.text).catch((err) => {
-        console.error(`sendInput failed for ${id}:`, err);
-      });
-    }
-    // Queue pane mutations - same ws channel as 'input' rather
-    // than a REST round trip: these are live edits to messages already sent
-    // down this same socket, so there's no meaningful "queue-remove before
-    // the socket that queued it is even open" case to support.
-    if (payload.type === 'queue-remove' && typeof payload.queueId === 'string') {
-      registry.removeQueued(id, payload.queueId).catch((err) => {
-        console.error(`removeQueued failed for ${id}:`, err);
-      });
-    }
-    if (payload.type === 'queue-reorder' && Array.isArray(payload.queueIds)) {
-      registry.reorderQueue(id, payload.queueIds).catch((err) => {
-        console.error(`reorderQueue failed for ${id}:`, err);
-      });
-    }
-    if (payload.type === 'queue-send-now' && typeof payload.queueId === 'string') {
-      registry.sendNow(id, payload.queueId).catch((err) => {
-        console.error(`sendNow failed for ${id}:`, err);
-      });
-    }
-    // Cross-session delegation - `/ask <Name>: <text>`
-    // parsed client-side (app.js's onSend) into this payload shape. Errors
-    // (unknown name, self-delegation, cross-cwd) are synchronous throws
-    // from delegateTask - sent straight back on THIS socket (the origin's
-    // own), not broadcast, since only the tab that typed the bad command
-    // needs to see it.
-    if (payload.type === 'delegate' && typeof payload.targetName === 'string' && typeof payload.text === 'string' && payload.text.length > 0) {
-      try {
-        registry.delegateTask(id, payload.targetName, payload.text);
-      } catch (err) {
-        ws.send(JSON.stringify({ type: 'cockpit:delegate-error', targetName: payload.targetName, error: String(err.message || err) }));
-      }
-    }
+    handleClientMessage({ id, payload, ws, registry, isWatchOnly });
   });
 
   ws.on('close', () => {

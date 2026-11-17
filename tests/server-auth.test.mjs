@@ -285,6 +285,21 @@ test('GET /api/sessions/:id/attach-token returns the token for a pilot-owned ses
   }
 });
 
+test('attach-token reports watchOnly false for a pilot session', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  autopilot._runs.set('fake-pilot-attach-watch-only', {
+    pilotId: 'fake-pilot-attach-watch-only', sessionId: row.id, startedAt: Date.now(), sawResult: false, blockedLogged: false,
+  });
+  try {
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/attach-token`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { id: row.id, token: row.token, watchOnly: false });
+  } finally {
+    autopilot._runs.delete('fake-pilot-attach-watch-only');
+  }
+});
+
 test('GET /api/sessions/:id/attach-token refuses a hand-driven session that is not pilot-owned', async () => {
   registry._reset();
   const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });

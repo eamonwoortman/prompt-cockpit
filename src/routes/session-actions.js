@@ -14,10 +14,12 @@ import { readGitGuardMode, setGitGuardMode, GIT_GUARD_MODES } from '../git-commi
 import { setSessionDefaults } from '../session-defaults.js';
 import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
-import { seedSessionDefaults } from './sessions.js';
+import { seedSessionDefaults, WATCH_ONLY_REFUSAL } from './sessions.js';
 import { getProvider } from '../provider-registry.js';
 
-export function registerSessionActionRoutes(router) {
+// `isWatchOnly(sessionId) => boolean` is supplied by server.js from the
+// superagent host; absent, nothing is watch only.
+export function registerSessionActionRoutes(router, { isWatchOnly = () => false } = {}) {
   router.any('/api/sessions/:id/:action', async (req, res, url, { id, action }) => {
     const row = registry.get(id);
     if (!row) return respondJson(res, 404, { error: `unknown session: ${id}` });
@@ -27,6 +29,12 @@ export function registerSessionActionRoutes(router) {
     // never actually a secret check) used to be enough to hit any of these.
     if (!registry.checkToken(id, extractToken(req, url))) {
       return respondJson(res, 401, { error: 'invalid or missing session token' });
+    }
+
+    // Any method but GET on a superagent worker is refused, so an action added
+    // here later is covered without being listed.
+    if (req.method !== 'GET' && isWatchOnly(id)) {
+      return respondJson(res, 403, WATCH_ONLY_REFUSAL);
     }
 
     if (action === 'mode' && req.method === 'POST') {

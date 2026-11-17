@@ -36,10 +36,16 @@ export async function seedSessionDefaults(row, defaults) {
   }
 }
 
-// `isPilotOwned(sessionId) => boolean` is supplied by server.js from the
-// auto-pilot supervisor. Optional so the route module stays importable (and
-// testable) without a supervisor; absent, attach-token refuses everything.
-export function registerSessionRoutes(router, { isPilotOwned } = {}) {
+// The 403 body for any change to a superagent worker's session; shared with
+// session-actions.js's gate.
+export const WATCH_ONLY_REFUSAL = Object.freeze({ error: 'superagent worker sessions are watch only', code: 'ERR_WATCH_ONLY' });
+
+// `isSupervisorOwned(sessionId) => boolean` (auto-pilot or superagent) and
+// `isWatchOnly(sessionId) => boolean` (superagent worker) are supplied by
+// server.js. Optional so the route module stays importable (and testable)
+// without a supervisor; absent, attach-token refuses everything and nothing
+// is watch only.
+export function registerSessionRoutes(router, { isSupervisorOwned, isWatchOnly = () => false } = {}) {
   router.get('/api/resumable', async (req, res, url) => {
     let provider;
     try {
@@ -164,7 +170,7 @@ export function registerSessionRoutes(router, { isPilotOwned } = {}) {
     if (!registry.checkToken(id, extractToken(req, url))) {
       return respondJson(res, 401, { error: 'invalid or missing session token' });
     }
-    return respondJson(res, 200, registry.toSummary(row));
+    return respondJson(res, 200, { ...registry.toSummary(row), watchOnly: isWatchOnly(id) });
   });
 
   router.delete('/api/sessions/:id', async (req, res, url, { id }) => {
@@ -173,6 +179,7 @@ export function registerSessionRoutes(router, { isPilotOwned } = {}) {
     if (!registry.checkToken(id, extractToken(req, url))) {
       return respondJson(res, 401, { error: 'invalid or missing session token' });
     }
+    if (isWatchOnly(id)) return respondJson(res, 403, WATCH_ONLY_REFUSAL);
     // Wired to the header's "Close session" button (app.js's closeSessionBtn)
     // - without this, every session's live query() process runs for the
     // cockpit process's whole lifetime, start or rewind, with no way to end
@@ -181,11 +188,12 @@ export function registerSessionRoutes(router, { isPilotOwned } = {}) {
     return respondJson(res, 200, { closed: true });
   });
 
-  // A pilot's session is by definition one this tab is not attached to, so
-  // the notification bell needs a way to hand a NEW tab that session's bearer
-  // token. `window.open('/?session=<id>&token=<t>')` would put a credential in
-  // a URL - the leak backlog.md:53 already flags for /ws - so the bell opens
-  // `/?attach=<sessionId>` and the new tab fetches the token from here.
+  // A supervisor's session is by definition one this tab is not attached to,
+  // so the notification bell needs a way to hand a NEW tab that session's
+  // bearer token. `window.open('/?session=<id>&token=<t>')` would put a
+  // credential in a URL - the leak backlog.md:53 already flags for /ws - so
+  // the bell opens `/?attach=<sessionId>` and the new tab fetches the token
+  // from here.
   //
   // REGISTRATION-ORDER DEPENDENT. This only ever matches because
   // registerSessionRoutes runs before registerSessionActionRoutes's
@@ -194,11 +202,12 @@ export function registerSessionRoutes(router, { isPilotOwned } = {}) {
   // registration silently routes this into session-actions.js instead, which
   // has no 'attach-token' branch and would 404.
   //
-  // Scoped to pilot-owned sessions. Being straight about why: this is not a
-  // real trust boundary, since anyone holding the operator token can already
-  // create sessions and read everything - per-session tokens are
-  // defense-in-depth against a leaked session *id*. Restricting it is
-  // least-privilege housekeeping costing one `if`.
+  // Scoped to supervisor-owned (auto-pilot or superagent) sessions. Being
+  // straight about why: this is not a real trust boundary, since anyone
+  // holding the operator token can already create sessions and read
+  // everything - per-session tokens are defense-in-depth against a leaked
+  // session *id*. Restricting it is least-privilege housekeeping costing one
+  // `if`.
   router.get('/api/sessions/:id/attach-token', async (req, res, url, { id }) => {
     const row = registry.get(id);
     // The `(attach-token)` tag is load-bearing for the regression test above:
@@ -207,9 +216,9 @@ export function registerSessionRoutes(router, { isPilotOwned } = {}) {
     // marker there is no way to tell from a response whether this handler ran
     // at all or the catch-all shadowed it.
     if (!row) return respondJson(res, 404, { error: `unknown session: ${id} (attach-token)` });
-    if (!isPilotOwned || !isPilotOwned(id)) {
-      return respondJson(res, 403, { error: 'attach-token is only available for auto-pilot sessions' });
+    if (!isSupervisorOwned || !isSupervisorOwned(id)) {
+      return respondJson(res, 403, { error: 'attach-token is only available for auto-pilot and superagent sessions' });
     }
-    return respondJson(res, 200, { id: row.id, token: row.token });
+    return respondJson(res, 200, { id: row.id, token: row.token, watchOnly: isWatchOnly(id) });
   });
 }
