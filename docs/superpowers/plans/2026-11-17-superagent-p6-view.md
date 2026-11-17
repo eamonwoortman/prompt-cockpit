@@ -385,3 +385,9 @@
 3. **Owner-lock takeover without a reclaimable mutex** (Important 4): rename-to-claim, verify the claimed token, `link` back a lock moved by mistake; interleaving tests via injected fs. Decision 4, Task 3.
 4. **Repeated stop stays idempotent** (Important 5): Review Focus 2 now says a second stop is a 200 that appends nothing; a real-supervisor test pins answer/accept/stop repeats. Task 1.
 5. **Verification moved to where the code exists** (Minor 6, 7): opening the view is verified in Task 11; the browser-notification check keeps the tab open across a Cockpit restart so its next poll is not its first.
+
+## Execution amendments
+
+- **Ruling T3-4 (Decision 4).** The premise "of two contenders renaming the same entry only one succeeds" is false on Windows: both concurrent renames can succeed. The owner lock therefore publishes atomically via `${file}.${token}.tmp` plus `link`, tolerates a missing claim, `link` ENOENT and `unlink` ENOENT, and retries an EPERM/EBUSY on the takeover rename once.
+- **Ruling T6-1.** `stop()` and `afterClose()` share one 2500 ms budget (`HOST_STOP_DEADLINE_MS`) measured from `stop()`'s start, not 2500 ms each.
+- **Ruling T10-1.** `claimNotifications` runs on every successful poll, even without notification permission, so entries are recorded as seen; `Notification` objects are created only when permission is granted.

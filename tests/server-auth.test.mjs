@@ -264,7 +264,7 @@ test('GET /api/system/memory requires the operator token and reports live sessio
 // Fix round 1 (I4): the only existing coverage of this route (in
 // tests/autopilot-routes.test.mjs) asserted a 404 on a nonexistent session -
 // neither the 200 (pilot-owned) nor the 403 (not pilot-owned) branch that
-// `isPilotOwned` (src/server.js:46) actually gates was covered. Fabricating
+// `isSupervisorOwned` (src/server.js:66) actually gates was covered. Fabricating
 // a run directly in `autopilot._runs` (autopilot.js exposes it verbatim for
 // exactly this) exercises both without starting the real supervisor or
 // spawning a pilot's session.

@@ -373,7 +373,7 @@ that cannot be faked without testing the fake instead:
 
 ## Superagent core (Plan 2)
 
-`src/superagent/` is a library, not wired into `src/server.js`; the `author`, `brainstorm`, `review`, `per-task` and `human` phase kinds run (the `milestone-1` and `milestone-2` fixtures, and since Plan 5 the default pipeline, which starts with the brainstorm). One test file per module:
+`src/superagent/` is a library (wired into `src/server.js` by Plan 6, below); the `author`, `brainstorm`, `review`, `per-task` and `human` phase kinds run (the `milestone-1` and `milestone-2` fixtures, and since Plan 5 the default pipeline, which starts with the brainstorm). One test file per module:
 
 | Module | Test file |
 |---|---|
@@ -458,3 +458,22 @@ A dismissed blocker on a task whose `repos` exclude `primary` still needs a comm
 Hand-verified only (not yet probed; the user deferred every probe to the end of the plans): whether the real SDK honours the stand-in's `tools: ['Read', 'Grep', 'Glob']` and `disallowedTools: ['mcp__*']`, and whether a real stand-in returns a parseable result as its final message. Both are proven only against `fakeStartSession`.
 
 Token counts are an under-count only for attempts finished by reconcile after a restart (`tokens: null`, counted as 0); a removed attempt records the last scanned snapshot of its row.
+
+## Superagent view (Plan 6)
+
+Unit-tested (all in `npm test`, no network, no real session):
+
+- `superagent-owner-lock.test.mjs`: first acquire, a live owner refused, a dead owner taken over, simultaneous acquire and simultaneous stale takeover each with exactly one winner, the put-back of a fresh lock moved by mistake, a claim emptied after a successful rename, a rename refused while racing an unlink (retried once), a failed identity write publishing nothing, leftover `*.tmp`/`*.claim` files ignored, an unparseable lock occupied, and release removing only our own lock. The races run against an injected fs; they are interleavings, not real parallel processes. The three-contender and mid-takeover-error residuals in the file header are not tested (see `backlog.md`).
+- `superagent-host.test.mjs`: the host lifecycle (off, init loading config before the supervisor, `error` on a corrupt config, `not-owner` with and without a port, router on only with an `apiKeyHelper`), `admit`/`read`, `stop()` blocking launches and waiting for admitted actions, the shared 2500 ms `stop()`/`afterClose()` budget, shutdown during initialisation, a supervisor that fails to start, the real default factories under a temp root, and `wireSuperagent` registering both hooks before init.
+- `superagent-routes.test.mjs`: `GET /api/superagent` and job detail, job creation (defaults, a missing folder, coded errors as 400), a repeated answer as 409, accept and stop, an unavailable host, the artifact route's error mapping and the merged `/api/notifications`. `ERR_DUPLICATE_REPO` is covered here and in `superagent.test.mjs`.
+- `watch-only.test.mjs`: every mutating session action, `DELETE /api/sessions/:id` and the ws input types refused for a superagent worker session (token checked first), reads and other sessions unaffected, and attach-token reporting `watchOnly`.
+- `superagent-view-model.test.mjs`, `superagent-artifacts.test.mjs`: the pure job summary, phase chips, attempt caps, `needsYou.answerable`, notification entries and keys, a corrupt job summarised without throwing, and `readArtifact` including real-path containment (a linked file or parent directory pointing outside is refused, large files truncated). The file-symlink case skips on Windows without symlink privilege (the 1 skipped test).
+- `notify-dedupe.test.mjs`: first poll records without notifying, one notification per new entry, two tabs' overlapping claims notifying once (Web Lock) and the tag-only fallback without locks, storage errors, and the module being served to the browser verbatim.
+
+Hand-verified only. There is no jsdom, so `public/superagent-view.js`, `entry.js` and `notifications-panel.js` have no automated coverage. Task 11's Playwright run against a Cockpit on a temp `COCKPIT_HOME` (seeded by `tests/superagent-view-fixture.manual.mjs`, which proves with a fake registry that nothing launches and exits non-zero otherwise) verified: status states, refused-folder errors (not a repo, no commits, duplicate repo, missing folder, path too long), the three panes, the artifact viewer, the bell and badge, an `<img onerror>` question rendered as text only, Accept, Stop, a second tab's stale Accept giving a 409, one browser notification per new entry across two tabs, and reload.
+
+Stubbed only (a faked `/api/superagent` or `window.Notification`): the initialising/stopping/off copy, a budget question, a denied permission, and an inherited saved session in the opener.
+
+Not verified: the real OS permission prompt, an OS-level notification click, the **open** link for a live attempt, a corrupt-job row in the view, the narrow (900 px or less) layout, and rejoining a real live session after a reload. No real-model run was made for the view.
+
+If you set `COCKPIT_HOME` for the fixture or a real run on Windows, keep it short: a long path makes every job fail with `ERR_PATH_TOO_LONG`.

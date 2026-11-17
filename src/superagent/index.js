@@ -5,8 +5,8 @@
 // Modelled on createAutopilot (src/autopilot.js): everything injected, one
 // timer, a tick that never overlaps itself, an idempotent start/stop and a
 // bounded wait for the in-flight tick on stop. It is a separate timer from
-// auto-pilot's (spec Decision 1) and is not wired into src/server.js yet
-// (plan 2, "Not in this plan").
+// auto-pilot's (spec Decision 1); src/superagent-host.js wires it into
+// src/server.js.
 //
 // Per-job serialisation: tick's job step, createJob's provisioning, stopJob,
 // accept and answerQuestion all run on one promise chain per job (withJob),

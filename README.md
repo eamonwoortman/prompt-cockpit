@@ -50,7 +50,7 @@ Settings (gear) covers MCP servers, plugins, permission rules, and UI prefs. On 
 
 ## Status
 
-MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`), plus Codex as a third provider. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
+MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`), plus Codex as a third provider. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started. The Superagent view (below) is shipped on the `feature/superagent` branch.
 
 **Auto-pilot** (scheduled unattended sessions). A pilot is a saved configuration
 plus a schedule; each firing starts a *new* session in a configured folder,
@@ -85,6 +85,18 @@ pane and the failure auto-disable are the mitigations; the git-commit-guard
 covers only its own narrow case.
 
 See `tests/README.md` for automated vs hand-verified coverage, and `backlog.md` for open follow-ups.
+
+## Superagent view (Plan 6)
+
+The **Superagent** button in the header opens a separate tab (`/?view=superagent`) for the superagent supervisor: you give it an idea and one or more git folders, and it brainstorms, writes a spec and plan, implements, tests and stops at **ready to try**, in worktrees, with a router picking retries. The tab lists jobs, shows phases, branches, tasks, attempts and artifacts, and puts anything that needs you (a question, a ready-to-try job, a stuck job) in a pane on the right. **Accept** and **Stop job** are the only job controls; the bell beside the button lists jobs that need you, and with browser notifications enabled a new entry produces one notification across all open tabs.
+
+- **One owner per machine.** The first Cockpit to start takes `~/.prompt-cockpit/superagent/owner.lock` and runs the supervisor. A second Cockpit's tab says `Superagent is running in the Cockpit on port <N>` and links to it; it has no read-only view of its own.
+- **Worker sessions are watch only.** Open one from an attempt's **open** link to watch it. The server refuses input, queue changes, delegation, mode changes and closing it (403 `ERR_WATCH_ONLY`), because anything you typed would become part of the attempt the code then judges.
+- **A repo can be in one job at a time.** Naming the same repository twice in a job is refused (`ERR_DUPLICATE_REPO`).
+- **The router needs an `apiKeyHelper`.** Without one in `~/.claude/settings.json` the router is off (the view says `Router off: no apiKeyHelper`) and failed attempts get the code-only retries.
+- **Keep `COCKPIT_HOME` short on Windows.** A long path makes every job fail with `ERR_PATH_TOO_LONG`. Jobs and worktrees live under `<COCKPIT_HOME or home>/.prompt-cockpit/superagent`.
+- **Not in the view yet:** pause/resume, spend and budgets, answering a budget question, giving feedback, retrying a stuck job, manual mode, a settings modal and stepping into a worker. Each is listed with its later plan in `backlog.md` under "Superagent - planned for later plans".
+- **Not probed with a real model in this plan.** `tests/superagent-view-fixture.manual.mjs <cockpitHome> <repoDir>` seeds four jobs into a temp home and checks that nothing would launch before you run a Cockpit on it.
 
 ## License
 
