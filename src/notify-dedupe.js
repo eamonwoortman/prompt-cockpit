@@ -20,9 +20,14 @@ function readRecord(raw) {
 
 export async function claimNotifications({ entries, firstPoll, storage, locks }) {
   const claim = async () => {
-    const record = readRecord(await storage.getItem(STORAGE_KEY));
-    const plan = planNotifications({ entries, record, firstPoll });
-    storage.setItem(STORAGE_KEY, JSON.stringify(plan.record));
+    let raw = null;
+    try {
+      raw = await storage.getItem(STORAGE_KEY);
+    } catch {}
+    const plan = planNotifications({ entries, record: readRecord(raw), firstPoll });
+    try {
+      storage.setItem(STORAGE_KEY, JSON.stringify(plan.record));
+    } catch {}
     return plan.notify;
   };
   return locks ? locks.request(LOCK_NAME, claim) : claim();

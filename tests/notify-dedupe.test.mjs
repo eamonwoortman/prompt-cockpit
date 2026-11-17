@@ -101,3 +101,15 @@ test('served to the browser verbatim', async () => {
   const onDisk = await readFile(path.join(SRC_DIR, 'notify-dedupe.js'));
   assert.equal(Buffer.compare(Buffer.from(res.body), onDisk), 0);
 });
+
+test('a throwing getItem counts as an empty record', async () => {
+  const storage = { getItem() { throw new Error('denied'); }, setItem() {} };
+  const out = await claimNotifications({ entries: [entry('a')], firstPoll: false, storage, locks: serialLocks() });
+  assert.deepEqual(out.map((e) => e.key), ['a']);
+});
+
+test('a throwing setItem still returns the planned entries', async () => {
+  const storage = { async getItem() { return JSON.stringify([]); }, setItem() { throw new Error('quota'); } };
+  const out = await claimNotifications({ entries: [entry('a')], firstPoll: false, storage, locks: serialLocks() });
+  assert.deepEqual(out.map((e) => e.key), ['a']);
+});
