@@ -19,6 +19,14 @@ export function formatAskPrefix(name) {
   return `/ask ${name}: `;
 }
 
+// A lone sibling session fills `/ask Name: ` for the user, but only while they
+// are typing forward. On a deletion the same text (`/ask`, `/ask `) would be
+// refilled at once, so the prefix could never be backspaced away.
+export function shouldAutoFill({ targetCount, needle, inputType }) {
+  const deleting = typeof inputType === 'string' && inputType.startsWith('delete');
+  return targetCount === 1 && !String(needle || '').trim() && !deleting;
+}
+
 export function filterAskTargets(sessions, { selfId, cwd, needle } = {}) {
   const n = (needle || '').trim().toLowerCase();
   const wantCwd = cwd || '';
@@ -42,7 +50,7 @@ export function initAskPicker({ textarea, dropdown, listSessions, getSelfId, get
   textarea.addEventListener('keydown', onKeydown, true);
   textarea.addEventListener('blur', () => setTimeout(close, 150));
 
-  async function onInput() {
+  async function onInput(event) {
     const draft = parseAskDraft(textarea.value, textarea.selectionStart);
     if (!draft) return close();
 
@@ -65,10 +73,12 @@ export function initAskPicker({ textarea, dropdown, listSessions, getSelfId, get
     // Exactly one other named same-cwd session: fill `/ask Name: ` and
     // never open the list. Only when the user has not started a name yet,
     // so typing `/ask X` against a single session named Grok is left alone.
-    if (all.length === 1 && !draft.needle.trim()) {
+    if (shouldAutoFill({ targetCount: all.length, needle: draft.needle, inputType: event && event.inputType })) {
       insert(all[0].name);
       return;
     }
+    // Backspacing down to `/ask` with a lone sibling falls through to the
+    // list below: the text is left alone and Tab/Enter fills the name back.
 
     items = filterAskTargets(sessions, {
       selfId: getSelfId(),

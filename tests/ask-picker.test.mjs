@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAskDraft, formatAskPrefix, filterAskTargets } from '../public/ask-picker.js';
+import { parseAskDraft, formatAskPrefix, filterAskTargets, shouldAutoFill } from '../public/ask-picker.js';
+
+test('shouldAutoFill: a lone sibling fills while typing, never on a deletion (the /ask backspace trap)', () => {
+  assert.equal(shouldAutoFill({ targetCount: 1, needle: '', inputType: 'insertText' }), true);
+  assert.equal(shouldAutoFill({ targetCount: 1, needle: '', inputType: undefined }), true);
+  assert.equal(shouldAutoFill({ targetCount: 1, needle: '', inputType: 'deleteContentBackward' }), false);
+  assert.equal(shouldAutoFill({ targetCount: 1, needle: '', inputType: 'deleteWordBackward' }), false);
+  assert.equal(shouldAutoFill({ targetCount: 1, needle: 'Gr', inputType: 'insertText' }), false);
+  assert.equal(shouldAutoFill({ targetCount: 2, needle: '', inputType: 'insertText' }), false);
+});
 
 test('parseAskDraft: /ask and /ask[space] are in the name-picking zone with an empty needle', () => {
   assert.deepEqual(parseAskDraft('/ask', 4), { needle: '' });
