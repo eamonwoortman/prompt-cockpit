@@ -13,7 +13,7 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // autopilot-schedule.js is due-ness/window/back-off math, so the panel's
 // "next run" label and the supervisor's own precondition check are literally
 // the same code rather than two implementations that drift.
-const SHARED_SRC_FILES = new Set(['permissions.js', 'stream-join.js', 'autopilot-schedule.js']);
+const SHARED_SRC_FILES = new Set(['permissions.js', 'stream-join.js', 'autopilot-schedule.js', 'notify-dedupe.js']);
 
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
