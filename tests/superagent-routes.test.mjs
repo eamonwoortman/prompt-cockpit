@@ -1,0 +1,228 @@
+// The superagent and merged notification routes over a bare http server, with
+// a fake host whose supervisor is a stub. Operator auth and the Origin/Host
+// check live in server.js and are covered by autopilot-routes.test.mjs.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import path from 'node:path';
+import { createRouter } from '../src/router.js';
+import { registerSuperagentRoutes } from '../src/routes/superagent.js';
+import { registerNotificationRoutes } from '../src/routes/notifications.js';
+
+const job = (over = {}) => ({ jobId: 'job-1', title: 'Login page', state: 'running', phaseId: 'spec', pipeline: [], attempts: [], repos: [], ...over });
+
+function fakeHost({ supervisor = {}, refusal = null, readable = true, notifications = [] } = {}) {
+  return {
+    status: () => ({ state: refusal?.state ?? 'ready', ownerPort: refusal?.ownerPort ?? null, error: null, router: 'off' }),
+    admit: async (fn) => {
+      if (refusal) throw Object.assign(new Error(`superagent is ${refusal.state}`), { code: 'ERR_SUPERAGENT_UNAVAILABLE', ...refusal });
+      return fn(supervisor);
+    },
+    read: (fn) => (readable ? fn(supervisor) : null),
+    notifications: () => notifications,
+  };
+}
+
+async function serve(t, { host, registry = { get: () => undefined }, autopilot = { notifications: async () => ({ entries: [] }) }, readArtifactImpl }) {
+  const router = createRouter();
+  registerSuperagentRoutes(router, { host, registry, readArtifactImpl });
+  registerNotificationRoutes(router, { autopilot, host });
+  const server = createServer((req, res) => {
+    router.handle(req, res, new URL(req.url, 'http://127.0.0.1')).then((handled) => {
+      if (!handled) { res.writeHead(404); res.end(); }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  return async (route, { method = 'GET', body } = {}) => {
+    const res = await fetch(base + route, { method, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: res.status, body: await res.json() };
+  };
+}
+
+test('GET /api/superagent reports status and summaries', async (t) => {
+  const api = await serve(t, { host: fakeHost({ supervisor: { listJobs: () => [job()] } }) });
+  const { status, body } = await api('/api/superagent');
+  assert.equal(status, 200);
+  assert.deepEqual(body.status, { state: 'ready', ownerPort: null, error: null, router: 'off' });
+  assert.equal(body.jobs.length, 1);
+  assert.equal(body.jobs[0].jobId, 'job-1');
+  assert.equal(body.jobs[0].title, 'Login page');
+  assert.equal(body.jobs[0].status, 'running');
+
+  const unreadable = await serve(t, { host: fakeHost({ readable: false, refusal: { status: 503, state: 'initialising' } }) });
+  const off = await unreadable('/api/superagent');
+  assert.equal(off.status, 200);
+  assert.equal(off.body.status.state, 'initialising');
+  assert.deepEqual(off.body.jobs, []);
+});
+
+test('GET /api/superagent/jobs/:id returns the detail, with live attempts from the registry', async (t) => {
+  const attempt = { attemptId: 'a1', phase: 'spec', role: 'writer', model: 'm', n: 1, purpose: 'author', sessionId: 's1' };
+  const supervisor = { getJob: (id) => (id === 'job-1' ? job({ attempts: [attempt] }) : undefined) };
+  const api = await serve(t, { host: fakeHost({ supervisor }), registry: { get: (sid) => (sid === 's1' ? { id: 's1' } : undefined) } });
+  const found = await api('/api/superagent/jobs/job-1');
+  assert.equal(found.status, 200);
+  assert.equal(found.body.jobId, 'job-1');
+  assert.equal(found.body.attempts[0].live, true);
+
+  const missing = await api('/api/superagent/jobs/nope');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.code, 'ERR_UNKNOWN_JOB');
+});
+
+test('GET /api/superagent/jobs/:id answers with the host status while unreadable', async (t) => {
+  const api = await serve(t, { host: fakeHost({ readable: false, refusal: { status: 503, state: 'initialising', ownerPort: null } }) });
+  const res = await api('/api/superagent/jobs/job-1');
+  assert.equal(res.status, 503);
+  assert.equal(res.body.code, 'ERR_SUPERAGENT_UNAVAILABLE');
+  assert.equal(res.body.state, 'initialising');
+});
+
+test('POST /api/superagent/jobs passes fields through and defaults the title', async (t) => {
+  const calls = [];
+  const supervisor = { createJob: async (args) => { calls.push(args); return job({ title: args.title, state: 'provisioning' }); } };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const repo = process.cwd();
+  const extra = path.join(process.cwd(), 'src');
+  const res = await api('/api/superagent/jobs', {
+    method: 'POST',
+    body: { idea: 'Add a login page with remember me and more words here', primaryRepo: repo, additionalRepos: [extra] },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.jobId, 'job-1');
+  assert.equal(res.body.status, 'provisioning');
+  assert.deepEqual(calls, [{
+    title: 'Add a login page with remember me and',
+    idea: 'Add a login page with remember me and more words here',
+    primaryRepo: repo,
+    additionalRepos: [extra],
+    mode: 'automatic',
+    fixture: null,
+  }]);
+
+  await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'Short idea', title: '  Named  ', primaryRepo: repo } });
+  assert.equal(calls[1].title, 'Named');
+  assert.deepEqual(calls[1].additionalRepos, []);
+});
+
+test('POST /api/superagent/jobs refuses a missing folder', async (t) => {
+  const calls = [];
+  const api = await serve(t, { host: fakeHost({ supervisor: { createJob: async (args) => { calls.push(args); return job(); } } }) });
+  const missing = path.join(process.cwd(), 'definitely-not-here');
+  const primary = await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: missing } });
+  assert.equal(primary.status, 400);
+  assert.equal(primary.body.error, `not a directory: ${missing}`);
+
+  const additional = await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: process.cwd(), additionalRepos: [missing] } });
+  assert.equal(additional.status, 400);
+  assert.equal(additional.body.error, `not a directory: ${missing}`);
+
+  const noIdea = await api('/api/superagent/jobs', { method: 'POST', body: { idea: '   ', primaryRepo: process.cwd() } });
+  assert.equal(noIdea.status, 400);
+  assert.match(noIdea.body.error, /idea/);
+  assert.equal(calls.length, 0);
+});
+
+test("createJob's coded errors come back as 400 with their code", async (t) => {
+  const err = Object.assign(new Error('superagent: /a is the same repository as /b'), { code: 'ERR_DUPLICATE_REPO' });
+  const api = await serve(t, { host: fakeHost({ supervisor: { createJob: async () => { throw err; } } }) });
+  const res = await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: process.cwd() } });
+  assert.equal(res.status, 400);
+  assert.deepEqual(res.body, { error: err.message, code: 'ERR_DUPLICATE_REPO' });
+});
+
+test('a second answer to the same question is a 409 and appends nothing', async (t) => {
+  const appended = [];
+  const supervisor = {
+    answerQuestion: async (jobId, text) => {
+      if (appended.length) throw Object.assign(new Error('no question to answer'), { code: 'ERR_INVALID_STATE' });
+      appended.push({ jobId, text });
+      return job({ jobId });
+    },
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const first = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies' } });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.jobId, 'job-1');
+  const second = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies' } });
+  assert.equal(second.status, 409);
+  assert.equal(second.body.code, 'ERR_INVALID_STATE');
+  assert.deepEqual(appended, [{ jobId: 'job-1', text: 'Use cookies' }]);
+});
+
+test('accept and stop return the job summary; an unknown job is 404', async (t) => {
+  const unknown = Object.assign(new Error('superagent: no job nope'), { code: 'ERR_UNKNOWN_JOB' });
+  const supervisor = {
+    accept: async (id) => { if (id === 'nope') throw unknown; return job({ jobId: id, state: 'done' }); },
+    stopJob: async (id) => job({ jobId: id, state: 'stopped' }),
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const accepted = await api('/api/superagent/jobs/job-1/accept', { method: 'POST' });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.body.status, 'done');
+  const stopped = await api('/api/superagent/jobs/job-1/stop', { method: 'POST' });
+  assert.equal(stopped.status, 200);
+  assert.equal(stopped.body.status, 'stopped');
+  const missing = await api('/api/superagent/jobs/nope/accept', { method: 'POST' });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.code, 'ERR_UNKNOWN_JOB');
+});
+
+test('unavailable host answers with its status', async (t) => {
+  const notOwner = await serve(t, { host: fakeHost({ refusal: { status: 409, state: 'not-owner', ownerPort: 4400 } }) });
+  const refused = await notOwner('/api/superagent/jobs/job-1/stop', { method: 'POST' });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.code, 'ERR_SUPERAGENT_UNAVAILABLE');
+  assert.equal(refused.body.state, 'not-owner');
+  assert.equal(refused.body.ownerPort, 4400);
+  assert.equal(typeof refused.body.error, 'string');
+
+  const starting = await serve(t, { host: fakeHost({ refusal: { status: 503, state: 'initialising', ownerPort: null } }) });
+  const created = await starting('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: process.cwd() } });
+  assert.equal(created.status, 503);
+  assert.equal(created.body.state, 'initialising');
+  assert.equal(created.body.ownerPort, null);
+});
+
+test('artifact route maps reader errors', async (t) => {
+  const reads = [];
+  const failures = { outside: 'ERR_ARTIFACT_OUTSIDE', missing: 'ERR_ARTIFACT_MISSING', bogus: 'ERR_UNKNOWN_ARTIFACT' };
+  const readArtifactImpl = async (j, key) => {
+    reads.push([j.jobId, key]);
+    if (failures[key]) throw Object.assign(new Error(`artifact ${key}`), { code: failures[key] });
+    return { key, path: 'docs/spec.md', text: '# Spec', truncated: false };
+  };
+  const supervisor = { getJob: (id) => (id === 'job-1' ? job() : undefined) };
+  const api = await serve(t, { host: fakeHost({ supervisor }), readArtifactImpl });
+
+  const ok = await api('/api/superagent/jobs/job-1/artifacts/spec');
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body, { key: 'spec', path: 'docs/spec.md', text: '# Spec', truncated: false });
+  const outside = await api('/api/superagent/jobs/job-1/artifacts/outside');
+  assert.equal(outside.status, 400);
+  assert.equal(outside.body.code, 'ERR_ARTIFACT_OUTSIDE');
+  const missing = await api('/api/superagent/jobs/job-1/artifacts/missing');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.code, 'ERR_ARTIFACT_MISSING');
+  const bogus = await api('/api/superagent/jobs/job-1/artifacts/bogus');
+  assert.equal(bogus.status, 400);
+  assert.equal(bogus.body.code, 'ERR_UNKNOWN_ARTIFACT');
+  const noJob = await api('/api/superagent/jobs/nope/artifacts/spec');
+  assert.equal(noJob.status, 404);
+  assert.equal(noJob.body.code, 'ERR_UNKNOWN_JOB');
+  assert.equal(reads.length, 4);
+});
+
+test('notifications merge both sources', async (t) => {
+  const pilotEntry = { kind: 'needs-input', pilotId: 'p1', message: 'waiting' };
+  const superagentEntry = { kind: 'superagent', type: 'question', key: 'superagent:job-1:4', jobId: 'job-1', title: 'Login page', message: 'Which?' };
+  const api = await serve(t, {
+    host: fakeHost({ notifications: [superagentEntry] }),
+    autopilot: { notifications: async () => ({ entries: [pilotEntry] }) },
+  });
+  const res = await api('/api/notifications');
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { entries: [pilotEntry, superagentEntry] });
+});

@@ -162,9 +162,4 @@ export function registerAutopilotRoutes(router, { store, log, supervisor, regist
       return respondJson(res, statusFor(err), { error: String(err.message || err) });
     }
   });
-
-  // Derived, never stored - see autopilot.js's notifications().
-  router.get('/api/notifications', async (req, res) => {
-    return respondJson(res, 200, await supervisor.notifications());
-  });
 }

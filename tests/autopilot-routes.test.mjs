@@ -4,7 +4,7 @@
 // operator-gated but not session-token-gated, like /api/browse.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -14,7 +14,7 @@ process.env.PORT = process.env.PORT || '4321';
 const home = await mkdtemp(path.join(tmpdir(), 'cockpit-autopilot-home-'));
 process.env.COCKPIT_HOME = home;
 
-const { server, PORT, HOST } = await import('../src/server.js');
+const { server, PORT, HOST, superagentHost } = await import('../src/server.js');
 const { getOperatorToken } = await import('../src/operator-auth.js');
 const ORIGIN = `http://${HOST}:${PORT}`;
 
@@ -156,7 +156,19 @@ test('POST /api/autopilot-settings validates', async () => {
 test('GET /api/notifications returns a derived list', async () => {
   const res = await api('/api/notifications');
   assert.equal(res.status, 200);
-  assert.ok(Array.isArray((await res.json()).entries));
+  assert.deepEqual(await res.json(), { entries: [] });
+});
+
+test('importing the server leaves the superagent host off and the superagent folder untouched', async () => {
+  assert.equal(superagentHost.status().state, 'off');
+  const res = await api('/api/superagent');
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { status: { state: 'off', ownerPort: null, error: null, router: null }, jobs: [] });
+  const refused = await api('/api/superagent/jobs/x/stop', { method: 'POST' });
+  assert.equal(refused.status, 503);
+  assert.equal((await refused.json()).state, 'off');
+  assert.equal((await fetch(`${ORIGIN}/api/superagent`)).status, 401);
+  await assert.rejects(stat(path.join(home, '.prompt-cockpit', 'superagent')), { code: 'ENOENT' });
 });
 
 test('a null entry in autopilots.json survives list/create/update/toggle/logs/delete over HTTP', async () => {

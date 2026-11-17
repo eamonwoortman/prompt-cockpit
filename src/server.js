@@ -30,6 +30,10 @@ import { createAutopilotLog } from './autopilot-log.js';
 import { createAutopilot } from './autopilot.js';
 import { wireAutopilot } from './autopilot-wiring.js';
 import { createProviderCooldowns } from './provider-cooldowns.js';
+import { registerNotificationRoutes } from './routes/notifications.js';
+import { registerSuperagentRoutes } from './routes/superagent.js';
+import { createSuperagentHost } from './superagent-host.js';
+import { wireSuperagent } from './superagent-wiring.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
@@ -53,6 +57,9 @@ registry.addRateLimitListener(({ provider, rateLimitHit }) => {
 });
 const autopilot = createAutopilot({ registry, store: autopilotStore, log: autopilotLog, tracker, cooldowns });
 const isPilotOwned = (sessionId) => autopilot.status().some((run) => run.sessionId === sessionId);
+// Constructed `off`, with no side effects; wireSuperagent's init() in the
+// listen callback is what takes the lock and starts the supervisor.
+const superagentHost = createSuperagentHost({ registry, port: PORT });
 
 const router = createRouter();
 // ORDER MATTERS: registerSessionRoutes must come before
@@ -62,6 +69,8 @@ registerSessionRoutes(router, { isPilotOwned });
 registerHistoryRoutes(router);
 registerSystemRoutes(router);
 registerAutopilotRoutes(router, { store: autopilotStore, log: autopilotLog, supervisor: autopilot, registry });
+registerSuperagentRoutes(router, { host: superagentHost, registry });
+registerNotificationRoutes(router, { autopilot, host: superagentHost });
 registerSessionActionRoutes(router);
 
 const server = createServer((req, res) => {
@@ -219,7 +228,7 @@ wss.on('connection', (ws, req, id, since) => {
   });
 });
 
-export { server, PORT, HOST, seedSessionDefaults, shutdown, tracker, autopilot, cooldowns };
+export { server, PORT, HOST, seedSessionDefaults, shutdown, tracker, autopilot, cooldowns, superagentHost };
 
 // Only auto-listen when run directly (`node src/server.js`), not when
 // imported by tests - lets tests bind an ephemeral port and drive the same
@@ -244,8 +253,10 @@ function copyToClipboard(text) {
 // probe timeout plus the grace period), and the auto-pilot supervisor's own
 // shutdown.onBeforeClose hook (autopilot.stop()) adds its own bounded wait
 // rather than an unbounded one. Comfortably above grace (3s) + killTracked's
-// verify budget (1.5s) + autopilot.stop()'s STOP_TICK_DEADLINE_MS (2s).
-const FORCE_EXIT_MS = 8000;
+// verify budget (1.5s) + autopilot.stop()'s STOP_TICK_DEADLINE_MS (2s) +
+// superagent host.stop()'s HOST_STOP_DEADLINE_MS (2.5s), shared with
+// host.afterClose() - 9s in all.
+const FORCE_EXIT_MS = 10000;
 
 if (isMain) {
   let exiting = false;
@@ -332,6 +343,9 @@ if (isMain) {
     // heartbeat or touches ~/.prompt-cockpit on its own (a 15-second interval
     // would also keep a test runner's event loop alive).
     wireAutopilot({ shutdown, autopilot, tracker, cooldowns });
+    // Same reason, plus the owner lock: a second `npm start` on a taken port
+    // must die on EADDRINUSE before it contends for it. Never rejects.
+    wireSuperagent({ shutdown, host: superagentHost });
 
     const op = getOperatorToken();
     const url = `http://${HOST}:${PORT}/?op=${op}`;
