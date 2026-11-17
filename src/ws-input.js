@@ -3,6 +3,9 @@
 const WATCH_ONLY_TYPES = new Set(['input', 'queue-remove', 'queue-reorder', 'queue-send-now', 'delegate']);
 
 export function handleClientMessage({ id, payload, ws, registry, isWatchOnly, logImpl = console.error }) {
+  // `JSON.parse('null')` succeeds, and a throw here would be uncaught (ws
+  // emits 'message' without a try/catch) and take the whole process down.
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
   // A superagent worker is watched, never driven: anything that would reach
   // its input queue is refused out loud rather than dropped.
   if (isWatchOnly(id) && WATCH_ONLY_TYPES.has(payload.type)) {

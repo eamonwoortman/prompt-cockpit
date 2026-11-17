@@ -228,3 +228,15 @@ test('ws input of other types on a watch-only session is ignored, not answered',
   assert.deepEqual(reg.calls, []);
   assert.deepEqual(ws.sent, []);
 });
+
+test('a ws frame that is not an object is ignored, not thrown on', () => {
+  for (const payload of [null, [], [{ type: 'input', text: 'hi' }], 1, 'x', true]) {
+    for (const id of ['worker', 'hand-driven']) {
+      const reg = fakeWsRegistry();
+      const ws = fakeWs();
+      assert.doesNotThrow(() => handleClientMessage({ id, payload, ws, registry: reg, isWatchOnly: (sid) => sid === 'worker' }), `${JSON.stringify(payload)} on ${id}`);
+      assert.deepEqual(reg.calls, [], `${JSON.stringify(payload)} on ${id}`);
+      assert.deepEqual(ws.sent, [], `${JSON.stringify(payload)} on ${id}`);
+    }
+  }
+});
