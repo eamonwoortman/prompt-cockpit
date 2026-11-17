@@ -8,8 +8,11 @@ export function initStatsPanel({ el }) {
 
   function fmtUSD(v) {
     if (!Number.isFinite(Number(v))) return '—';
-    if (v > 0 && v < 1) return '$' + v.toFixed(4);
-    return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    // Round up to the next cent so a running session never reads cheaper than
+    // it is. The epsilon keeps 0.07 (stored as 0.07000000000000001 after * 100)
+    // from jumping to $0.08.
+    const cents = Math.ceil(Number(v) * 100 - 1e-9);
+    return '$' + (Math.max(cents, 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
   function fmtTok(v) {
