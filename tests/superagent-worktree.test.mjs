@@ -5,7 +5,7 @@ import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { tempDir, initRepo } from './superagent-helpers.mjs';
-import { slugify, repoIds, createWorktree, inspectWorktree, archiveLedger, listOrphanWorktrees, defaultGit } from '../src/superagent/worktree.js';
+import { slugify, repoIds, checkRepo, repoToplevel, createWorktree, inspectWorktree, archiveLedger, listOrphanWorktrees, defaultGit } from '../src/superagent/worktree.js';
 
 const norm = (p) => realpathSync.native(path.resolve(p)).toLowerCase();
 const SETTINGS = '{"permissions":{"allow":["Bash(npm test)"]}}';
@@ -145,4 +145,25 @@ test('defaultGit runs git with core.fsmonitor forced off, whatever the repo conf
   const res = await defaultGit(['config', '--get', 'core.fsmonitor'], { cwd: origin });
   assert.equal(res.code, 0, res.stderr);
   assert.equal(res.stdout.trim(), 'false');
+});
+
+test('checkRepo reports each refusal with its code', async () => {
+  const root = await tempDir('sa-wt-');
+  const plain = path.join(root, 'plain');
+  await fs.mkdir(plain);
+  const fresh = (name) => ({ worktree: path.join(root, name), branch: `superagent/${name}` });
+  await assert.rejects(checkRepo({ origin: plain, ...fresh('a') }), { code: 'ERR_NOT_GIT_REPO' });
+  await assert.rejects(repoToplevel({ git: defaultGit, origin: plain }), { code: 'ERR_NOT_GIT_REPO' });
+  const unborn = path.join(root, 'unborn');
+  await initRepo(unborn, { commit: false });
+  await assert.rejects(checkRepo({ origin: unborn, ...fresh('b') }), { code: 'ERR_NO_COMMITS' });
+  const { root: r2, origin } = await setup();
+  execFileSync('git', ['branch', 'superagent/taken'], { cwd: origin });
+  await assert.rejects(checkRepo({ origin, worktree: path.join(r2, 'wt'), branch: 'superagent/taken' }), { code: 'ERR_BRANCH_EXISTS' });
+  const occupied = path.join(r2, 'occupied');
+  await fs.mkdir(occupied);
+  await assert.rejects(checkRepo({ origin, worktree: occupied, branch: 'superagent/free' }), { code: 'ERR_WORKTREE_PATH_EXISTS' });
+  const ok = await checkRepo({ origin, worktree: path.join(r2, 'wt'), branch: 'superagent/free' });
+  assert.deepEqual(ok, { toplevel: await repoToplevel({ origin }) });
+  assert.equal(norm(ok.toplevel), norm(origin));
 });

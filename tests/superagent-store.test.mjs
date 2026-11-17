@@ -377,3 +377,18 @@ test('a brainstorm phase advances only on an ask with no questions', () => {
   assert.equal(done.phaseIndex, 1);
   assert.equal(done.phaseId, 'spec');
 });
+
+test('needsYouSeq tracks the needs-you that set the state', () => {
+  const upTo = (n, filler) => Array.from({ length: n }, () => filler);
+  const asked7 = [jobCreated(), { type: 'job-provisioned' }, ...upTo(4, { type: 'precompact', attemptId: 'none' }), ...asked];
+  const events = stamp(asked7);
+  assert.equal(events.at(-1).seq, 7);
+  assert.equal(deriveJob(stamp([jobCreated(), { type: 'job-provisioned' }])).needsYouSeq, null);
+  assert.equal(deriveJob(events).needsYouSeq, 7);
+  const answered = [...asked7, { type: 'question-answered', forAttemptId: 'a1', answer: 'yes' }];
+  assert.equal(deriveJob(stamp(answered)).needsYouSeq, null);
+  const again = [...answered, ...upTo(3, { type: 'precompact', attemptId: 'none' }), { type: 'needs-you', reason: 'ready-to-try', detail: null }];
+  assert.equal(stamp(again).at(-1).seq, 12);
+  assert.equal(deriveJob(stamp(again)).needsYouSeq, 12);
+  assert.equal(deriveJob(stamp([...again, { type: 'job-stopped' }])).needsYouSeq, null);
+});

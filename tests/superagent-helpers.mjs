@@ -13,7 +13,7 @@ export async function tempDir(prefix) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-export async function initRepo(dir, { ignoreLocalSettings = true } = {}) {
+export async function initRepo(dir, { ignoreLocalSettings = true, commit = true } = {}) {
   const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
   await fs.mkdir(dir, { recursive: true });
   git('init', '-q');
@@ -24,6 +24,7 @@ export async function initRepo(dir, { ignoreLocalSettings = true } = {}) {
   git('config', 'user.name', 'Test');
   await fs.writeFile(path.join(dir, 'README.md'), '# test\n');
   if (ignoreLocalSettings) await fs.writeFile(path.join(dir, '.gitignore'), '.claude/settings.local.json\n');
+  if (!commit) return null;
   git('add', '-A');
   git('commit', '-q', '-m', 'init');
   return git('rev-parse', 'HEAD');

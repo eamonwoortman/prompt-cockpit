@@ -51,6 +51,7 @@ export function deriveJob(events) {
     state: 'provisioning',
     reason: null,
     detail: null,
+    needsYouSeq: null,
     phaseIndex: 0,
     phaseId: null,
     attempts: [],
@@ -66,6 +67,7 @@ export function deriveJob(events) {
     job.state = state;
     job.reason = reason;
     job.detail = detail;
+    job.needsYouSeq = null;
   };
   for (let i = 1; i < events.length; i++) {
     const ev = events[i];
@@ -79,7 +81,10 @@ export function deriveJob(events) {
       }
       case 'job-provisioned': setState('running'); break;
       case 'job-failed': setState('failed', 'job-failed', { error: ev.error }); break;
-      case 'needs-you': setState('needs-you', ev.reason ?? null, ev.detail ?? null); break;
+      case 'needs-you':
+        setState('needs-you', ev.reason ?? null, ev.detail ?? null);
+        job.needsYouSeq = ev.seq ?? null;
+        break;
       case 'question-answered':
         if (job.state !== 'needs-you' || job.reason !== 'question' || job.detail?.attemptId !== ev.forAttemptId) break;
         if (job.answers.some((x) => x.forAttemptId === ev.forAttemptId)) break;

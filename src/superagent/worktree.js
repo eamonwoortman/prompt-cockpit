@@ -61,15 +61,29 @@ async function exists(p) {
   }
 }
 
-export async function createWorktree({ git = defaultGit, origin, worktree, branch, copyLocalClaudeSettings }) {
+export async function repoToplevel({ git = defaultGit, origin }) {
   const top = await git(['rev-parse', '--show-toplevel'], { cwd: origin });
   if (top.code !== 0) throw fail('ERR_NOT_GIT_REPO', `superagent: ${origin} is not a git repository`);
+  return top.stdout.trim();
+}
+
+async function preflight({ git, origin, worktree, branch }) {
+  const toplevel = await repoToplevel({ git, origin });
   const head = await git(['rev-parse', '--verify', 'HEAD'], { cwd: origin });
   if (head.code !== 0) throw fail('ERR_NO_COMMITS', `superagent: ${origin} has no commits`);
-  const baseSha = head.stdout.trim();
   const ref = await git(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: origin });
   if (ref.code === 0) throw fail('ERR_BRANCH_EXISTS', `superagent: branch ${branch} already exists`);
   if (await exists(worktree)) throw fail('ERR_WORKTREE_PATH_EXISTS', `superagent: ${worktree} already exists`);
+  return { toplevel, baseSha: head.stdout.trim() };
+}
+
+export async function checkRepo({ git = defaultGit, origin, worktree, branch }) {
+  const { toplevel } = await preflight({ git, origin, worktree, branch });
+  return { toplevel };
+}
+
+export async function createWorktree({ git = defaultGit, origin, worktree, branch, copyLocalClaudeSettings }) {
+  const { baseSha } = await preflight({ git, origin, worktree, branch });
 
   await mkdir(path.dirname(worktree), { recursive: true });
   const add = await git(['worktree', 'add', '-b', branch, worktree, 'HEAD'], { cwd: origin });

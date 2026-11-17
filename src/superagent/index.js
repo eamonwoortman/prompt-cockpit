@@ -37,7 +37,7 @@ import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from 
 import { allowedActions, buildRouterRequest } from './router.js';
 import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, buildFixTask, nextAction } from './sequencer.js';
-import { BRANCH_PREFIX, archiveLedger, createWorktree, defaultGit, listOrphanWorktrees, repoIds, slugify } from './worktree.js';
+import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, repoIds, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -566,6 +566,19 @@ export function createSuperagent({
     return slugify(title, jobId, maxBase);
   }
 
+  // Every folder is checked before job-created, so a bad or repeated folder
+  // never leaves a failed job and a kept worktree behind.
+  async function checkRepos(repos, { slug, branch }) {
+    const seen = new Map();
+    for (const repo of repos) {
+      const { toplevel } = await checkRepo({ git, origin: repo.origin, worktree: path.join(worktreesRoot, slug, repo.id), branch });
+      const resolved = path.resolve(toplevel);
+      const key = platform === 'win32' ? resolved.toLowerCase() : resolved;
+      if (seen.has(key)) throw fail('ERR_DUPLICATE_REPO', `superagent: ${repo.origin} is the same repository as ${seen.get(key)}`);
+      seen.set(key, repo.origin);
+    }
+  }
+
   async function provision(job) {
     try {
       for (const repo of job.repos) {
@@ -588,6 +601,9 @@ export function createSuperagent({
     if (mode === 'manual' && pipeline.some((p) => p.kind === 'brainstorm')) throw fail('ERR_MODE_UNSUPPORTED', 'superagent: manual mode is not built yet');
     const jobId = idImpl();
     const slug = fitSlug(pipeline, { title, jobId });
+    const branch = BRANCH_PREFIX + slug;
+    const repos = repoIds(origin, [...resolved.additionalRepos, ...additionalRepos].map((p) => path.resolve(p)));
+    await checkRepos(repos, { slug, branch });
     const created = {
       type: 'job-created',
       jobId,
@@ -595,9 +611,9 @@ export function createSuperagent({
       title,
       idea,
       mode,
-      branch: BRANCH_PREFIX + slug,
+      branch,
       createdDate: localDate(now()),
-      repos: repoIds(origin, [...resolved.additionalRepos, ...additionalRepos].map((p) => path.resolve(p))),
+      repos,
       pipeline,
       models: resolved.models,
       limits: resolved.limits,

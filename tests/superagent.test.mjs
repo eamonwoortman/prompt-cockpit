@@ -215,12 +215,16 @@ test('createJob refuses pipelines this plan cannot run', async () => {
 test('a provisioning failure records job-failed and keeps the worktrees already made', async () => {
   try {
     const root = await tempDir('sa-index-extra-');
-    const extra = path.join(root, 'notarepo');
-    await fs.mkdir(extra, { recursive: true });
-    const h = await harness();
+    const extra = path.join(root, 'lib');
+    await initRepo(extra);
+    const git = async (args, opts) => {
+      if (args[0] === 'worktree' && args[1] === 'add' && path.resolve(opts.cwd) === path.resolve(extra)) return { code: 128, stdout: '', stderr: 'fatal: injected' };
+      return defaultGit(args, opts);
+    };
+    const h = await harness({ git });
     const job = await create(h, { additionalRepos: [extra] });
     assert.equal(job.state, 'failed');
-    assert.match(job.detail.error, /not a git repository/);
+    assert.match(job.detail.error, /git worktree add failed: fatal: injected/);
     assert.ok(existsSync(path.join(h.worktreesRoot, job.slug, 'primary')));
     assert.ok(branchExists(h.repo, job.branch));
     await h.sa.tick();
@@ -920,5 +924,71 @@ test('a verified blocker parks the job needs-you with the blocker text and evide
     assert.equal(got.state, 'needs-you');
     assert.equal(got.completions.length, 0);
     assert.equal(got.phaseId, 'spec-review');
+  } finally { registry._reset(); }
+});
+
+const lineCount = (h, jobId) => readFileSync(path.join(h.jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).length;
+
+test('createJob refuses a bad folder before the job exists', async () => {
+  try {
+    const h = await harness();
+    const plain = path.join(h.root, 'plain');
+    await fs.mkdir(plain);
+    await assert.rejects(create(h, { primaryRepo: plain }), (err) => err.code === 'ERR_NOT_GIT_REPO');
+    const unborn = path.join(h.root, 'unborn');
+    await initRepo(unborn, { commit: false });
+    await assert.rejects(create(h, { additionalRepos: [unborn] }), (err) => err.code === 'ERR_NO_COMMITS');
+    assert.deepEqual(h.sa.listJobs(), []);
+    await noJobDirs(h.jobsRoot);
+    assert.equal(existsSync(h.worktreesRoot), false);
+  } finally { registry._reset(); }
+});
+
+test('createJob refuses the same repo twice before the job exists', async () => {
+  try {
+    const h = await harness();
+    await assert.rejects(create(h, { additionalRepos: [h.repo] }), (err) => {
+      assert.equal(err.code, 'ERR_DUPLICATE_REPO');
+      assert.equal(err.message, `superagent: ${path.resolve(h.repo)} is the same repository as ${path.resolve(h.repo)}`);
+      return true;
+    });
+    const sub = path.join(h.repo, 'sub');
+    await fs.mkdir(sub);
+    await assert.rejects(create(h, { additionalRepos: [sub] }), { code: 'ERR_DUPLICATE_REPO' });
+    const lib = path.join(h.root, 'lib');
+    await initRepo(lib);
+    await fs.mkdir(path.join(lib, 'inner'));
+    await assert.rejects(create(h, { additionalRepos: [lib, path.join(lib, 'inner')] }), { code: 'ERR_DUPLICATE_REPO' });
+    assert.deepEqual(h.sa.listJobs(), []);
+    await noJobDirs(h.jobsRoot);
+    assert.equal(existsSync(h.worktreesRoot), false);
+  } finally { registry._reset(); }
+});
+
+test('repeated answer, accept and stop append nothing', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h);
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'question', detail: { attemptId: 'a1', question: 'Which file?' } });
+    assert.equal((await h.sa.answerQuestion(job.jobId, 'hello.txt')).state, 'running');
+    let lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.answerQuestion(job.jobId, 'hello.txt'), { code: 'ERR_INVALID_STATE' });
+    assert.equal(lineCount(h, job.jobId), lines);
+
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+    assert.equal((await h.sa.accept(job.jobId)).state, 'done');
+    lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.accept(job.jobId), { code: 'ERR_INVALID_STATE' });
+    assert.equal(lineCount(h, job.jobId), lines);
+
+    const other = await create(h);
+    const stopped = await h.sa.stopJob(other.jobId);
+    assert.equal(stopped.state, 'stopped');
+    lines = lineCount(h, other.jobId);
+    const again = await h.sa.stopJob(other.jobId);
+    assert.equal(again.state, 'stopped');
+    assert.equal(again.lastSeq, stopped.lastSeq);
+    assert.equal(lineCount(h, other.jobId), lines);
+    await h.sa.stop();
   } finally { registry._reset(); }
 });
