@@ -141,7 +141,14 @@ body.watch-only #autoContinueLabel,
 body.watch-only #resetSessionBtn,
 body.watch-only #closeSessionBtn,
 body.watch-only #thinkingControlsGroup,
-body.watch-only #effortControlsGroup { display: none !important; }
+body.watch-only #effortControlsGroup,
+body.watch-only #mcpServerList input[type="checkbox"],
+body.watch-only #mcpServerList .mcp-reconnect-btn,
+body.watch-only .settings-tab[data-settings-tab="plugins"],
+body.watch-only [data-settings-tab-panel="plugins"],
+body.watch-only #handshakeInput,
+body.watch-only #handshakeSaveBtn,
+body.watch-only #permissionRulesList .custom-folder-remove { display: none !important; }
 body.watch-only #sessionLabel { pointer-events: none; } /* click renames the session */
 
 /* --- create/edit form modal --- */

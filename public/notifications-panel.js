@@ -31,15 +31,17 @@ export async function requestBrowserNotifications() {
 
 // Every open tab polls, so which tab shows a given entry is decided by
 // claimNotifications (src/notify-dedupe.js) under a Web Lock; `tag` makes a
-// duplicate replace rather than stack if the lock is unavailable.
+// duplicate replace rather than stack if the lock is unavailable. The claim
+// runs even without permission, so the shared record is already seeded when
+// permission is granted later and entries pending at that point stay quiet.
 async function showBrowserNotifications(superagentEntries, firstPoll) {
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
   let fresh;
   try {
     fresh = await claimNotifications({ entries: superagentEntries, firstPoll, storage: localStorage, locks: navigator.locks });
   } catch {
     return;
   }
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
   for (const entry of fresh) {
     try {
       const notification = new Notification(entry.message, { tag: entry.key });

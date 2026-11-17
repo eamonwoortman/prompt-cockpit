@@ -2704,10 +2704,13 @@ function computePromptSuggestion() {
 
 // A superagent worker is watched, never driven: the server refuses its input
 // and POSTs (ERR_WATCH_ONLY), and body.watch-only (style-autopilot.css) hides
-// the controls that would only earn that refusal.
+// the controls that would only earn that refusal. The git-guard select is
+// disabled rather than hidden so its current mode stays readable. The Plugins
+// tab goes entirely: even listing plugins is a POST (loadOrReloadPlugins).
 function setWatchOnly(on) {
   document.body.classList.toggle('watch-only', on);
   document.getElementById('watchOnlyBanner').hidden = !on;
+  document.getElementById('gitGuardModeBtn').disabled = on;
 }
 
 // Reconnect-on-reload: if this browser tab already had a live
