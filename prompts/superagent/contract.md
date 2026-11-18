@@ -33,6 +33,10 @@ Every output must appear in at least one commit you list. If you committed outpu
 
 Note that review, response, verify and report files are outputs and must be committed and listed in `evidence.commits` like any other output.
 
+## In-place folders
+
+A repo marked `inPlace` on the card is the user's own checkout, not a disposable worktree: it may hold ignored files and caches the user needs. There, never run `git clean`, `reset --hard`, `stash`, or `checkout -- .`/`restore` over the tree, never switch branches and never create worktrees. Revert your own probe edits file by file.
+
 ## Purposes
 
 If the job card has a `purpose`, it says which kind of attempt this is and which result fields it needs:

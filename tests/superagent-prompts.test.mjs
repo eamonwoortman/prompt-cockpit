@@ -573,3 +573,21 @@ test('a recorded workflow prompt that disappeared is ERR_PROMPT_MISSING unless a
   await fs.writeFile(path.join(overrides, 'spec-writer.md'), 'OVERRIDE-MARKER\n');
   assert.ok((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir })).system.startsWith('OVERRIDE-MARKER'));
 });
+
+test('an in-place repo is marked inPlace on the card and the contract forbids tree-wide git commands there', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const inPlaceJob = { ...job, repos: job.repos.map((r) => ({ ...r, inPlace: true })) };
+  const { system, card } = await buildWorkerPrompt({ role: 'implementer', job: inPlaceJob, phase, attempt, projectDir: emptyDir });
+  assert.deepEqual(parseCard(card).repos, [{ id: 'primary', worktree: job.repos[0].worktree, branch: job.branch, inPlace: true }]);
+  for (const needle of ['`inPlace`', "the user's own checkout", '`git clean`', '`reset --hard`', '`stash`', 'never switch branches', 'never create worktrees', 'file by file']) {
+    assert.ok(system.includes(needle), `contract: missing ${needle}`);
+  }
+});
+
+test('no role prompt implies a tree-wide cleanup of the worktree', async () => {
+  const files = (await fs.readdir(templatesDir())).filter((f) => f.endsWith('.md'));
+  for (const f of files) {
+    const text = await fs.readFile(path.join(templatesDir(), f), 'utf8');
+    assert.ok(!/must hold only your outputs/.test(text), `${f}: implies tree-wide cleanup`);
+  }
+});
