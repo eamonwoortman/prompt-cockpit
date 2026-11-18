@@ -317,8 +317,9 @@ export function validateScopedCommitMessage(message) {
   const lines = normalized.split('\n');
   const title = lines[0];
   if (title.length > 80) return { valid: false, reason: 'the title exceeds 80 characters' };
-  if (!/^[^\s:]+:\s+\S.*$/.test(title)) {
-    return { valid: false, reason: 'the title must use "scope: description" format' };
+  // One scope token, or several separated by commas ("engine, graph: ...").
+  if (!/^[^\s:,]+(?:,\s*[^\s:,]+)*:\s+\S.*$/.test(title)) {
+    return { valid: false, reason: 'the title must use "scope: description" or "scope1, scope2: description" format' };
   }
   if (lines.length === 1) return { valid: true };
   if (lines[1] !== '') return { valid: false, reason: 'the body must start after one blank line' };

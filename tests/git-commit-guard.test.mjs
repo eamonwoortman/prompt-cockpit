@@ -54,6 +54,17 @@ test('scoped commit validator accepts the /commit message format', () => {
   assert.deepEqual(validateScopedCommitMessage('session: preserve settings\n\n- keep live values\n- add regression coverage'), { valid: true });
 });
 
+test('scoped commit validator accepts a comma-separated multi-scope title', () => {
+  assert.deepEqual(validateScopedCommitMessage('engine, graph: material GPU bindings built by LoadMaterial.'), { valid: true });
+  assert.deepEqual(validateScopedCommitMessage('engine,graph,ui: share bindings'), { valid: true });
+});
+
+test('scoped commit validator still rejects prose or malformed multi-scope titles', () => {
+  assert.equal(validateScopedCommitMessage('fix the reset bug: details').valid, false);
+  assert.equal(validateScopedCommitMessage('engine, : oops').valid, false);
+  assert.equal(validateScopedCommitMessage(', graph: oops').valid, false);
+});
+
 test('scoped commit validator rejects messages outside the skill format', () => {
   assert.equal(validateScopedCommitMessage('Fix the reset bug').valid, false);
   assert.equal(validateScopedCommitMessage('session: fix\n\nexplanation').valid, false);
