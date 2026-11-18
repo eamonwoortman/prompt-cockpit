@@ -133,6 +133,12 @@ test('costForUsage prices the current Codex model catalog', () => {
   assert.equal(costForUsage('gpt-5.5', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 5);
   assert.equal(costForUsage('gpt-6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000 }).cost, 2 + 10 + 0.2 + 2.5);
   assert.equal(costForUsage('gpt-6-luna', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 0.1);
+  assert.equal(costForUsage('gpt-6.1-terra', {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+    cache_creation_input_tokens: 1_000_000,
+  }).cost, 1 + 5 + 0.05 + 1.25);
   // gpt-6.1-sol: same uncached in/out as gpt-6-sol; cached input is 0.10 (5% of input), not 0.20.
   assert.equal(costForUsage('gpt-6.1-sol', {
     input_tokens: 1_000_000,
