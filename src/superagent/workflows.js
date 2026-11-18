@@ -7,6 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  ENGINE_ROLES,
   PHASE_ID,
   defaultConfig,
   defaultSuperagentRoot,
@@ -82,7 +83,7 @@ function workflowBase(workflow) {
   const base = defaultConfig();
   const roles = isPlainObject(workflow?.roles) ? workflow.roles : {};
   for (const [role, entry] of Object.entries(roles)) {
-    if (!isPlainObject(entry)) continue;
+    if (!isPlainObject(entry) || ENGINE_ROLES.includes(role)) continue;
     const fields = Object.fromEntries(MODEL_FIELDS.filter((f) => entry[f] !== undefined).map((f) => [f, entry[f]]));
     base.models[role] = { ...(isPlainObject(base.models[role]) ? base.models[role] : { provider: 'claude' }), ...fields };
   }
@@ -199,6 +200,7 @@ function checkRoles(roles, errors) {
   for (const [role, entry] of Object.entries(roles)) {
     const at = keyPath('roles', role);
     if (!ROLE_NAME.test(role)) errors.push({ path: at, message: `role name "${role}" must be letters, digits or hyphens, starting with a letter or digit` });
+    if (ENGINE_ROLES.includes(role)) errors.push({ path: at, message: `"${role}" is an engine role; set its model in config.json` });
     if (!isPlainObject(entry)) errors.push({ path: at, message: 'role entry must be an object' });
     else if (entry.prompt !== undefined && !isNonEmptyString(entry.prompt)) errors.push({ path: `${at}.prompt`, message: 'prompt must be a non-empty string' });
   }

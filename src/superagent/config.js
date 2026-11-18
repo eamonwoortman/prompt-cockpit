@@ -13,6 +13,8 @@ import { CLAUDE_EFFORTS } from '../provider-registry.js';
 
 export const PHASE_KINDS = ['author', 'brainstorm', 'review', 'per-task', 'human'];
 export const STAND_IN_ROLE = 'stand-in';
+// Roles the engine runs itself; their models come from config.json only, never from a workflow file.
+export const ENGINE_ROLES = Object.freeze(['verifier', STAND_IN_ROLE, 'router']);
 export const WORKER_PERMISSION_MODES = ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk'];
 const MODES = ['automatic', 'manual'];
 // The router's answer limit; its generation cap adds a thinking allowance on top.

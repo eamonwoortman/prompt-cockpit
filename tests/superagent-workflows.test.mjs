@@ -121,6 +121,9 @@ test('validation refuses', async (t) => {
     ['a last phase that is not human', (d) => { d.phases.pop(); }, /exactly one human phase, and it must be last/],
     ['a role with no model', (d) => { d.phases[0].role = 'ghostwriter'; }, /"ghostwriter" has no entry in models/],
     ['a role with no prompt', (d) => { d.phases[2].taskReview = 'nitpicker'; d.roles = { nitpicker: { model: 'claude-sonnet-5-5', maxTurns: 10 } }; }, /role "nitpicker" has no prompt/],
+    ['the engine role verifier in roles', (d) => { d.roles = { verifier: { model: 'claude-haiku-5-5', maxTurns: 1 } }; }, /roles\.verifier: "verifier" is an engine role; set its model in config\.json/],
+    ['the engine role stand-in in roles', (d) => { d.roles = { 'stand-in': { maxTurns: 2 } }; }, /"stand-in" is an engine role/],
+    ['the engine role router in roles', (d) => { d.roles = { router: { maxTurns: 1 } }; }, /"router" is an engine role/],
     ['the artifact key review (a reserved attempt-key kind)', (d) => { d.artifacts.review = 'docs/custom/review.md'; }, /artifact key "review" is reserved/],
     ['the artifact key idea', (d) => { d.artifacts.idea = 'docs/custom/idea.md'; }, /artifact key "idea" is reserved/],
     ['an artifact key with a colon', (d) => { d.artifacts['a:b'] = 'docs/custom/ab.md'; }, /artifact key "a:b" must be/],
@@ -139,7 +142,7 @@ test('validation refuses', async (t) => {
       const doc = baseDoc();
       mutate(doc);
       const errors = check(doc);
-      assert.ok(errors.some((e) => message.test(e.message)), `${name}: ${JSON.stringify(errors)}`);
+      assert.ok(errors.some((e) => message.test(e.message) || message.test(`${e.path}: ${e.message}`)), `${name}: ${JSON.stringify(errors)}`);
     });
   }
   await t.test('two artifact paths equal after substitution and win32 normalisation', () => {
@@ -421,6 +424,10 @@ test('models merge in four layers', () => {
   assert.deepEqual(resolveWorkflowModels({ roles: { fixer: { model: 'claude-sonnet-5-5', maxTurns: 80 } } }, {}, null).fixer, {
     provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 80,
   });
+  const engine = { verifier: { model: 'claude-haiku-5-5', maxTurns: 1 }, 'stand-in': { model: 'claude-haiku-5-5' }, router: { maxTurns: 9 } };
+  const ignored = resolveWorkflowModels({ roles: engine }, {}, null);
+  for (const role of ['verifier', 'stand-in', 'router']) assert.deepEqual(ignored[role], defaultConfig().models[role], role);
+  assert.deepEqual(resolveWorkflowModels({ roles: engine }, { defaults: { models: { verifier: { maxTurns: 7 } } } }, null).verifier, { ...defaultConfig().models.verifier, maxTurns: 7 });
   assert.deepEqual(resolveWorkflowModels({}, fileConfig, projectPath), {
     ...defaultConfig().models,
     implementer: { ...defaultConfig().models.implementer, model: 'defaults-model', effort: 'low' },
