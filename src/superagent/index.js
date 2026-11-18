@@ -775,15 +775,25 @@ export function createSuperagent({
     for (const note of notes) log(`job ${jobId}: ${note}`);
   }
 
+  // What every confirmed job-stopped is followed by.
+  async function afterStopped(jobId, stopped) {
+    releaseIfFinished(jobId);
+    pendingDecisions.delete(jobId);
+    await archive(stopped);
+  }
+
   // A failed append is left to the stopJob queued behind this provisioning,
   // which finds the job unfinished and records the stop itself.
   async function recordProvisioningStop(jobId) {
+    let stopped;
     try {
-      await appendConfirmed(jobId, { type: 'job-stopped' }, (j) => j.state === 'stopped');
+      stopped = await appendConfirmed(jobId, { type: 'job-stopped' }, (j) => j.state === 'stopped');
     } catch (err) {
       log(`could not record the stop of job ${jobId} during provisioning`, err);
       await reload(jobId);
+      return;
     }
+    await afterStopped(jobId, stopped);
   }
 
   // stopJob aborts the controller before it queues behind this. An in-place
@@ -960,9 +970,7 @@ export function createSuperagent({
         }
         await runner.stopAttempt(jobId);
         const stopped = await appendConfirmed(jobId, { type: 'job-stopped' }, (j) => j.state === 'stopped');
-        releaseIfFinished(jobId);
-        pendingDecisions.delete(jobId);
-        await archive(stopped);
+        await afterStopped(jobId, stopped);
         return stopped;
       } finally {
         stopRequested.delete(jobId);

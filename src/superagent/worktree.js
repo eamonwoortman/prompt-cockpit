@@ -32,6 +32,10 @@ export function slugify(title, jobId, maxBase = 40) {
 // shell) and the result also carries `aborted: true` with a non-zero code; an
 // already-aborted signal starts no process at all. On POSIX killProcessTree
 // signals only git's own pid.
+//
+// The abort stops listening at 'exit', not at the callback (which waits for
+// 'close'): Node releases the pid at exit, and a kill after that could hit a
+// process that reused it. An abort after exit is not an abort of this run.
 export function createGit({ execFileImpl = execFile, killTree = killProcessTree } = {}) {
   return function git(args, { cwd, signal } = {}) {
     if (signal?.aborted) return Promise.resolve({ code: 1, stdout: '', stderr: 'superagent: git was not started: aborted', aborted: true });
@@ -39,6 +43,7 @@ export function createGit({ execFileImpl = execFile, killTree = killProcessTree 
       let aborted = false;
       const onAbort = () => {
         aborted = true;
+        if (child.exitCode != null || child.signalCode != null) return;
         if (!killTree(child.pid)) child.kill?.('SIGKILL');
       };
       const child = execFileImpl('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
@@ -49,7 +54,9 @@ export function createGit({ execFileImpl = execFile, killTree = killProcessTree 
         const res = { code, stdout: stdout ?? '', stderr: stderr || (err && typeof err.code !== 'number' ? err.message : '') };
         resolve(aborted ? { ...res, aborted: true } : res);
       });
-      signal?.addEventListener('abort', onAbort, { once: true });
+      if (!signal) return;
+      signal.addEventListener('abort', onAbort, { once: true });
+      child.once?.('exit', () => signal.removeEventListener('abort', onAbort));
     });
   };
 }
@@ -154,11 +161,20 @@ async function realpathOrNull(p) {
   }
 }
 
+// The real path a target must have: its own place under the real worktrees
+// root, so a link to anywhere else (a sibling job's worktree included) fails.
+async function isExactTarget(worktreesRoot, worktree, real) {
+  const expected = path.join(await realpath(worktreesRoot), path.relative(path.resolve(worktreesRoot), path.resolve(worktree)));
+  return fold(real) === fold(expected);
+}
+
 // The half-made worktree of a provisioning a Stop cancelled, and nothing else:
-// `worktree` must lie strictly inside `worktreesRoot`, by path and (when it
-// exists) by real path, or nothing runs. The branch goes only while it still
-// points at `baseSha`, so a branch with a commit is never deleted. Never
-// throws; whatever could not be done is described in `notes`.
+// `worktree` must lie strictly inside `worktreesRoot` and (when it exists)
+// really be that path, or nothing runs. No prune: it would act on every
+// missing worktree of the user's repo, and never on ours, which a killed add
+// leaves locked. The branch goes only while it still points at `baseSha`, so
+// a branch with a commit is never deleted. Never throws; whatever could not
+// be done is described in `notes`.
 export async function removeAbortedWorktree({ git = defaultGit, origin, worktree, branch, baseSha, worktreesRoot }) {
   const notes = [];
   const result = { worktreeRemoved: false, branchDeleted: false, notes };
@@ -174,10 +190,10 @@ export async function removeAbortedWorktree({ git = defaultGit, origin, worktree
   const contained = await step(`could not check ${worktree}`, async () => {
     if (!isStrictlyInside(path.resolve(worktreesRoot), path.resolve(worktree))) return false;
     const real = await realpathOrNull(worktree);
-    return real === null || isStrictlyInside(await realpath(worktreesRoot), real);
+    return real === null || isExactTarget(worktreesRoot, worktree, real);
   });
   if (contained !== true) {
-    if (contained === false) notes.push(`${worktree} is outside ${worktreesRoot}; nothing removed`);
+    if (contained === false) notes.push(`${worktree} is not its own path under ${worktreesRoot} (outside it, or a link); nothing removed`);
     return result;
   }
 
@@ -185,13 +201,12 @@ export async function removeAbortedWorktree({ git = defaultGit, origin, worktree
   if (removed?.code === 0) result.worktreeRemoved = true;
   else {
     if (removed) notes.push(`git worktree remove failed: ${removed.stderr.trim()}`);
-    const pruned = await step('git worktree prune failed', () => git(['worktree', 'prune'], { cwd: origin }));
-    if (pruned && pruned.code !== 0) notes.push(`git worktree prune failed: ${pruned.stderr.trim()}`);
+    notes.push(`a locked worktree entry for ${worktree} may remain in ${origin}`);
     await step(`could not delete ${worktree}`, async () => {
       const real = await realpathOrNull(worktree);
       if (real === null) return;
-      if (!isStrictlyInside(await realpath(worktreesRoot), real)) {
-        notes.push(`${worktree} now resolves outside ${worktreesRoot}; kept`);
+      if (!(await isExactTarget(worktreesRoot, worktree, real))) {
+        notes.push(`${worktree} now resolves outside its own path under ${worktreesRoot}; kept`);
         return;
       }
       await rm(real, { recursive: true, force: true });

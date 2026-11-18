@@ -59,7 +59,7 @@ async function harness({ git } = {}) {
   });
   const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   const jobId = async () => (await store.listJobIds())[0];
-  return { root, repo, baseSha, worktreesRoot, store, sa, factory, events, logs, jobId };
+  return { root, repo, baseSha, jobsRoot, worktreesRoot, store, sa, factory, events, logs, jobId };
 }
 
 const create = (h, over = {}) => h.sa.createJob({ title: 'Add hello', idea: 'Add hello.txt', primaryRepo: h.repo, fixture: 'milestone-1', ...over });
@@ -67,11 +67,13 @@ const create = (h, over = {}) => h.sa.createJob({ title: 'Add hello', idea: 'Add
 test('Stop during git worktree add kills the git tree, removes the half-made worktree and branch, and stops the job', async () => {
   try {
     const killed = [];
+    const ran = [];
     const reached = deferred();
     let finishAdd;
     // Real git for everything; worktree add really runs, is left locked the
     // way a killed one is, and then "hangs" as a fake child until killed.
     const execFileImpl = (file, args, opts, cb) => {
+      ran.push(args.join(' '));
       if (!isAdd(args)) return execFile(file, args, opts, cb);
       execFileSync(file, args, { cwd: opts.cwd, stdio: 'ignore' });
       execFileSync('git', ['worktree', 'lock', '--reason', 'initializing', args.at(-2)], { cwd: opts.cwd, stdio: 'ignore' });
@@ -106,6 +108,7 @@ test('Stop during git worktree add kills the git tree, removes the half-made wor
     assert.equal(existsSync(worktree), false);
     assert.equal(hasBranch(h.repo, branch), false);
     assert.ok(!gitIn(h.repo, 'worktree', 'list', '--porcelain').toLowerCase().includes(h.store.get(jobId).slug));
+    assert.equal(ran.some((a) => a.includes('prune')), false, 'cleanup never prunes the user repo');
 
     await h.sa.tick();
     assert.equal(h.factory.impls.size, 0);
@@ -159,7 +162,7 @@ test('a cleanup failure is logged and the job is still stopped', async () => {
         return { code: 1, stdout: '', stderr: '', aborted: true };
       }
       if (args[0] === 'worktree' && args[1] === 'remove') return { code: 128, stdout: '', stderr: 'fatal: injected remove failure' };
-      if (args[0] === 'worktree' && args[1] === 'prune') throw new Error('injected prune crash');
+      if (args[0] === 'worktree' && args[1] === 'prune') assert.fail('cleanup never prunes the user repo');
       return defaultGit(args, opts);
     };
     const h = await harness({ git });
@@ -172,7 +175,7 @@ test('a cleanup failure is logged and the job is still stopped', async () => {
     assert.deepEqual(h.events(jobId).map((e) => e.type), ['job-created', 'job-stopped']);
     const text = h.logs.join('\n');
     assert.match(text, /injected remove failure/);
-    assert.match(text, /injected prune crash/);
+    assert.match(text, /a locked worktree entry .* may remain/);
   } finally { registry._reset(); }
 });
 
@@ -250,6 +253,7 @@ test('in place: Stop during the branch switch waits for it, runs no cleanup in t
     assert.equal(stopped.state, 'stopped');
     assert.deepEqual(h.events(jobId).map((e) => e.type), ['job-created', 'worktree-created', 'job-stopped']);
     assert.equal(gitIn(h.repo, 'symbolic-ref', '--short', 'HEAD'), branch);
+    assert.ok(existsSync(path.join(h.jobsRoot, jobId, 'ledger')), 'a provisioning stop archives the ledger like any stop');
     const after = calls.slice(switchAt).map((c) => c.args);
     assert.equal(after.some((a) => /^(worktree|branch|reset|clean|stash|checkout|switch)\b/.test(a)), false, after.join('\n'));
     // The folder reservation is released: the folder can be named again (and
