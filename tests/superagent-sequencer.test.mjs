@@ -1133,3 +1133,19 @@ test('test routing follows the test flag, not the id', () => {
   assert.notEqual(nextAction(plain, ctx({ now: T0 + 60 * MIN })).type, 'route-test-failure');
   assert.equal(nextAction(plain, ctx({ now: T0 + 60 * MIN })).purpose, 'author');
 });
+
+test('an attempt the folder gate ended is not counted toward caps, repeated-error, back-off or recovery', () => {
+  const gated = (id, n, at) => [started(id, n, { recovery: false, previousAttemptId: null }), ended(id, 'failed', { reason: 'folder-changed', signature: 'folder-changed|this folder is on main', at })];
+  const fresh = nextAction(build(...gated('f1', 1, T0), ...gated('f2', 1, T0), ...gated('f3', 1, T0)), ctx({ now: T0 }));
+  assert.deepEqual(fresh, nextAction(build(), ctx()));
+
+  const T1 = T0 + 100_000;
+  const afterReal = build(...failedAt('a1', 1, T0, 'sig-one'), ...gated('f1', 2, T1));
+  assert.deepEqual(nextAction(afterReal, ctx({ now: T0 + 59_999 })), { type: 'wait', until: T0 + 60_000, why: 'backoff' });
+  const retry = nextAction(afterReal, ctx({ now: T0 + 60_000 }));
+  assert.deepEqual([retry.type, retry.n, retry.recovery, retry.previousAttemptId], ['launch', 2, true, 'a1']);
+  assert.deepEqual(attemptsFor(afterReal, 'spec').map((a) => a.attemptId), ['a1']);
+
+  const review = atReview(...[1, 2, 3].map(() => ({ purpose: 'review', round: 1, outcome: 'failed', reason: 'folder-changed', signature: 'folder-changed|x' })));
+  assert.deepEqual(nextAction(review, ctx()), launchOf(review, 'spec-reviewer', { phase: 'spec-review', purpose: 'review', round: 1 }));
+});

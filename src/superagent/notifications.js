@@ -1,7 +1,6 @@
-import { needsYouQuestionText } from './view-model.js';
+import { needsYouQuestionText, needsYouType } from './view-model.js';
 
 const QUESTION_MAX_CHARS = 120;
-const TYPES = new Set(['question', 'ready-to-try', 'stuck']);
 
 function firstLine(text) {
   const line = String(text).split(/\r?\n/).find((l) => l.trim() !== '') ?? '';
@@ -12,15 +11,16 @@ function firstLine(text) {
 function messageFor(job) {
   if (job.reason === 'question') return `"${job.title}" has a question: ${firstLine(needsYouQuestionText(job))}`;
   if (job.reason === 'ready-to-try') return `"${job.title}" is ready to try`;
+  if (job.reason === 'folder-changed') return `"${job.title}" is paused: ${job.detail?.text ?? ''}`;
   return `"${job.title}" is stuck: ${job.detail?.why ?? job.reason}`;
 }
 
 export function superagentNotifications(jobs) {
   return jobs
-    .filter((job) => job?.state === 'needs-you' && job.title && TYPES.has(job.reason))
+    .filter((job) => job?.title && needsYouType(job) !== null)
     .map((job) => ({
       kind: 'superagent',
-      type: job.reason,
+      type: needsYouType(job),
       key: `superagent:${job.jobId}:${job.needsYouSeq}`,
       jobId: job.jobId,
       title: job.title,

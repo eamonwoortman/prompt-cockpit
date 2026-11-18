@@ -1341,3 +1341,64 @@ test('a recorded prompt that disappeared makes the job stuck', async () => {
     assert.deepEqual([got.state, got.reason, got.detail.why, got.detail.path], ['needs-you', 'stuck', 'prompt-missing', recorded]);
   } finally { registry._reset(); }
 });
+
+test('beforeSession is the last check before createSession for an in-place job', async () => {
+  registry._reset();
+  try {
+    const root = await tempDir('sa-runner-gate-');
+    const store = createSuperagentStore({ rootDir: path.join(root, 'jobs'), now: () => T0, logImpl: quiet });
+    const inPlace = await liveJob(store, { jobId: 'jp', repos: [{ id: 'primary', origin: path.join(root, 'origin'), inPlace: true }] });
+    const worktreeJob = await liveJob(store, { jobId: 'jw', repos: [{ id: 'primary', origin: path.join(root, 'other') }] });
+    const checked = [];
+    let verdict = { ok: false, text: 'this folder is on main; switch it back to superagent/add-hello to continue', folder: '/repo' };
+    const factory = sessionFactory(registry);
+    const runner = createRunner({
+      registry: factory.registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet,
+      beforeSession: async (job) => { checked.push(job.jobId); return verdict; },
+    });
+
+    assert.deepEqual(await runner.launch(inPlace, launchAction()), { error: 'folder-changed' });
+    await runner.drain();
+    assert.equal(factory.calls.length, 0);
+    assert.equal(runner.isLive('jp'), false);
+    const paused = store.get('jp');
+    assert.deepEqual([paused.attempts[0].outcome, paused.attempts[0].reason, paused.attempts[0].sessionId], ['failed', 'folder-changed', null]);
+    assert.deepEqual([paused.state, paused.reason, paused.detail], ['needs-you', 'folder-changed', { why: 'folder-changed', text: verdict.text, folder: '/repo' }]);
+
+    assert.ok((await runner.launch(worktreeJob, launchAction())).attemptId);
+    assert.deepEqual(checked, ['jp']);
+    assert.equal(factory.calls.length, 1);
+
+    await store.append('jp', { type: 'folder-restored' });
+    verdict = { ok: true };
+    assert.ok((await runner.launch(store.get('jp'), launchAction())).attemptId);
+    assert.deepEqual(checked, ['jp', 'jp']);
+    assert.equal(factory.calls.length, 2);
+  } finally { registry._reset(); }
+});
+
+test('a stop during beforeSession ends the attempt as stopped, with no pause', async () => {
+  registry._reset();
+  try {
+    const root = await tempDir('sa-runner-gate-stop-');
+    const store = createSuperagentStore({ rootDir: path.join(root, 'jobs'), now: () => T0, logImpl: quiet });
+    const job = await liveJob(store, { repos: [{ id: 'primary', origin: path.join(root, 'origin'), inPlace: true }] });
+    const reached = deferred();
+    const release = deferred();
+    const factory = sessionFactory(registry);
+    const runner = createRunner({
+      registry: factory.registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet,
+      beforeSession: async () => { reached.resolve(); await release.promise; return { ok: false, text: 'moved' }; },
+    });
+    const launching = runner.launch(job, launchAction());
+    await reached.promise;
+    await store.append(job.jobId, { type: 'job-stopped' });
+    release.resolve();
+    assert.deepEqual(await launching, { error: 'job-not-running' });
+    await runner.drain();
+    assert.equal(factory.calls.length, 0);
+    const got = store.get(job.jobId);
+    assert.equal(got.attempts[0].outcome, 'stopped');
+    assert.equal(got.state, 'stopped');
+  } finally { registry._reset(); }
+});

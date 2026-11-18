@@ -21,7 +21,7 @@ import { isSafeSessionId } from '../safe-id.js';
 import { defaultConfig, defaultSuperagentRoot } from './config.js';
 import { LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
 
-export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered'];
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored'];
 
 const NEWLINE = 0x0a;
 
@@ -113,6 +113,9 @@ export function deriveJob(events) {
         // A verifier-confirmed blocker's question lives only in the detail.
         job.answers.push({ forAttemptId: ev.forAttemptId, answer: ev.answer, question: job.detail?.question ?? job.detail?.text ?? null, at: ev.at ?? null });
         setState('running');
+        break;
+      case 'folder-restored':
+        if (job.state === 'needs-you' && job.reason === 'folder-changed') setState('running');
         break;
       case 'job-accepted': setState('done'); break;
       case 'job-stopped': setState('stopped'); break;

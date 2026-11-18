@@ -32,6 +32,13 @@
 // nudge is the only non-terminal claimer: it releases the claim and replays a
 // removal recorded meanwhile.
 //
+// In-place safety gate (Plan 7): beforeSession(job) is the last await before
+// createSession for a job with an in-place repo, since the budget check,
+// attempt start and prompt reads all await first and an earlier pass of the
+// gate may be stale. A failure ends the attempt without a session (failed,
+// folder-changed, which the sequencer leaves out of its scope) and pauses the
+// job with needs-you folder-changed.
+//
 // live.sessionId is stamped synchronously right after createSession, before
 // the first await: the approval interceptor and the removal listener look the
 // attempt up by session id and either can fire during that await (same reason
@@ -42,6 +49,7 @@ import path from 'node:path';
 import { writeJsonAtomic } from '../json-store.js';
 import { RESULT_FILE, attemptDir, outcomeForResult, primaryRepo, readResult, validateResult } from './results.js';
 import { READ_ONLY_ROLES, READ_ONLY_TOOLS, buildWorkerPrompt, denyMessageFor, nudgeText } from './prompts.js';
+import { folderChangedEvent } from './inplace.js';
 import { attemptContext, failureSignature } from './sequencer.js';
 import { defaultGit } from './worktree.js';
 
@@ -80,6 +88,7 @@ export function createRunner({
   logImpl = console.error,
   projectDirFor = (job) => primaryRepo(job).origin,
   writeJsonImpl = writeJsonAtomic,
+  beforeSession = null,
 }) {
   const lives = new Map();
   const bySession = new Map();
@@ -358,6 +367,25 @@ export function createRunner({
     return null;
   }
 
+  async function folderGate(live, job) {
+    if (!beforeSession || !job.repos.some((r) => r.inPlace === true)) return null;
+    let check;
+    try {
+      check = await beforeSession(job);
+    } catch (err) {
+      check = { ok: false, text: `could not check this folder: ${messageOf(err)}` };
+    }
+    const blocked = await gate(live);
+    if (blocked || check?.ok === true) return blocked;
+    const claimed = claim(live, async () => {
+      await finish(live, failed('folder-changed', check?.text ?? ''));
+      if (live.pendingEnd) return;
+      await store.append(live.jobId, folderChangedEvent({ text: check?.text ?? '', folder: check?.folder ?? null }));
+    });
+    if (claimed) await claimed;
+    return { error: 'folder-changed' };
+  }
+
   function preCompactHook(jobId, attemptId) {
     return async (input) => {
       try {
@@ -471,6 +499,8 @@ export function createRunner({
       return err?.code === 'ERR_PROMPT_MISSING' ? endPromptMissing(live, err) : endLaunch(live, err);
     }
     blocked = await gate(live);
+    if (blocked) return blocked;
+    blocked = await folderGate(live, store.get(jobId) ?? job);
     if (blocked) return blocked;
 
     const current = store.get(jobId) ?? job;

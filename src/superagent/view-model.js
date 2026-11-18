@@ -9,8 +9,17 @@ function statusOf(job) {
   return 'running';
 }
 
+const NEEDS_YOU_TYPES = new Set(['question', 'ready-to-try', 'stuck']);
+
+// Plan 7 Decision 5: a folder-changed pause is shown as stuck.
+export function needsYouType(job) {
+  if (job?.state !== 'needs-you') return null;
+  const type = job.reason === 'folder-changed' ? 'stuck' : job.reason;
+  return NEEDS_YOU_TYPES.has(type) ? type : null;
+}
+
 export function jobSummary(job) {
-  const needsYou = job.state === 'needs-you' && ['question', 'ready-to-try', 'stuck'].includes(job.reason) ? job.reason : null;
+  const needsYou = needsYouType(job);
   return {
     jobId: job.jobId,
     title: isCorrupt(job) ? CORRUPT_TITLE : (job.title ?? job.jobId),
@@ -109,11 +118,15 @@ function routerView(job) {
 function needsYouView(job) {
   if (job.state !== 'needs-you') return null;
   const d = job.detail ?? null;
+  let text = null;
+  if (job.reason === 'question') text = needsYouQuestionText(job);
+  else if (job.reason === 'folder-changed') text = String(d?.text ?? '');
   return {
-    type: job.reason,
+    type: job.reason === 'folder-changed' ? 'stuck' : job.reason,
+    reason: job.reason,
     key: `superagent:${job.jobId}:${job.needsYouSeq}`,
     seq: job.needsYouSeq,
-    text: job.reason === 'question' ? needsYouQuestionText(job) : null,
+    text,
     detail: d,
     answerable: job.reason === 'question' && d?.kind !== 'budget',
   };

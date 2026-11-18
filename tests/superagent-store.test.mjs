@@ -452,3 +452,36 @@ test('a workflow job keeps its recorded artifacts and phases', () => {
   assert.equal(atTest.phaseId, 'test');
   assert.equal(wf(...toVerify, ev.phaseCompleted('verify', 1), ev.testRouted('v2', fix)).phaseId, 'test', 'the unflagged phase named test does not route');
 });
+
+test('folder-restored only resumes a folder-changed job', () => {
+  const base = [jobCreated(), { type: 'job-provisioned' }];
+  const pause = { type: 'needs-you', reason: 'folder-changed', detail: { why: 'folder-changed', text: 'this folder is on main; switch it back to superagent/add-hello to continue' } };
+  const restored = deriveJob(stamp([...base, pause, { type: 'folder-restored' }]));
+  assert.deepEqual([restored.state, restored.reason, restored.detail, restored.needsYouSeq], ['running', null, null, null]);
+
+  const others = [
+    { type: 'needs-you', reason: 'stuck', detail: { why: 'attempt-cap' } },
+    { type: 'needs-you', reason: 'question', detail: { attemptId: 'a1', question: 'Q?' } },
+    { type: 'needs-you', reason: 'ready-to-try', detail: null },
+  ];
+  for (const other of others) {
+    const job = deriveJob(stamp([...base, other, { type: 'folder-restored' }]));
+    assert.deepEqual([job.state, job.reason, job.needsYouSeq], ['needs-you', other.reason, 3], other.reason);
+  }
+  for (const finished of [{ type: 'job-stopped' }, { type: 'job-failed', error: 'x' }, { type: 'job-accepted' }]) {
+    const job = deriveJob(stamp([...base, pause, finished, { type: 'folder-restored' }]));
+    assert.notEqual(job.state, 'running', finished.type);
+  }
+  assert.equal(deriveJob(stamp([jobCreated(), { type: 'folder-restored' }])).state, 'provisioning');
+
+  const again = deriveJob(stamp([...base, pause, { type: 'folder-restored' }, pause]));
+  assert.deepEqual([again.state, again.reason, again.needsYouSeq], ['needs-you', 'folder-changed', 5]);
+});
+
+test('store.append accepts folder-restored', async () => {
+  const store = createSuperagentStore({ rootDir: await tempDir('sa-store-restored-'), logImpl: quiet });
+  for (const e of [jobCreated(), { type: 'job-provisioned' }, { type: 'needs-you', reason: 'folder-changed', detail: { why: 'folder-changed', text: 't' } }]) await store.append('j1', e);
+  await store.append('j1', { type: 'folder-restored' });
+  assert.equal(store.get('j1').state, 'running');
+  assert.equal((await store.load('j1')).state, 'running');
+});

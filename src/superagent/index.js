@@ -28,11 +28,17 @@
 // anything is awaited. A decision whose append did not land waits in
 // pendingDecisions and is appended again on the next tick, so the model is
 // never called twice for one attempt.
+//
+// In-place safety gate (Plan 7): a launch, and the task-list read, of a job
+// with an in-place repo first checks every such folder (inPlaceGate). A failed
+// check pauses the job with needs-you folder-changed; runTick re-checks a
+// paused job every heartbeat and appends folder-restored once it passes. The
+// runner checks again immediately before createSession.
 import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateMilestoneFixture } from './config.js';
-import { checkInPlace, normaliseTop, provisionInPlace, refuseJobBranch } from './inplace.js';
+import { checkGate, checkInPlace, folderChangedEvent, normaliseTop, provisionInPlace, refuseJobBranch } from './inplace.js';
 import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
@@ -56,6 +62,8 @@ const SLUG_BASE_MAX = 40;
 const SLUG_BASE_MIN = 8;
 
 const messageOf = (err) => String(err?.message ?? err);
+const hasInPlace = (job) => (job?.repos ?? []).some((r) => r.inPlace === true);
+const pausedForFolder = (job) => job?.state === 'needs-you' && job.reason === 'folder-changed';
 const pad = (n) => String(n).padStart(2, '0');
 
 function fail(code, message, extra = {}) {
@@ -115,7 +123,7 @@ export function createSuperagent({
   router = null,
   workflowDirs = { builtin: workflowsDir(), global: path.join(defaultSuperagentRoot(), 'workflows') },
 }) {
-  const runner = createRunner({ registry, store, git, now, idImpl, logImpl });
+  const runner = createRunner({ registry, store, git, now, idImpl, logImpl, beforeSession: inPlaceGate });
   const known = new Set();
   const corrupt = new Map();
   const chains = new Map();
@@ -142,6 +150,16 @@ export function createSuperagent({
   // Registered once, here: a removal between stop() and start() must still
   // reach the runner (same reason as src/autopilot.js's constructor).
   registry.addSessionRemovedListener(runner.onSessionRemoved);
+
+  // Every in-place repo of the job, in order; the first failure wins.
+  async function inPlaceGate(job) {
+    for (const repo of job.repos) {
+      if (repo.inPlace !== true) continue;
+      const check = await checkGate({ git, folder: repo.worktree, branch: job.branch, baseSha: repo.baseSha });
+      if (!check.ok) return { ok: false, text: check.text, folder: repo.worktree };
+    }
+    return { ok: true };
+  }
 
   function withJob(jobId, fn) {
     const prev = chains.get(jobId) || Promise.resolve();
@@ -252,7 +270,20 @@ export function createSuperagent({
     return job;
   }
 
+  const stepStale = (jobId) => stopping || stopRequested.has(jobId) || store.get(jobId)?.state !== 'running';
+
+  // True when the job may go on: a failed gate pauses it (unless it was
+  // stopped or moved on during the check).
+  async function passGate(jobId, job) {
+    const check = await inPlaceGate(job);
+    if (stepStale(jobId)) return false;
+    if (check.ok) return true;
+    await store.append(jobId, folderChangedEvent(check));
+    return false;
+  }
+
   async function launchStep(jobId, job, action) {
+    if (hasInPlace(job) && !(await passGate(jobId, job))) return;
     let verdict;
     try {
       verdict = await budgetCheck({ job, action });
@@ -260,7 +291,7 @@ export function createSuperagent({
       log(`budget check for job ${jobId} failed, not launching`, err);
       return;
     }
-    if (stopping || stopRequested.has(jobId) || store.get(jobId)?.state !== 'running') return;
+    if (stepStale(jobId)) return;
     if (!verdict?.allow) {
       const text = verdict?.reason ?? 'budget check refused the launch';
       await store.append(jobId, { type: 'needs-you', reason: 'question', detail: { kind: 'budget', text } });
@@ -271,6 +302,7 @@ export function createSuperagent({
   }
 
   async function loadTasksStep(jobId, job) {
+    if (hasInPlace(job) && !(await passGate(jobId, job))) return;
     const rel = artifactPaths(job).tasks;
     let parsed;
     try {
@@ -281,7 +313,7 @@ export function createSuperagent({
       if (err?.code !== 'ENOENT') throw err;
       parsed = { ok: false, errors: [`could not read ${rel}: ${messageOf(err)}`] };
     }
-    if (stopping || stopRequested.has(jobId) || store.get(jobId)?.state !== 'running') return;
+    if (stepStale(jobId)) return;
     if (parsed.ok) {
       await store.append(jobId, { type: 'tasks-loaded', tasks: parsed.tasks });
     } else {
@@ -475,15 +507,28 @@ export function createSuperagent({
     }
   }
 
+  // A restored job launches on the next tick, not this one.
+  async function restoreStep(jobId) {
+    if (stopping || stopRequested.has(jobId)) return;
+    try {
+      const check = await inPlaceGate(store.get(jobId));
+      if (!check.ok || stopping || stopRequested.has(jobId) || !pausedForFolder(store.get(jobId))) return;
+      await store.append(jobId, { type: 'folder-restored' });
+    } catch (err) {
+      log(`restoring job ${jobId} failed`, err);
+      await reload(jobId);
+    }
+  }
+
   async function runTick() {
     if (stopping) return;
     const jobs = [...known]
       .map((jobId) => store.get(jobId))
-      .filter((job) => job?.state === 'running')
+      .filter((job) => job?.state === 'running' || pausedForFolder(job))
       .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     for (const job of jobs) {
       if (stopping) return;
-      await withJob(job.jobId, () => stepJob(job.jobId));
+      await withJob(job.jobId, () => (pausedForFolder(store.get(job.jobId)) ? restoreStep(job.jobId) : stepJob(job.jobId)));
     }
   }
 

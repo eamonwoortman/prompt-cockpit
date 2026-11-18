@@ -166,3 +166,24 @@ test('the brief is listed when the job has one', () => {
   assert.deepEqual(artifactKeys(job), ['brief', 'spec']);
   assert.equal(artifactPath(job, 'brief'), artifactPaths(job).brief);
 });
+
+test('folder-changed is a stuck bell entry with its text', () => {
+  const text = 'this folder is on main; switch it back to superagent/j1 to continue';
+  const pause = needsYou('folder-changed', { why: 'folder-changed', text, folder: '/repo' });
+  const paused = needing('j1', 'folder-changed', { why: 'folder-changed', text, folder: '/repo' });
+  const [entry] = superagentNotifications([paused]);
+  assert.deepEqual(entry, { kind: 'superagent', type: 'stuck', key: `superagent:j1:${paused.needsYouSeq}`, jobId: 'j1', title: 'Add hello', message: `"Add hello" is paused: ${text}` });
+
+  assert.equal(jobSummary(paused).needsYou, 'stuck');
+  assert.equal(jobSummary(paused).reason, 'folder-changed');
+  const view = jobDetail(paused, notLive).needsYou;
+  assert.deepEqual([view.type, view.reason, view.text, view.answerable, view.seq], ['stuck', 'folder-changed', text, false, paused.needsYouSeq]);
+
+  const restored = m2([pause, { type: 'folder-restored' }], { jobId: 'j1', slug: 'j1' });
+  assert.deepEqual(superagentNotifications([restored]), []);
+  assert.equal(jobDetail(restored, notLive).needsYou, null);
+  const again = m2([pause, { type: 'folder-restored' }, pause], { jobId: 'j1', slug: 'j1' });
+  const [fresh] = superagentNotifications([again]);
+  assert.notEqual(fresh.key, entry.key);
+  assert.equal(fresh.message, entry.message);
+});

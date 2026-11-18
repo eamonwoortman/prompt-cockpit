@@ -5,7 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { tempDir, initRepo, sessionFactory, jobCreated, T0 } from './superagent-helpers.mjs';
+import { tempDir, initRepo, sessionFactory, jobCreated, deferred, T0 } from './superagent-helpers.mjs';
+import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 
 process.env.COCKPIT_HOME = await tempDir('sa-inplace-home-');
 
@@ -14,7 +15,7 @@ const { createSuperagentStore } = await import('../src/superagent/store.js');
 const { createSuperagentConfig } = await import('../src/superagent/config.js');
 const { createSuperagent } = await import('../src/superagent/index.js');
 const { workflowsDir } = await import('../src/superagent/workflows.js');
-const { addLedgerExclude, checkInPlace, normaliseTop } = await import('../src/superagent/inplace.js');
+const { addLedgerExclude, checkGate, checkInPlace, normaliseTop } = await import('../src/superagent/inplace.js');
 const { defaultGit } = await import('../src/superagent/worktree.js');
 
 const quiet = () => {};
@@ -28,7 +29,7 @@ const tryGit = (cwd, ...args) => {
 };
 const norm = (p) => realpathSync.native(path.resolve(p)).toLowerCase();
 
-async function harness({ git, platform = process.platform, worktreesRoot: worktreesOverride } = {}) {
+async function harness({ git, platform = process.platform, worktreesRoot: worktreesOverride, budgetCheck } = {}) {
   registry._reset();
   const root = await tempDir('sa-inplace-');
   const repo = path.join(root, 'repo');
@@ -58,6 +59,7 @@ async function harness({ git, platform = process.platform, worktreesRoot: worktr
       logImpl: (line) => logs.push(line),
       platform,
       ...(git && { git }),
+      ...(budgetCheck && { budgetCheck }),
       workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
@@ -558,5 +560,212 @@ test('the path-length check measures from the in-place folder', async () => {
       return true;
     });
     await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+const lastEvent = (h, jobId) => h.events(jobId).at(-1);
+const pausedText = (from, branch) => `this folder is on ${from}; switch it back to ${branch} to continue`;
+
+test('checkGate passes on the job branch and names what it found otherwise', async () => {
+  const root = await tempDir('sa-inplace-gate-');
+  const repo = path.join(root, 'repo');
+  const baseSha = await initRepo(repo);
+  const own = currentBranch(repo);
+  const branch = 'superagent/x-1';
+  gitIn(repo, 'switch', '-q', '-c', branch);
+  assert.deepEqual(await checkGate({ folder: repo, branch, baseSha }), { ok: true });
+
+  await fs.writeFile(path.join(repo, 'README.md'), '# edited\n');
+  await fs.writeFile(path.join(repo, 'untracked.txt'), 'mine\n');
+  assert.deepEqual(await checkGate({ folder: repo, branch, baseSha }), { ok: true });
+  gitIn(repo, 'checkout', '-q', '--', 'README.md');
+  await fs.rm(path.join(repo, 'untracked.txt'));
+
+  gitIn(repo, 'switch', '-q', own);
+  assert.deepEqual(await checkGate({ folder: repo, branch, baseSha }), { ok: false, text: pausedText(own, branch) });
+  gitIn(repo, 'checkout', '-q', '--detach', branch);
+  assert.deepEqual(await checkGate({ folder: repo, branch, baseSha }), { ok: false, text: `this folder has a detached HEAD; switch it back to ${branch} to continue` });
+
+  gitIn(repo, 'switch', '-q', own);
+  gitIn(repo, 'commit', '-q', '--allow-empty', '-m', 'elsewhere');
+  const elsewhere = gitIn(repo, 'rev-parse', 'HEAD');
+  gitIn(repo, 'switch', '-q', branch);
+  assert.deepEqual(await checkGate({ folder: repo, branch, baseSha: elsewhere }), {
+    ok: false,
+    text: `${branch} no longer contains the commit the job started from (${elsewhere}); restore it to continue`,
+  });
+
+  await conflictingMerge(repo);
+  assert.deepEqual(await checkGate({ folder: repo, branch, baseSha }), { ok: false, text: 'this folder has a git operation in progress (MERGE_HEAD); finish or abort it to continue' });
+
+  const gone = await checkGate({ folder: path.join(root, 'missing'), branch, baseSha });
+  assert.equal(gone.ok, false);
+  assert.match(gone.text, /^could not check this folder: /);
+});
+
+test('the safety gate pauses and resumes', async () => {
+  try {
+    let budgetCalls = 0;
+    const h = await harness({ budgetCheck: () => { budgetCalls++; return { allow: true }; } });
+    const own = currentBranch(h.repo);
+    const job = await create(h, { inPlace: [h.repo] });
+    gitIn(h.repo, 'switch', '-q', own);
+    await h.sa.tick();
+    assert.equal(h.factory.calls.length, 0);
+    assert.equal(budgetCalls, 0);
+    const paused = h.sa.getJob(job.jobId);
+    assert.deepEqual([paused.state, paused.reason], ['needs-you', 'folder-changed']);
+    assert.deepEqual(paused.detail, { why: 'folder-changed', text: pausedText(own, job.branch), folder: job.repos[0].worktree });
+    assert.deepEqual(paused.attempts, []);
+    await assert.rejects(h.sa.answerQuestion(job.jobId, 'switched', { needsYouSeq: paused.needsYouSeq }), { code: 'ERR_INVALID_STATE' });
+    await assert.rejects(h.sa.accept(job.jobId, { needsYouSeq: paused.needsYouSeq }), { code: 'ERR_INVALID_STATE' });
+    const count = h.events(job.jobId).length;
+    await h.sa.tick();
+    assert.equal(h.events(job.jobId).length, count);
+    assert.equal(currentBranch(h.repo), own);
+
+    gitIn(h.repo, 'switch', '-q', job.branch);
+    await h.sa.tick();
+    assert.equal(lastEvent(h, job.jobId).type, 'folder-restored');
+    assert.equal(h.sa.getJob(job.jobId).state, 'running');
+    assert.equal(h.factory.calls.length, 0);
+
+    gitIn(h.repo, 'switch', '-q', own);
+    await h.sa.tick();
+    const again = h.sa.getJob(job.jobId);
+    assert.equal(again.reason, 'folder-changed');
+    assert.notEqual(again.needsYouSeq, paused.needsYouSeq);
+    gitIn(h.repo, 'switch', '-q', job.branch);
+    await h.sa.tick();
+    await h.sa.tick();
+    assert.equal(h.factory.calls.length, 1);
+    assert.equal(budgetCalls, 1);
+    assert.equal(h.sa.getJob(job.jobId).attempts.length, 1);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a branch switch during a pending budget check still blocks the launch', async () => {
+  try {
+    const called = deferred();
+    const pending = deferred();
+    let first = true;
+    const budgetCheck = () => {
+      if (!first) return { allow: true };
+      first = false;
+      called.resolve();
+      return pending.promise;
+    };
+    const h = await harness({ budgetCheck });
+    const own = currentBranch(h.repo);
+    const job = await create(h, { inPlace: [h.repo] });
+    const ticking = h.sa.tick();
+    await called.promise;
+    gitIn(h.repo, 'switch', '-q', own);
+    pending.resolve({ allow: true });
+    await ticking;
+
+    assert.equal(h.factory.calls.length, 0);
+    assert.equal(registry.list().length, 0);
+    const paused = h.sa.getJob(job.jobId);
+    assert.deepEqual([paused.state, paused.reason, paused.detail.text], ['needs-you', 'folder-changed', pausedText(own, job.branch)]);
+    const [gated] = paused.attempts;
+    assert.deepEqual([gated.n, gated.outcome, gated.reason, gated.sessionId], [1, 'failed', 'folder-changed', null]);
+
+    gitIn(h.repo, 'switch', '-q', job.branch);
+    await h.sa.tick();
+    await h.sa.tick();
+    assert.equal(h.factory.calls.length, 1);
+    const [, launched] = h.sa.getJob(job.jobId).attempts;
+    assert.deepEqual([launched.n, launched.recovery, launched.previousAttemptId, launched.outcome], [1, false, null, null]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a stop during a pending restoration check appends no folder-restored', async () => {
+  try {
+    let hold = null;
+    const git = async (args, opts) => {
+      if (hold && args[0] === 'rev-parse' && args[1] === '--git-dir') {
+        const held = hold;
+        hold = null;
+        held.reached.resolve();
+        await held.release.promise;
+      }
+      return defaultGit(args, opts);
+    };
+    const h = await harness({ git });
+    const own = currentBranch(h.repo);
+    const job = await create(h, { inPlace: [h.repo] });
+    gitIn(h.repo, 'switch', '-q', own);
+    await h.sa.tick();
+    assert.equal(h.sa.getJob(job.jobId).reason, 'folder-changed');
+    gitIn(h.repo, 'switch', '-q', job.branch);
+
+    hold = { reached: deferred(), release: deferred() };
+    const { reached, release } = hold;
+    const ticking = h.sa.tick();
+    await reached.promise;
+    const stopping = h.sa.stopJob(job.jobId);
+    release.resolve();
+    await ticking;
+    assert.equal((await stopping).state, 'stopped');
+    assert.equal(h.events(job.jobId).some((e) => e.type === 'folder-restored'), false);
+    assert.equal(h.factory.calls.length, 0);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('uncommitted changes alone do not trip the gate', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h, { inPlace: [h.repo] });
+    await fs.writeFile(path.join(h.repo, 'README.md'), '# left by an interrupted worker\n');
+    await fs.writeFile(path.join(h.repo, 'scratch.txt'), 'untracked\n');
+    await h.sa.tick();
+    assert.equal(h.factory.calls.length, 1);
+    assert.equal(h.sa.getJob(job.jobId).state, 'running');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('the gate runs after a restart', async () => {
+  try {
+    const h = await harness();
+    const own = currentBranch(h.repo);
+    const job = await create(h, { inPlace: [h.repo] });
+    await h.sa.stop();
+    gitIn(h.repo, 'switch', '-q', own);
+
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    await fresh.sa.tick();
+    assert.equal(fresh.factory.calls.length, 0);
+    const paused = fresh.sa.getJob(job.jobId);
+    assert.deepEqual([paused.state, paused.reason, paused.detail.text], ['needs-you', 'folder-changed', pausedText(own, job.branch)]);
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('the gate holds the task list read of a folder that changed', async () => {
+  try {
+    const h = await harness();
+    const own = currentBranch(h.repo);
+    const toplevel = path.resolve(gitIn(h.repo, 'rev-parse', '--show-toplevel'));
+    const branch = 'superagent/t-jt';
+    gitIn(h.repo, 'branch', branch);
+    const repos = [{ id: 'primary', origin: h.repo, inPlace: true, toplevel, admittedHead: h.baseSha }];
+    await h.store.append('jt', jobCreated({ jobId: 'jt', slug: 't-jt', branch, repos, pipeline: MILESTONE_2_PIPELINE }));
+    await h.store.append('jt', { type: 'worktree-created', repo: 'primary', worktree: toplevel, branch, baseSha: h.baseSha, settingsCopy: 'in-place', inPlace: true });
+    await h.store.append('jt', { type: 'job-provisioned' });
+    for (const phase of ['spec', 'spec-review', 'plan', 'plan-review']) await h.store.append('jt', { type: 'phase-completed', phase, visit: 1, unresolved: [], verification: null });
+
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    await fresh.sa.tick();
+    const paused = fresh.sa.getJob('jt');
+    assert.deepEqual([paused.state, paused.reason, paused.detail.text], ['needs-you', 'folder-changed', pausedText(own, branch)]);
+    assert.equal(paused.tasks, null);
+    await fresh.sa.stop();
   } finally { registry._reset(); }
 });
