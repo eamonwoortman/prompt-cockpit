@@ -60,6 +60,12 @@ export function artifactPaths(job) {
   };
 }
 
+// The keys of reviewPaths, which are also the view's attempt artifact key kinds.
+export const PHASE_ATTEMPT_KINDS = Object.freeze(['review', 'response', 'verify']);
+export const TASK_ATTEMPT_KINDS = Object.freeze(['report', 'taskReview', 'taskVerify']);
+// A workflow artifact key may not be one of these.
+export const RESERVED_ARTIFACT_KEYS = Object.freeze([...PHASE_ATTEMPT_KINDS, ...TASK_ATTEMPT_KINDS, 'idea']);
+
 // Decision 15. A key whose inputs were not given (no round, no taskId) is null.
 export function reviewPaths(job, { phase = null, round = null, taskId = null }) {
   const jobs = `docs/superpowers/jobs/${job.slug}`;

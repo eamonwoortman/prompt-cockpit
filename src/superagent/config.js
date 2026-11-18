@@ -35,7 +35,7 @@ export const MILESTONE_2_PIPELINE = Object.freeze([
   freezePhase({ phase: 'plan', kind: 'author', role: 'planner', inputs: ['spec'], outputs: ['plan', 'tasks'] }),
   freezePhase({ phase: 'plan-review', kind: 'review', role: 'plan-reviewer', author: 'planner', target: 'plan', inputs: ['spec', 'tasks'], maxRounds: 3 }),
   freezePhase({ phase: 'implement', kind: 'per-task', role: 'implementer', taskReview: 'task-reviewer', inputs: ['tasks'] }),
-  freezePhase({ phase: 'test', kind: 'author', role: 'tester', inputs: ['spec', 'tasks'], outputs: ['testReport'] }),
+  freezePhase({ phase: 'test', kind: 'author', role: 'tester', inputs: ['spec', 'tasks'], outputs: ['testReport'], test: true }),
   freezePhase({ phase: 'accept', kind: 'human', inputs: ['testReport'] }),
 ]);
 
@@ -57,12 +57,12 @@ export function defaultConfig() {
       { phase: 'plan', kind: 'author', role: 'planner', inputs: ['spec'], outputs: ['plan', 'tasks'] },
       { phase: 'plan-review', kind: 'review', role: 'plan-reviewer', author: 'planner', target: 'plan', inputs: ['spec', 'tasks'], maxRounds: 3 },
       { phase: 'implement', kind: 'per-task', role: 'implementer', taskReview: 'task-reviewer', inputs: ['tasks'] },
-      { phase: 'test', kind: 'author', role: 'tester', inputs: ['spec', 'tasks'], outputs: ['testReport'] },
+      { phase: 'test', kind: 'author', role: 'tester', inputs: ['spec', 'tasks'], outputs: ['testReport'], test: true },
       { phase: 'accept', kind: 'human', inputs: ['testReport'] },
     ],
     models: {
       router: model('claude-haiku-5-5', 1),
-      'stand-in': model('claude-opus-5-5', 8),
+      'stand-in': model('claude-sonnet-5-5', 8),
       brainstormer: model('claude-opus-5-5', 60),
       'spec-writer': model('claude-opus-5-5', 60),
       planner: model('claude-opus-5-5', 60),
@@ -101,10 +101,10 @@ export function defaultConfig() {
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isPositiveInt = (v) => Number.isInteger(v) && v > 0;
 const isNonEmptyString = (v) => typeof v === 'string' && v.length > 0;
-const keyPath = (base, key) => (/^[A-Za-z_$][\w$]*$/.test(key) ? `${base}.${key}` : `${base}['${key}']`);
+export const keyPath = (base, key) => (/^[A-Za-z_$][\w$]*$/.test(key) ? `${base}.${key}` : `${base}['${key}']`);
 
 const V1_NON_REVIEW = defaultConfig().pipeline.filter((p) => p.kind !== 'review');
-const PHASE_ID = /^[a-z0-9][a-z0-9-]{0,23}$/i;
+export const PHASE_ID = /^[a-z0-9][a-z0-9-]{0,23}$/i;
 const sameList = (a, b) => Array.isArray(a) && a.length === b.length && a.every((x, i) => x === b[i]);
 
 function checkComposition(pipeline, errors) {
@@ -295,6 +295,10 @@ export function validateDefaults(d) {
   return validate(d, { composition: true });
 }
 
+export function validatePipeline(d) {
+  return validate(d, { composition: false });
+}
+
 export function validateMilestoneFixture(d, name = 'milestone-1') {
   if (!Object.hasOwn(FIXTURES, name)) throw new Error(`unknown milestone fixture "${name}"`);
   return validate({ ...d, pipeline: FIXTURES[name] }, { composition: false });
@@ -314,12 +318,19 @@ const normalizePath = (p) => {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 };
 
-export function resolveProjectConfig(fileConfig, projectPath) {
-  const base = merge(defaultConfig(), fileConfig?.defaults ?? {});
-  if (!projectPath || !isPlainObject(fileConfig?.projects)) return base;
+// The raw projects[<path>] entry, matched by normalised path; undefined when none matches.
+export function findProjectEntry(fileConfig, projectPath) {
+  if (!projectPath || !isPlainObject(fileConfig?.projects)) return undefined;
   const wanted = normalizePath(projectPath);
   const key = Object.keys(fileConfig.projects).find((k) => normalizePath(k) === wanted);
-  return key === undefined ? base : merge(base, fileConfig.projects[key]);
+  return key === undefined ? undefined : fileConfig.projects[key];
+}
+
+// `base` is the layer under config.json; a workflow's role models are merged into it first.
+export function resolveProjectConfig(fileConfig, projectPath, base = defaultConfig()) {
+  const merged = merge(base, fileConfig?.defaults ?? {});
+  const entry = findProjectEntry(fileConfig, projectPath);
+  return entry === undefined ? merged : merge(merged, entry);
 }
 
 function configError(code, message, extra = {}) {

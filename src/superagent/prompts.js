@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { artifactPaths, reviewPaths, requiredOutputs, reviseOutputs as reviseSet, BRAINSTORM_BATCH } from './results.js';
 import { brainstormLog, DEFAULT_REVIEW_ROUNDS } from './sequencer.js';
+import { ROLE_NAME, templatesDir } from './workflows.js';
+
+export { templatesDir };
 
 export const UNATTENDED_DENY_MESSAGE = 'You are running unattended. Put your question in `result.json` with `status: blocked`.';
 export const RECOVERY_NOTE = 'check every worktree\'s git status and log, and the ledger, before repeating work; continue from `handoff.md` if present';
@@ -20,10 +22,6 @@ const REVIEW_PURPOSES = new Set(['review', 'task-review']);
 const WORK_PURPOSES = new Set(['implement', 'fix']);
 const TARGET_PURPOSES = new Set(['review', 'fix', 'verify']);
 
-export function templatesDir() {
-  return fileURLToPath(new URL('../../prompts/superagent/', import.meta.url));
-}
-
 function overrideDir(projectDir) {
   return path.join(projectDir, '.superpowers', 'superagent', 'prompts');
 }
@@ -38,7 +36,7 @@ async function readIfExists(file) {
 }
 
 function roleFile(role) {
-  if (!/^[a-z0-9][a-z0-9-]*$/i.test(role ?? '')) throw Object.assign(new Error(`superagent: invalid role name ${JSON.stringify(role)}`), { code: 'ERR_NO_TEMPLATE' });
+  if (!ROLE_NAME.test(role ?? '')) throw Object.assign(new Error(`superagent: invalid role name ${JSON.stringify(role)}`), { code: 'ERR_NO_TEMPLATE' });
   return `${role}.md`;
 }
 

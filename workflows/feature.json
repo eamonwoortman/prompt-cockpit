@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "id": "feature",
+  "name": "Feature",
+  "description": "Brainstorm a brief, write and review a spec and a plan, implement task by task with review, test.",
+  "artifacts": {
+    "brief": "docs/superpowers/jobs/{slug}/brief.md",
+    "spec": "docs/superpowers/specs/{date}-{slug}-design.md",
+    "plan": "docs/superpowers/plans/{date}-{slug}.md",
+    "tasks": "docs/superpowers/jobs/{slug}/tasks.json",
+    "testReport": "docs/superpowers/jobs/{slug}/test-report.md"
+  },
+  "phases": [
+    { "phase": "brainstorm", "kind": "brainstorm", "role": "brainstormer", "inputs": ["idea"], "outputs": ["brief"] },
+    { "phase": "spec", "kind": "author", "role": "spec-writer", "inputs": ["brief"], "outputs": ["spec"] },
+    { "phase": "spec-review", "kind": "review", "role": "spec-reviewer", "author": "spec-writer", "target": "spec", "maxRounds": 3 },
+    { "phase": "plan", "kind": "author", "role": "planner", "inputs": ["spec"], "outputs": ["plan", "tasks"] },
+    { "phase": "plan-review", "kind": "review", "role": "plan-reviewer", "author": "planner", "target": "plan", "inputs": ["spec", "tasks"], "maxRounds": 3 },
+    { "phase": "implement", "kind": "per-task", "role": "implementer", "taskReview": "task-reviewer", "inputs": ["tasks"] },
+    { "phase": "test", "kind": "author", "role": "tester", "inputs": ["spec", "tasks"], "outputs": ["testReport"], "test": true },
+    { "phase": "accept", "kind": "human", "inputs": ["testReport"] }
+  ]
+}

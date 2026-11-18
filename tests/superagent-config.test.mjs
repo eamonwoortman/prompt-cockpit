@@ -23,7 +23,7 @@ test('the default config validates end-to-end with no errors or warnings', () =>
 test('the default model matrix matches the spec table', () => {
   const rows = [
     [['router'], 'claude-haiku-5-5', 1],
-    [['stand-in'], 'claude-opus-5-5', 8],
+    [['stand-in'], 'claude-sonnet-5-5', 8],
     [['brainstormer', 'spec-writer', 'planner'], 'claude-opus-5-5', 60],
     [['spec-reviewer', 'plan-reviewer', 'verifier'], 'claude-opus-5-5', 40],
     [['implementer', 'tester', 'task-reviewer'], 'claude-sonnet-5-5', 80],

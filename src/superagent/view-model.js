@@ -1,5 +1,5 @@
 import { attemptCap, taskStatus } from './sequencer.js';
-import { artifactPaths, reviewPaths } from './results.js';
+import { PHASE_ATTEMPT_KINDS, TASK_ATTEMPT_KINDS, artifactPaths, reviewPaths } from './results.js';
 
 const CORRUPT_TITLE = 'corrupt event log';
 const FIXED_KEYS = ['brief', 'spec', 'plan', 'tasks', 'testReport'];
@@ -79,8 +79,8 @@ export function artifactPath(job, key) {
   if (rest.length || !id) return null;
   if (round !== undefined && !ROUND.test(round)) return null;
   const n = round === undefined ? null : Number(round);
-  const phaseKind = ['review', 'response', 'verify'].includes(kind);
-  const taskKind = ['report', 'taskReview', 'taskVerify'].includes(kind);
+  const phaseKind = PHASE_ATTEMPT_KINDS.includes(kind);
+  const taskKind = TASK_ATTEMPT_KINDS.includes(kind);
   if (!phaseKind && !taskKind) return null;
   if (['review', 'response', 'taskReview'].includes(kind) && n === null) return null;
   if (['report'].includes(kind) && n !== null) return null;
