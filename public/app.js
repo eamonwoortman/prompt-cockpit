@@ -995,6 +995,7 @@ const settings = initSettings({
   toolCallVisibilitySelect: document.getElementById('toolCallVisibilityBtn'),
   detailPaneCheckbox: document.getElementById('detailPaneEnabledBtn'),
   pendingTurnsBadgeCheckbox: document.getElementById('pendingTurnsBadgeEnabledBtn'),
+  hideBuiltinPeerToolsCheckbox: document.getElementById('hideBuiltinPeerToolsBtn'),
   closeSessionButton: closeSessionBtn,
   resetSessionButton: resetSessionBtn,
   onAutoCollapseChange: setAutoCollapsePreviousGroup,
@@ -2346,7 +2347,7 @@ async function startSession({ cwd, resume, model, provider, name, effort, thinki
     // creation itself - see routes/sessions.js. Claude's thinking budget has
     // no such creation-time param (it's always a live Query call), so it
     // rides in separately below once we have a token to call with.
-    body: JSON.stringify({ cwd, resume, model, provider, name, effort, subscription }),
+    body: JSON.stringify({ cwd, resume, model, provider, name, effort, subscription, hideBuiltinPeerTools: loadSettings().hideBuiltinPeerTools }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

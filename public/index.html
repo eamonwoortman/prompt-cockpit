@@ -472,6 +472,11 @@
             <span>Debug: show the turns-in-flight counter next to the spinner</span>
             <span class="hint" title="Off by default. Shows session-registry.js's pendingTurnsCount next to the activity spinner whenever it's above 0, with a click-through to force it back to idle if it ever gets stuck - see app.js's pendingTurnsBadge.">?</span>
           </label>
+          <label class="settings-row">
+            <input type="checkbox" id="hideBuiltinPeerToolsBtn" />
+            <span>Hide Claude's built-in ListAgents / SendMessage in new sessions</span>
+            <span class="hint" title="On by default. They only reach Claude sessions under auto-generated names and answer asynchronously, and the model sometimes picks them over the cockpit's ask_session tool (which reaches any named cockpit session, including Codex and Grok, and returns the answer in the same turn). Applies to sessions started after you change it.">?</span>
+          </label>
           <div id="thinkingControlsGroup">
             <label class="settings-row">
               <span>Thinking budget</span>

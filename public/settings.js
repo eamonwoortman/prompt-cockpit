@@ -26,6 +26,9 @@ const DEFAULTS = {
   // Debug option, off by default - see setPendingTurnsBadgeEnabled below and
   // its checkbox's own hint text in index.html for what this actually shows.
   pendingTurnsBadgeEnabled: false,
+  // Sent when a session starts (app.js's startSession): hides the Claude CLI's
+  // own ListAgents/SendMessage so the model uses the cockpit's ask_session.
+  hideBuiltinPeerTools: true,
   // Drag-resized (detail-pane.js's resizeHandle) - persisted the same way
   // turnChartMetric is, via the standalone patchSettings() below rather than
   // the settings-modal machinery, since there's no checkbox/select for this,
@@ -104,6 +107,7 @@ export function initSettings({
   toolCallVisibilitySelect,
   detailPaneCheckbox,
   pendingTurnsBadgeCheckbox,
+  hideBuiltinPeerToolsCheckbox,
   closeSessionButton,
   resetSessionButton,
   onAutoCollapseChange,
@@ -132,6 +136,7 @@ export function initSettings({
   toolCallVisibilitySelect.value = settings.toolCallVisibility;
   detailPaneCheckbox.checked = settings.detailPaneEnabled;
   pendingTurnsBadgeCheckbox.checked = settings.pendingTurnsBadgeEnabled;
+  hideBuiltinPeerToolsCheckbox.checked = settings.hideBuiltinPeerTools;
   onAutoCollapseChange(settings.autoCollapsePreviousGroup);
   onTurnChartEnabledChange(settings.turnChartEnabled);
   onTimestampsChange(settings.showMessageTimestamps);
@@ -241,6 +246,9 @@ export function initSettings({
   pendingTurnsBadgeCheckbox.addEventListener('change', () => {
     persist({ pendingTurnsBadgeEnabled: pendingTurnsBadgeCheckbox.checked });
     onPendingTurnsBadgeEnabledChange(pendingTurnsBadgeCheckbox.checked);
+  });
+  hideBuiltinPeerToolsCheckbox.addEventListener('change', () => {
+    persist({ hideBuiltinPeerTools: hideBuiltinPeerToolsCheckbox.checked });
   });
 
   closeSessionButton.addEventListener('click', () => {
