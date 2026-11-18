@@ -39,6 +39,19 @@ export function normaliseTop(p, platform) {
   return platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
+// A folder left on a superagent/* branch (by an earlier in-place job) would
+// start a new job, in place or as a worktree origin, from that job's branch.
+// Returns the current branch, or null for a detached HEAD.
+export async function refuseJobBranch({ git = defaultGit, folder }) {
+  const current = await git(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: folder });
+  if (current.code !== 0) return null;
+  const branch = current.stdout.trim();
+  if (branch.startsWith(BRANCH_PREFIX)) {
+    throw fail('ERR_FOLDER_ON_JOB_BRANCH', `superagent: ${folder} is on ${branch}; switch this folder back to your own branch first`);
+  }
+  return branch;
+}
+
 export async function checkInPlace({ git = defaultGit, folder, branch }) {
   const toplevel = await repoToplevel({ git, origin: folder });
   const head = await git(['rev-parse', '--verify', 'HEAD'], { cwd: folder });
@@ -52,12 +65,8 @@ export async function checkInPlace({ git = defaultGit, folder, branch }) {
       throw fail('ERR_FOLDER_BUSY_GIT', `superagent: ${folder} has a git operation in progress (${marker}); finish or abort it first`);
     }
   }
-  const current = await git(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: folder });
-  if (current.code !== 0) throw fail('ERR_FOLDER_BUSY_GIT', `superagent: ${folder} has a detached HEAD; switch it to a branch first`);
-  const currentBranch = current.stdout.trim();
-  if (currentBranch.startsWith(BRANCH_PREFIX)) {
-    throw fail('ERR_FOLDER_ON_JOB_BRANCH', `superagent: ${folder} is on ${currentBranch}; switch this folder back to your own branch first`);
-  }
+  const onBranch = await refuseJobBranch({ git, folder });
+  if (onBranch === null) throw fail('ERR_FOLDER_BUSY_GIT', `superagent: ${folder} has a detached HEAD; switch it to a branch first`);
 
   const status = await git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'], { cwd: folder });
   const changed = status.stdout.split(/\r?\n/).filter(Boolean).map((line) => line.slice(3));

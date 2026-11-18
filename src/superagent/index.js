@@ -32,7 +32,7 @@ import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateMilestoneFixture } from './config.js';
-import { checkInPlace, normaliseTop, provisionInPlace } from './inplace.js';
+import { checkInPlace, normaliseTop, provisionInPlace, refuseJobBranch } from './inplace.js';
 import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
@@ -700,9 +700,12 @@ export function createSuperagent({
       if (seen.has(key)) throw fail('ERR_DUPLICATE_REPO', `superagent: ${repo.origin} is the same repository as ${seen.get(key)}`);
       seen.set(key, repo.origin);
       reserve(jobId, [{ key, folder: repo.origin, inPlace: repo.inPlace }]);
-      checked.push(repo.inPlace
-        ? await checkInPlace({ git, folder: repo.origin, branch })
-        : { ...(await checkRepo({ git, origin: repo.origin, worktree: path.join(worktreesRoot, slug, repo.id), branch })), head: null });
+      if (repo.inPlace) {
+        checked.push(await checkInPlace({ git, folder: repo.origin, branch }));
+      } else {
+        await refuseJobBranch({ git, folder: repo.origin });
+        checked.push({ ...(await checkRepo({ git, origin: repo.origin, worktree: path.join(worktreesRoot, slug, repo.id), branch })), head: null });
+      }
     }
     return checked;
   }

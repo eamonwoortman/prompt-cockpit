@@ -414,6 +414,34 @@ test('a clean folder is switched in place', async () => {
   } finally { registry._reset(); }
 });
 
+test('a worktree job from a folder left on a job branch is refused until it is switched back', async () => {
+  try {
+    const h = await harness();
+    const own = currentBranch(h.repo);
+    const first = await create(h, { inPlace: [h.repo] });
+    assert.equal((await h.sa.stopJob(first.jobId)).state, 'stopped');
+    assert.equal(currentBranch(h.repo), first.branch);
+    const jobDirs = await fs.readdir(h.jobsRoot);
+    const branches = gitIn(h.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads');
+
+    await assert.rejects(create(h), (err) => {
+      assert.equal(err.code, 'ERR_FOLDER_ON_JOB_BRANCH');
+      assert.match(err.message, new RegExp(`is on ${first.branch}; switch this folder back to your own branch first`));
+      return true;
+    });
+    assert.deepEqual(await fs.readdir(h.jobsRoot), jobDirs);
+    assert.equal(gitIn(h.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads'), branches);
+    assert.equal(existsSync(h.worktreesRoot), false);
+    assert.equal(h.sa.listJobs().length, 1);
+
+    gitIn(h.repo, 'switch', '-q', own);
+    const job = await create(h);
+    assert.equal(job.state, 'running');
+    assert.equal(job.repos[0].baseSha, h.baseSha);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('an exclude file without a final newline keeps its last line', async () => {
   const root = await tempDir('sa-inplace-exclude-');
   const repo = path.join(root, 'repo');
