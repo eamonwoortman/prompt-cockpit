@@ -628,13 +628,13 @@ export function headingErrors(text, label) {
 const asksQuestions = (value, attempt) => attempt?.purpose === 'ask' && Array.isArray(value.questions) && value.questions.length > 0;
 
 // Decision 11. The brief, and in a job that brainstorms the first output of
-// an author phase that takes the brief, must carry both brief headings. Fix
-// rounds aren't checked.
+// the first author phase that takes the brief, must carry both brief
+// headings. Fix rounds aren't checked.
 function headingsTarget(job, phase, attempt) {
   if (attempt?.purpose === 'ask') return 'brief';
-  const brainstorms = job.pipeline.some((p) => p.kind === 'brainstorm');
-  if (attempt?.purpose === 'author' && brainstorms && phase?.kind === 'author' && (phase.inputs ?? []).includes('brief')) return phase.outputs?.[0] ?? null;
-  return null;
+  if (attempt?.purpose !== 'author' || !job.pipeline.some((p) => p.kind === 'brainstorm')) return null;
+  const briefReader = job.pipeline.find((p) => p.kind === 'author' && (p.inputs ?? []).includes('brief'));
+  return briefReader && briefReader.phase === phase?.phase ? (briefReader.outputs?.[0] ?? null) : null;
 }
 
 async function artifactHeadingErrors(job, key) {

@@ -981,3 +981,29 @@ test('the headings check follows the brief input', async () => {
   const summarised = await publish('summarise', ['summary']);
   assert.equal(summarised.ok, true, JSON.stringify(summarised.errors));
 });
+
+test('only the first author phase taking the brief has its output checked', async () => {
+  const pipeline = [
+    { phase: 'brainstorm', kind: 'brainstorm', role: 'brainstormer', inputs: ['idea'], outputs: ['brief'] },
+    { phase: 'diagnose', kind: 'author', role: 'diagnosis-writer', inputs: ['brief'], outputs: ['diagnosis'] },
+    { phase: 'plan', kind: 'author', role: 'planner', inputs: ['brief', 'diagnosis'], outputs: ['plan'] },
+    { phase: 'accept', kind: 'human', inputs: ['plan'] },
+  ];
+  const workflow = { id: 'troubleshoot', name: 'Troubleshooting', source: 'built-in', file: '/w/troubleshoot.json' };
+  const artifacts = { brief: 'work/brief.md', diagnosis: 'work/diagnosis.md', plan: 'work/plan.md' };
+  const f = await fixture({ commitSpec: false, pipeline, created: { workflow, artifacts } });
+  const publish = async (phaseId, key) => {
+    const sha = await f.commit(artifacts[key], '# No headings here\n');
+    const value = f.goodResult({ phaseId, artifacts: [artifacts[key]], evidence: { commits: [sha] } });
+    return f.check(value, { phase: f.job.pipeline.find((p) => p.phase === phaseId), expect: { phaseId }, attempt: { purpose: 'author' } });
+  };
+
+  const first = await publish('diagnose', 'diagnosis');
+  assert.equal(first.ok, false);
+  assert.deepEqual(first.errors, [
+    'diagnosis is missing the heading "## Assumptions made for you"',
+    'diagnosis is missing the heading "## Your answers"',
+  ]);
+  const second = await publish('plan', 'plan');
+  assert.equal(second.ok, true, JSON.stringify(second.errors));
+});
