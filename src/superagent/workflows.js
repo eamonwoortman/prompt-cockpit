@@ -40,6 +40,8 @@ export const LEGACY_ARTIFACTS = Object.freeze({
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === 'string' && v.length > 0;
+// The id pattern ignores case, so precedence, duplicates and lookups do too.
+export const sameWorkflowId = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 
 export function workflowsDir() {
   return fileURLToPath(new URL('../../workflows/', import.meta.url));
@@ -213,7 +215,7 @@ export function validateWorkflow(doc, { models, promptFor = {}, config = default
   if (doc.format !== WORKFLOW_FORMAT) errors.push({ path: 'format', message: `unknown format ${JSON.stringify(doc.format)}; expected ${WORKFLOW_FORMAT}` });
   if (!isNonEmptyString(doc.id) || !PHASE_ID.test(doc.id)) {
     errors.push({ path: 'id', message: `id ${JSON.stringify(doc.id ?? null)} must be 1-24 letters, digits or hyphens, starting with a letter or digit` });
-  } else if (doc.id === CONFIG_PIPELINE_ID) {
+  } else if (sameWorkflowId(doc.id, CONFIG_PIPELINE_ID)) {
     errors.push({ path: 'id', message: `id "${CONFIG_PIPELINE_ID}" is reserved` });
   }
   let artifacts = {};
@@ -238,7 +240,7 @@ async function readSource(source, dir, fsImpl) {
     dirents = await fsImpl.readdir(dir, { withFileTypes: true });
   } catch (err) {
     if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return [];
-    throw err;
+    return [{ source, file: dir, name: dir, doc: null, readError: `the workflows folder could not be read: ${err.message}` }];
   }
   const names = dirents.filter((d) => d.isFile() && d.name.endsWith('.json')).map((d) => d.name).sort();
   const out = [];
@@ -273,7 +275,7 @@ async function evaluate(raw, { projectDir, fileConfig, projectPath, fsImpl, plat
   return [...readErrors, ...validateWorkflow(doc, { models: config.models, promptFor, config, platform }).errors];
 }
 
-const usableId = (doc) => (isPlainObject(doc) && isNonEmptyString(doc.id) && PHASE_ID.test(doc.id) && doc.id !== CONFIG_PIPELINE_ID ? doc.id : null);
+const usableId = (doc) => (isPlainObject(doc) && isNonEmptyString(doc.id) && PHASE_ID.test(doc.id) && !sameWorkflowId(doc.id, CONFIG_PIPELINE_ID) ? doc.id : null);
 
 function entryFor(raw, errors) {
   const id = usableId(raw.doc);
@@ -338,28 +340,31 @@ export async function loadWorkflows({
 
   const winner = new Map();
   const count = new Map();
+  const key = (e) => e.id.toLowerCase();
   for (const e of all) {
     if (e.id === null) continue;
-    winner.set(e.id, e.source);
-    count.set(`${e.source}\n${e.id}`, (count.get(`${e.source}\n${e.id}`) ?? 0) + 1);
+    winner.set(key(e), e.source);
+    count.set(`${e.source}\n${key(e)}`, (count.get(`${e.source}\n${key(e)}`) ?? 0) + 1);
   }
   const configEntry = configPipelineEntry(fileConfig, projectPath);
   const workflows = [];
   for (const e of all) {
-    if (e.id !== null && winner.get(e.id) !== e.source) continue;
-    if (e.id !== null && count.get(`${e.source}\n${e.id}`) > 1) {
+    if (e.id !== null && winner.get(key(e)) !== e.source) continue;
+    if (e.id !== null && count.get(`${e.source}\n${key(e)}`) > 1) {
       e.errors = [{ path: 'id', message: `duplicate id "${e.id}" in the ${e.source} workflows` }, ...e.errors];
       e.valid = false;
     }
     workflows.push(e);
-    if (e.id === DEFAULT_WORKFLOW && configEntry && !workflows.includes(configEntry)) workflows.push(configEntry);
+    if (sameWorkflowId(e.id, DEFAULT_WORKFLOW) && configEntry && !workflows.includes(configEntry)) workflows.push(configEntry);
   }
   if (configEntry && !workflows.includes(configEntry)) workflows.unshift(configEntry);
 
+  // `default` is the listed entry's own spelling, so it matches an option value.
+  const fallback = workflows.find((w) => sameWorkflowId(w.id, DEFAULT_WORKFLOW))?.id ?? DEFAULT_WORKFLOW;
   const wanted = configuredDefault(fileConfig, projectPath);
-  if (wanted === null) return { workflows, default: DEFAULT_WORKFLOW, defaultNote: null };
-  const match = workflows.find((w) => w.id === wanted);
-  if (match?.valid) return { workflows, default: wanted, defaultNote: null };
+  if (wanted === null) return { workflows, default: fallback, defaultNote: null };
+  const match = workflows.find((w) => sameWorkflowId(w.id, wanted));
+  if (match?.valid) return { workflows, default: match.id, defaultNote: null };
   const why = match ? 'invalid' : 'unknown';
-  return { workflows, default: DEFAULT_WORKFLOW, defaultNote: `the configured workflow ${JSON.stringify(wanted)} is ${why}; using "${DEFAULT_WORKFLOW}"` };
+  return { workflows, default: fallback, defaultNote: `the configured workflow ${JSON.stringify(wanted)} is ${why}; using "${fallback}"` };
 }

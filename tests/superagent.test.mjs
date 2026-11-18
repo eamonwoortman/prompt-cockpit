@@ -752,6 +752,16 @@ test('a declared workflow prompt shadowed by a project override is still recorde
   } finally { registry._reset(); }
 });
 
+test('createJob finds a workflow by id in any case and records the listed spelling', async () => {
+  try {
+    const h = await harness();
+    await writeWorkflow(h.globalWorkflows, QUICK);
+    const job = await createFrom(h, 'QUICK');
+    assert.equal(h.events(job.jobId)[0].workflow.id, 'quick');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('createJob refuses an unknown or invalid workflow before the job exists', async () => {
   try {
     const h = await harness();

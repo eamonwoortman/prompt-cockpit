@@ -45,7 +45,7 @@ import { allowedActions, buildRouterRequest } from './router.js';
 import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, attemptsFor, buildFixTask, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
-import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, substituteArtifacts, workflowsDir } from './workflows.js';
+import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
 import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, repoIds, repoToplevel, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
@@ -659,7 +659,7 @@ export function createSuperagent({
     const fileConfig = config.raw();
     const { workflows, default: preselected } = await loadWorkflowList(origin, fileConfig);
     const wanted = id ?? preselected;
-    const entry = workflows.find((w) => w.id === wanted);
+    const entry = workflows.find((w) => sameWorkflowId(w.id, wanted));
     if (!entry) throw fail('ERR_UNKNOWN_WORKFLOW', `superagent: unknown workflow ${JSON.stringify(wanted)}`);
     if (!entry.valid) {
       throw fail('ERR_INVALID_WORKFLOW', `superagent: workflow ${JSON.stringify(wanted)} is invalid: ${entry.errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`, { errors: entry.errors });

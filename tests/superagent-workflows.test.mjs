@@ -268,6 +268,50 @@ test('loader contract', async (t) => {
     assert.deepEqual(byId(workflows, 'x').map((w) => [w.source, w.name, w.valid]), [['project', 'Project x', true]]);
   });
 
+  await t.test('ids compare case-insensitively: a project Feature overrides the built-in feature', async () => {
+    const { dirs } = await setup();
+    await writeJson(path.join(projectWorkflows(dirs.projectDir), 'mine.json'), { ...baseDoc(), id: 'Feature', name: 'Project Feature' });
+    const { workflows, default: def } = await loadWorkflows({ ...dirs, fileConfig: {} });
+    const features = workflows.filter((w) => w.id?.toLowerCase() === 'feature');
+    assert.deepEqual(features.map((w) => [w.id, w.source, w.name, w.valid]), [['Feature', 'project', 'Project Feature', true]]);
+    assert.equal(def, 'Feature');
+  });
+
+  await t.test('ids differing only in case in one source are duplicates', async () => {
+    const { dirs } = await setup();
+    await writeJson(path.join(dirs.globalDir, 'a.json'), { ...baseDoc(), id: 'fix' });
+    await writeJson(path.join(dirs.globalDir, 'b.json'), { ...baseDoc(), id: 'Fix' });
+    const { workflows } = await loadWorkflows({ ...dirs, fileConfig: {} });
+    const fixes = workflows.filter((w) => w.id?.toLowerCase() === 'fix');
+    assert.deepEqual(fixes.map((w) => [w.id, w.valid]), [['fix', false], ['Fix', false]]);
+    for (const w of fixes) assert.ok(w.errors.some((e) => /duplicate id/.test(e.message)));
+  });
+
+  await t.test('the reserved id is refused in any case', async () => {
+    const { dirs } = await setup();
+    await writeJson(path.join(dirs.globalDir, 'x.json'), { ...baseDoc(), id: 'Config-Pipeline' });
+    const { workflows } = await loadWorkflows({ ...dirs, fileConfig: {} });
+    const listed = workflows.find((w) => w.file === path.join(dirs.globalDir, 'x.json'));
+    assert.deepEqual([listed.id, listed.valid], [null, false]);
+    assert.ok(listed.errors.some((e) => /reserved/.test(e.message)));
+  });
+
+  await t.test('an unreadable workflows folder is one invalid entry and the other sources still load', async () => {
+    const { dirs } = await setup();
+    await writeJson(path.join(dirs.globalDir, 'x.json'), { ...baseDoc(), id: 'x' });
+    const denied = projectWorkflows(dirs.projectDir);
+    const fsImpl = { ...fs, readdir: async (dir, ...rest) => {
+      if (dir === denied) throw Object.assign(new Error(`EACCES: permission denied, scandir '${dir}'`), { code: 'EACCES' });
+      return fs.readdir(dir, ...rest);
+    } };
+    const { workflows, default: def } = await loadWorkflows({ ...dirs, fileConfig: {}, fsImpl });
+    assert.deepEqual(workflows.map((w) => [w.id, w.source, w.valid]), [['feature', 'built-in', true], ['x', 'global', true], [null, 'project', false]]);
+    const bad = workflows.at(-1);
+    assert.deepEqual([bad.name, bad.file, bad.doc], [denied, denied, null]);
+    assert.ok(bad.errors.some((e) => /could not be read/.test(e.message) && /EACCES/.test(e.message)));
+    assert.equal(def, 'feature');
+  });
+
   await t.test('files are read in name order; non-.json files and subdirectories are ignored', async () => {
     const { dirs } = await setup();
     await writeJson(path.join(dirs.globalDir, 'c.json'), { ...baseDoc(), id: 'c' });
@@ -359,6 +403,9 @@ test('default selection', async (t) => {
   });
   await t.test('a project key differing only in case matches on win32', { skip: process.platform !== 'win32' }, async () => {
     assert.equal((await load({ projects: { [projectDir.toUpperCase()]: { workflow: 'mine' } } })).default, 'mine');
+  });
+  await t.test('a configured workflow matches an id in another case', async () => {
+    assert.deepEqual(await load({ defaults: { workflow: 'MINE' } }).then((r) => [r.default, r.defaultNote]), ['mine', null]);
   });
   await t.test('an unknown configured workflow falls back to feature with a note', async () => {
     const { default: def, defaultNote } = await load({ defaults: { workflow: 'nope' } });
