@@ -101,6 +101,8 @@ test('POST /api/superagent/jobs passes fields through and defaults the title', a
     additionalRepos: [extra],
     mode: 'automatic',
     fixture: null,
+    workflow: null,
+    inPlace: [],
   }]);
 
   await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'Short idea', title: '  Named  ', primaryRepo: repo } });
@@ -289,4 +291,93 @@ test('one throwing notification source does not blank the other', async (t) => {
   assert.equal(second.status, 200);
   assert.deepEqual(second.body, { entries: [pilotEntry], superagentReady: false });
   assert.deepEqual(logged, ['auto-pilot notifications failed: pilots down', 'superagent notifications failed: jobs down']);
+});
+
+test('GET /api/superagent/workflows lists entries without the file, with the default and its note', async (t) => {
+  const calls = [];
+  const entries = [
+    { id: 'feature', name: 'Feature', description: 'd', source: 'built-in', file: '/c/workflows/feature.json', valid: true, errors: [] },
+    { id: 'mine', name: 'Mine', description: '', source: 'project', file: '/p/.superpowers/superagent/workflows/mine.json', valid: true, errors: [] },
+    { id: 'broken', name: 'broken', description: '', source: 'project', file: '/p/.superpowers/superagent/workflows/broken.json', valid: false, errors: [{ path: 'phases', message: 'missing' }] },
+  ];
+  const supervisor = { listWorkflows: async (primary) => { calls.push(primary); return { workflows: entries, default: 'feature', defaultNote: 'note' }; } };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const res = await api(`/api/superagent/workflows?primary=${encodeURIComponent(process.cwd())}`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls, [process.cwd()]);
+  assert.equal(res.body.default, 'feature');
+  assert.equal(res.body.defaultNote, 'note');
+  assert.deepEqual(res.body.workflows.map((w) => w.id), ['feature', 'mine', 'broken']);
+  assert.deepEqual(Object.keys(res.body.workflows[2]).sort(), ['description', 'errors', 'id', 'name', 'source', 'valid']);
+  assert.deepEqual(res.body.workflows[2].errors, [{ path: 'phases', message: 'missing' }]);
+});
+
+test('GET /api/superagent/workflows needs a folder primary and an admitting host', async (t) => {
+  const supervisor = { listWorkflows: async () => ({ workflows: [], default: null, defaultNote: null }) };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const none = await api('/api/superagent/workflows');
+  assert.equal(none.status, 400);
+  const missing = path.join(process.cwd(), 'definitely-not-here');
+  const bad = await api(`/api/superagent/workflows?primary=${encodeURIComponent(missing)}`);
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, `not a directory: ${missing}`);
+
+  for (const [state, status] of [['initialising', 503], ['not-owner', 409]]) {
+    const refused = await serve(t, { host: fakeHost({ supervisor, refusal: { status, state, ownerPort: 4317 } }) });
+    const res = await refused(`/api/superagent/workflows?primary=${encodeURIComponent(process.cwd())}`);
+    assert.equal(res.status, status);
+    assert.equal(res.body.code, 'ERR_SUPERAGENT_UNAVAILABLE');
+  }
+});
+
+test('POST /api/superagent/jobs passes workflow and inPlace through', async (t) => {
+  const calls = [];
+  const supervisor = { createJob: async (args) => { calls.push(args); return job(); } };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const repo = process.cwd();
+  const res = await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'Fix it', primaryRepo: repo, workflow: 'troubleshooting', inPlace: [repo] } });
+  assert.equal(res.status, 200);
+  assert.equal(calls[0].workflow, 'troubleshooting');
+  assert.deepEqual(calls[0].inPlace, [repo]);
+
+  await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'Plain', primaryRepo: repo } });
+  assert.equal(calls[1].workflow, null);
+  assert.deepEqual(calls[1].inPlace, []);
+});
+
+test('POST /api/superagent/jobs refuses a malformed workflow or inPlace', async (t) => {
+  const calls = [];
+  const api = await serve(t, { host: fakeHost({ supervisor: { createJob: async (args) => { calls.push(args); return job(); } } }) });
+  const repo = process.cwd();
+  for (const inPlace of ['yes', { a: 1 }, [repo, 3], [null], true]) {
+    const res = await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: repo, inPlace } });
+    assert.equal(res.status, 400, JSON.stringify(inPlace));
+    assert.equal(res.body.code, 'ERR_INVALID_REQUEST');
+  }
+  const wf = await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: repo, workflow: 7 } });
+  assert.equal(wf.status, 400);
+  assert.equal(wf.body.code, 'ERR_INVALID_REQUEST');
+  assert.deepEqual(calls, []);
+});
+
+test('POST /api/superagent/jobs maps the workflow and folder error codes', async (t) => {
+  let code = null;
+  const supervisor = { createJob: async () => { throw Object.assign(new Error(`boom ${code}`), { code }); } };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const expected = {
+    ERR_FOLDER_IN_USE: 409,
+    ERR_UNKNOWN_WORKFLOW: 400,
+    ERR_INVALID_WORKFLOW: 400,
+    ERR_INVALID_REQUEST: 400,
+    ERR_FOLDER_DIRTY: 400,
+    ERR_FOLDER_BUSY_GIT: 400,
+    ERR_FOLDER_ON_JOB_BRANCH: 400,
+    ERR_FOLDER_CHANGED: 400,
+  };
+  for (const [name, status] of Object.entries(expected)) {
+    code = name;
+    const res = await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: process.cwd() } });
+    assert.equal(res.status, status, name);
+    assert.equal(res.body.code, name);
+  }
 });

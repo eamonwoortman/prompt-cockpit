@@ -187,3 +187,24 @@ test('folder-changed is a stuck bell entry with its text', () => {
   assert.notEqual(fresh.key, entry.key);
   assert.equal(fresh.message, entry.message);
 });
+
+test('summary and detail carry the workflow, repo in-place flags and readyInputs', () => {
+  const pipeline = [
+    { phase: 'diagnose', kind: 'author', role: 'investigator', inputs: ['idea'], outputs: ['diagnosis'] },
+    { phase: 'accept', kind: 'human', inputs: ['diagnosis', 'testReport'] },
+  ];
+  const workflow = { id: 'troubleshoot', name: 'Troubleshooting', source: 'built-in', file: '/w/troubleshoot.json' };
+  const artifacts = { diagnosis: 'd.md', testReport: 'r.md' };
+  const repos = [{ id: 'primary', origin: '/repo', inPlace: true }, { id: 'extra', origin: '/other' }];
+  const job = deriveJob(stamp([...provisionedEvents({ pipeline, workflow, artifacts, repos })]));
+  assert.deepEqual(jobSummary(job).workflow, { id: 'troubleshoot', name: 'Troubleshooting' });
+  const detail = jobDetail(job, notLive);
+  assert.deepEqual(detail.workflow, { id: 'troubleshoot', name: 'Troubleshooting' });
+  assert.deepEqual(detail.repos.map((r) => [r.id, r.inPlace]), [['primary', true], ['extra', false]]);
+  assert.deepEqual(detail.readyInputs, ['diagnosis', 'testReport']);
+
+  const legacy = m2([]);
+  assert.equal(jobSummary(legacy).workflow, null);
+  assert.equal(jobDetail(legacy, notLive).workflow, null);
+  assert.deepEqual(jobDetail(legacy, notLive).readyInputs, MILESTONE_2_PIPELINE.at(-1).inputs);
+});

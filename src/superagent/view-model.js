@@ -18,6 +18,8 @@ export function needsYouType(job) {
   return NEEDS_YOU_TYPES.has(type) ? type : null;
 }
 
+const workflowView = (job) => (job.workflow ? { id: job.workflow.id, name: job.workflow.name } : null);
+
 export function jobSummary(job) {
   const needsYou = needsYouType(job);
   return {
@@ -28,6 +30,7 @@ export function jobSummary(job) {
     phaseId: job.phaseId ?? null,
     status: statusOf(job),
     needsYou,
+    workflow: workflowView(job),
     createdAt: job.createdAt ?? null,
   };
 }
@@ -132,17 +135,23 @@ function needsYouView(job) {
   };
 }
 
+function readyInputs(job) {
+  const last = (job.pipeline ?? []).findLast((p) => p.kind === 'human');
+  return [...(last?.inputs ?? [])];
+}
+
 export function jobDetail(job, { isLive = () => false } = {}) {
   const summary = jobSummary(job);
   if (isCorrupt(job)) {
-    return { ...summary, idea: null, branch: null, repos: [], phases: [], tasks: null, attempts: [], artifacts: [], router: routerView(job), needsYou: null };
+    return { ...summary, idea: null, branch: null, repos: [], readyInputs: [], phases: [], tasks: null, attempts: [], artifacts: [], router: routerView(job), needsYou: null };
   }
   const limits = job.limits ?? {};
   return {
     ...summary,
     idea: job.idea ?? null,
     branch: job.branch ?? null,
-    repos: (job.repos ?? []).map((r) => ({ id: r.id, origin: r.origin, worktree: r.worktree ?? null })),
+    repos: (job.repos ?? []).map((r) => ({ id: r.id, origin: r.origin, worktree: r.worktree ?? null, inPlace: r.inPlace === true })),
+    readyInputs: readyInputs(job),
     phases: phaseChips(job),
     tasks: job.tasks == null ? null : job.tasks.map((t) => ({ id: t.id, title: t.title ?? t.id, done: taskStatus(job, t) === 'done' })),
     attempts: (job.attempts ?? []).map((a) => ({

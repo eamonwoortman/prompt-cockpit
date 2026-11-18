@@ -13,12 +13,14 @@ const BAD_REQUEST = new Set([
   'ERR_INVALID_ANSWER', 'ERR_UNKNOWN_ARTIFACT', 'ERR_ARTIFACT_OUTSIDE',
   'ERR_NOT_GIT_REPO', 'ERR_NO_COMMITS', 'ERR_BRANCH_EXISTS', 'ERR_WORKTREE_PATH_EXISTS', 'ERR_DUPLICATE_REPO',
   'ERR_INVALID_CONFIG', 'ERR_NO_TEMPLATE', 'ERR_PATH_TOO_LONG', 'ERR_PHASE_KIND_UNSUPPORTED', 'ERR_MODE_UNSUPPORTED',
+  'ERR_UNKNOWN_WORKFLOW', 'ERR_INVALID_WORKFLOW', 'ERR_INVALID_REQUEST',
+  'ERR_FOLDER_DIRTY', 'ERR_FOLDER_BUSY_GIT', 'ERR_FOLDER_ON_JOB_BRANCH', 'ERR_FOLDER_CHANGED',
 ]);
 
 function statusFor(err) {
   if (err?.code === 'ERR_SUPERAGENT_UNAVAILABLE') return err.status;
   if (err?.code === 'ERR_UNKNOWN_JOB' || err?.code === 'ERR_ARTIFACT_MISSING') return 404;
-  if (err?.code === 'ERR_INVALID_STATE') return 409;
+  if (err?.code === 'ERR_INVALID_STATE' || err?.code === 'ERR_FOLDER_IN_USE') return 409;
   if (BAD_REQUEST.has(err?.code)) return 400;
   return 500;
 }
@@ -41,10 +43,14 @@ async function readJob(host, id) {
 }
 
 function validateCreate(body) {
-  if (typeof body.idea !== 'string' || !body.idea.trim()) return 'an idea is required';
-  if (body.additionalRepos !== undefined && !Array.isArray(body.additionalRepos)) return 'additionalRepos must be a list of folders';
+  if (body.workflow != null && typeof body.workflow !== 'string') return { code: 'ERR_INVALID_REQUEST', error: 'workflow must be a workflow id' };
+  if (body.inPlace !== undefined && (!Array.isArray(body.inPlace) || body.inPlace.some((p) => typeof p !== 'string'))) {
+    return { code: 'ERR_INVALID_REQUEST', error: 'inPlace must be a list of folder paths' };
+  }
+  if (typeof body.idea !== 'string' || !body.idea.trim()) return { error: 'an idea is required' };
+  if (body.additionalRepos !== undefined && !Array.isArray(body.additionalRepos)) return { error: 'additionalRepos must be a list of folders' };
   for (const folder of [body.primaryRepo, ...(body.additionalRepos ?? [])]) {
-    if (!isValidCwd(folder)) return `not a directory: ${folder}`;
+    if (!isValidCwd(folder)) return { error: `not a directory: ${folder}` };
   }
   return null;
 }
@@ -70,10 +76,25 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
     }
   });
 
+  router.get('/api/superagent/workflows', async (req, res, url) => {
+    const primary = url.searchParams.get('primary');
+    if (!primary || !isValidCwd(primary)) return respondJson(res, 400, { error: primary ? `not a directory: ${primary}` : 'primary is required' });
+    try {
+      const listing = await host.admit((supervisor) => supervisor.listWorkflows(primary));
+      return respondJson(res, 200, {
+        workflows: listing.workflows.map(({ id, name, description, source, valid, errors }) => ({ id, name, description, source, valid, errors })),
+        default: listing.default,
+        defaultNote: listing.defaultNote ?? null,
+      });
+    } catch (err) {
+      return respondError(res, err);
+    }
+  });
+
   router.post('/api/superagent/jobs', async (req, res) => {
     const body = await readJsonBody(req);
     const problem = validateCreate(body);
-    if (problem) return respondJson(res, 400, { error: problem });
+    if (problem) return respondJson(res, 400, problem);
     try {
       const job = await host.admit((supervisor) => supervisor.createJob({
         title: titleFor(body),
@@ -82,6 +103,8 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
         additionalRepos: body.additionalRepos ?? [],
         mode: 'automatic',
         fixture: null,
+        workflow: body.workflow?.trim() || null,
+        inPlace: body.inPlace ?? [],
       }));
       return respondJson(res, 200, jobSummary(job));
     } catch (err) {
