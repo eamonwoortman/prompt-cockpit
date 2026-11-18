@@ -181,7 +181,7 @@ const PROVIDERS = Object.freeze({
       fileRewind: false,
       thinkingBudget: false,
       effort: true,
-      autoContinue: false,
+      autoContinue: true,
       mcpToggle: true,
       pluginToggleViaHandle: true,
       // Codex's app-server owns both MCP/plugin configuration. These are

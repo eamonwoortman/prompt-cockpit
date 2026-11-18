@@ -976,7 +976,7 @@ function handleMessage(id, message) {
   if (row.provider !== 'claude' && message.type === 'result') {
     const text = message.is_error ? String(message.error || message.result || '') : '';
     if (isRateLimitFailure({ code: message.codex_error_info, text })) {
-      row.rateLimitHit = { resetsAt: null, rateLimitType: 'provider_error_text' };
+      row.rateLimitHit = { resetsAt: exhaustedWindowReset(row.rateLimits), rateLimitType: 'provider_error_text' };
       onRateLimitHit(id, { detail: message.codex_error_info ? `${message.codex_error_info}: ${text}` : text });
       broadcastSummary(id);
     } else if (!message.is_error && row.rateLimitHit?.rateLimitType === 'provider_error_text') {
@@ -1244,6 +1244,17 @@ export async function sendNow(id, queueId) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
   return row.handle.sendNow(queueId);
+}
+
+// Grok/Codex error text carries no machine-readable reset, but the account
+// usage snapshot already tracks each window's reset. The window at 100% is the
+// one blocking the turn; returns its epoch-ms reset if still in the future.
+function exhaustedWindowReset(rateLimits) {
+  const now = Date.now();
+  const resets = [rateLimits?.five_hour, rateLimits?.seven_day]
+    .filter((w) => w && w.utilization >= 100 && w.resets_at > now)
+    .map((w) => w.resets_at);
+  return resets.length ? Math.max(...resets) : null;
 }
 
 // Wake a minute after the stated reset, not exactly on it - "2:10am" is the
