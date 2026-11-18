@@ -38,7 +38,7 @@ import { allowedActions, buildRouterRequest } from './router.js';
 import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, buildFixTask, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
-import { CONFIG_PIPELINE_ID, loadWorkflows, resolvePromptPath, resolveWorkflowModels, substituteArtifacts, workflowsDir } from './workflows.js';
+import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, substituteArtifacts, workflowsDir } from './workflows.js';
 import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, repoIds, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
@@ -535,8 +535,9 @@ export function createSuperagent({
     return { pipeline: FIXTURES[fixture], models: resolved.models, recorded: null };
   }
 
-  // Validation already ran in the loader (config-pipeline's with composition on).
-  // A role's prompt is recorded only when it comes from the workflow file.
+  // Validation already ran in the loader (config-pipeline's with composition on),
+  // so a declared prompt exists or a project override covers it. It is recorded
+  // either way, so removing that override later can never reach the built-in.
   async function workflowPlan(id, origin) {
     const fileConfig = config.raw();
     const { workflows, default: preselected } = await loadWorkflowList(origin, fileConfig);
@@ -550,8 +551,8 @@ export function createSuperagent({
     const pipeline = entry.id === CONFIG_PIPELINE_ID ? legacyPipeline(doc.phases) : doc.phases;
     const prompts = {};
     for (const role of pipelineRoles(pipeline)) {
-      const found = entry.file === null ? null : await resolvePromptPath(role, { workflowFile: entry.file, promptField: doc.roles?.[role]?.prompt ?? null });
-      prompts[role] = found?.source === 'workflow' ? found.path : null;
+      const promptField = doc.roles?.[role]?.prompt;
+      prompts[role] = entry.file !== null && typeof promptField === 'string' && promptField.length > 0 ? path.resolve(path.dirname(entry.file), promptField) : null;
     }
     return {
       pipeline,

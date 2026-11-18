@@ -740,6 +740,18 @@ test('createJob with a workflow records it', async () => {
   } finally { registry._reset(); }
 });
 
+test('a declared workflow prompt shadowed by a project override is still recorded', async () => {
+  try {
+    const h = await harness();
+    await writeWorkflow(h.globalWorkflows, QUICK, { prompts: {} });
+    const overrides = path.join(h.repo, '.superpowers', 'superagent', 'prompts');
+    await fs.mkdir(overrides, { recursive: true });
+    await fs.writeFile(path.join(overrides, 'note-writer.md'), '# Override\n');
+    const job = await createFrom(h, 'quick');
+    assert.deepEqual(h.events(job.jobId)[0].prompts, { 'note-writer': path.join(h.globalWorkflows, 'prompts', 'note-writer.md') });
+  } finally { registry._reset(); }
+});
+
 test('createJob refuses an unknown or invalid workflow before the job exists', async () => {
   try {
     const h = await harness();
