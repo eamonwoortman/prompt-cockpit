@@ -437,3 +437,22 @@ test('models merge in four layers', () => {
     implementer: { ...defaultConfig().models.implementer, model: 'defaults-model', effort: 'low' },
   });
 });
+
+test('the shipped troubleshooting file is valid', async () => {
+  const empty = await tempDir('sa-wf-empty-');
+  const { workflows } = await loadWorkflows({ builtinDir: workflowsDir(), globalDir: empty, projectDir: null, fileConfig: {} });
+  const found = workflows.find((w) => w.id === 'troubleshooting');
+  assert.deepEqual(found.errors, []);
+  assert.equal(found.valid, true);
+  assert.equal(found.source, 'built-in');
+  assert.equal(found.name, 'Troubleshooting');
+  assert.deepEqual(found.doc.phases.map((p) => p.phase), ['investigate', 'diagnosis-review', 'fix', 'verify', 'accept']);
+  assert.deepEqual(Object.keys(found.doc.artifacts), ['diagnosis', 'tasks', 'testReport']);
+  assert.deepEqual(Object.fromEntries(Object.entries(found.doc.roles).map(([role, r]) => [role, [r.model, r.maxTurns, r.alternate ?? null, 'prompt' in r]])), {
+    investigator: ['claude-opus-5-5', 80, null, false],
+    'diagnosis-reviewer': ['claude-opus-5-5', 40, null, false],
+    fixer: ['claude-sonnet-5-5', 80, 'claude-opus-5-5', false],
+    'fix-reviewer': ['claude-sonnet-5-5', 80, null, false],
+    'verifier-tester': ['claude-sonnet-5-5', 80, null, false],
+  });
+});

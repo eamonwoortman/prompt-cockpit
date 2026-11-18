@@ -1405,3 +1405,71 @@ test('a pre-Plan-7 job resumes and routes a test failure', { timeout: TEST_TIMEO
     await fresh.sa.stop();
   } finally { registry._reset(); }
 });
+
+const createTroubleshooting = (h, over = {}) => createJob(h, { fixture: null, workflow: 'troubleshooting', title: 'Fix hello', idea: 'GET /hello returns 500.', ...over });
+const DIAGNOSIS = '# Diagnosis\n\n## Reproduction\n\ncurl /hello\n\n## Evidence\n\nsrc/app.js:12\n\n## Root cause\n\nnull config\n\n## Hypothesis tested\n\nguard the read: 500 gone\n';
+const writeDiagnosis = ({ publish }) => publish({}, { content: { diagnosis: DIAGNOSIS, tasks: JSON.stringify([task('T1', { verify: 'npm test' })], null, 2) } });
+const troubleshootingHandlers = (over = {}) => ({
+  'investigate:author': writeDiagnosis,
+  'diagnosis-review:review': approve,
+  'fix:implement': ({ publish }) => publish(),
+  'fix:task-review': approve,
+  'verify:test': ({ publish }) => publish(),
+  ...over,
+});
+
+test('troubleshooting runs investigate to accept with one routed failure', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    let verifies = 0;
+    const h = await harness({
+      handlers: troubleshootingHandlers({
+        'verify:test': ({ publish }) => (++verifies === 1 ? failedTest('the reproduction still fails', [{ id: 'V1', severity: 'major', text: 'GET /hello still returns 500' }]) : publish()),
+      }),
+    });
+    const job = await createTroubleshooting(h);
+    const got = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual([got.state, got.reason], ['needs-you', 'ready-to-try']);
+
+    const [failed] = h.started(job.jobId, 'verify');
+    const fixId = `F-${failed.attemptId.slice(0, 8)}`;
+    assert.deepEqual(steps(h.started(job.jobId)), [
+      ['investigate', null, 'author', 'investigator'],
+      ['diagnosis-review', null, 'review', 'diagnosis-reviewer'],
+      ['fix', 'T1', 'implement', 'fixer'],
+      ['fix', 'T1', 'task-review', 'fix-reviewer'],
+      ['verify', null, 'test', 'verifier-tester'],
+      ['fix', fixId, 'implement', 'fixer'],
+      ['fix', fixId, 'task-review', 'fix-reviewer'],
+      ['verify', null, 'test', 'verifier-tester'],
+    ]);
+    assert.deepEqual(got.tasks.map((t) => [t.id, t.origin]), [['T1', 'plan'], [fixId, 'test']]);
+    assert.equal(got.visits.fix, 2);
+    for (const c of h.worker.cards().filter((card) => card.phaseId === 'fix' && card.purpose === 'implement')) {
+      assert.ok('diagnosis' in c.inputs, 'the fixer card lists diagnosis among its inputs');
+      assert.equal(c.inputs.diagnosis, got.artifacts.diagnosis);
+    }
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('an investigator that cannot reproduce asks the user', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({
+      handlers: troubleshootingHandlers({ 'investigate:author': firstThen(blockedWith('Which build shows the 500?'), writeDiagnosis), 'diagnosis-review:review': () => HOLD }),
+    });
+    const job = await createTroubleshooting(h);
+    const parked = await h.drive(job.jobId);
+    const [asking] = h.started(job.jobId, 'investigate');
+    assert.deepEqual([parked.state, parked.reason, parked.detail], ['needs-you', 'question', { attemptId: asking.attemptId, question: 'Which build shows the 500?' }]);
+
+    await h.sa.answerQuestion(job.jobId, 'the release build');
+    const got = await h.drive(job.jobId, launchedIn('diagnosis-review'));
+    assert.deepEqual(h.worker.errors, []);
+    assert.equal(got.phaseId, 'diagnosis-review');
+    const cards = h.worker.cards().filter((c) => c.phaseId === 'investigate');
+    assert.equal(cards.length, 2);
+    assert.deepEqual(cards[1].userAnswers, [{ question: 'Which build shows the 500?', answer: 'the release build' }]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});

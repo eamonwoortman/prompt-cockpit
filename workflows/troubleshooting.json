@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "id": "troubleshooting",
+  "name": "Troubleshooting",
+  "description": "Reproduce, find the root cause, fix with a failing test, verify.",
+  "artifacts": {
+    "diagnosis": "docs/superpowers/jobs/{slug}/diagnosis.md",
+    "tasks": "docs/superpowers/jobs/{slug}/tasks.json",
+    "testReport": "docs/superpowers/jobs/{slug}/test-report.md"
+  },
+  "phases": [
+    { "phase": "investigate", "kind": "author", "role": "investigator", "inputs": ["idea"], "outputs": ["diagnosis", "tasks"] },
+    { "phase": "diagnosis-review", "kind": "review", "role": "diagnosis-reviewer", "author": "investigator", "target": "diagnosis", "inputs": ["tasks"], "maxRounds": 3 },
+    { "phase": "fix", "kind": "per-task", "role": "fixer", "taskReview": "fix-reviewer", "inputs": ["diagnosis", "tasks"] },
+    { "phase": "verify", "kind": "author", "role": "verifier-tester", "inputs": ["diagnosis", "tasks"], "outputs": ["testReport"], "test": true },
+    { "phase": "accept", "kind": "human", "inputs": ["testReport"] }
+  ],
+  "roles": {
+    "investigator": { "model": "claude-opus-5-5", "maxTurns": 80 },
+    "diagnosis-reviewer": { "model": "claude-opus-5-5", "maxTurns": 40 },
+    "fixer": { "model": "claude-sonnet-5-5", "maxTurns": 80, "alternate": "claude-opus-5-5" },
+    "fix-reviewer": { "model": "claude-sonnet-5-5", "maxTurns": 80 },
+    "verifier-tester": { "model": "claude-sonnet-5-5", "maxTurns": 80 }
+  }
+}
