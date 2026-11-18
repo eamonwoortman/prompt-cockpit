@@ -246,6 +246,10 @@ function renderSystem(container, message, timestampMs = null) {
     appendBlock(container, 'error', `${message.tool_name} Denied`, message.decision_reason || message.message || 'permission denied', [], container, null, null, timestampMs);
     return;
   }
+  if (message.subtype === 'codex_error') {
+    appendBlock(container, 'error', message.will_retry ? 'Codex error (retrying)' : 'Codex error', message.message || 'unknown error', [], container, null, null, timestampMs);
+    return;
+  }
   // other system subtypes: silent by default, see module comment
 }
 

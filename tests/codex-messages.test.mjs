@@ -246,3 +246,23 @@ test('a failed Codex turn carries its structured error cause for chaining', () =
   const [ok] = codexNotificationToMessages('turn/completed', { turn: { id: 't', status: 'completed' } }, 'th');
   assert.equal(ok.codex_error_info, undefined);
 });
+
+test('a retryable mid-turn Codex error surfaces as a system notice', () => {
+  const messages = codexNotificationToMessages('error', {
+    threadId: 'th', turnId: 't', willRetry: true,
+    error: { message: 'stream disconnected', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } },
+  }, 'th');
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].type, 'system');
+  assert.equal(messages[0].subtype, 'codex_error');
+  assert.equal(messages[0].session_id, 'th');
+  assert.equal(messages[0].will_retry, true);
+  assert.equal(messages[0].message, 'stream disconnected');
+  assert.equal(messages[0].codex_error_info, 'httpConnectionFailed');
+});
+
+test('a terminal Codex error adds no notice because turn/completed reports it', () => {
+  assert.deepEqual(codexNotificationToMessages('error', {
+    threadId: 'th', turnId: 't', willRetry: false, error: { message: 'boom' },
+  }, 'th'), []);
+});

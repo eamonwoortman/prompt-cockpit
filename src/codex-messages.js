@@ -335,6 +335,16 @@ export function codexNotificationToMessages(method, params, sessionId, {
     if (usage.contextUsage) message._contextUsage = usage.contextUsage;
     return [message];
   }
+  if (method === 'error') {
+    // Only a retryable error is news: a terminal one is followed by a failed
+    // turn/completed that already reports the same cause.
+    if (!params?.willRetry) return [];
+    return [{
+      type: 'system', subtype: 'codex_error', session_id: sessionId, will_retry: true,
+      message: params.error?.message || 'Codex hit an error and is retrying',
+      codex_error_info: codexErrorCode(params.error?.codexErrorInfo),
+    }];
+  }
   if (method === 'turn/completed') {
     const status = params.turn?.status || params.status || 'completed';
     const ok = status === 'completed' || status === 'interrupted';
