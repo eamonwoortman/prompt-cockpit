@@ -37,6 +37,7 @@ async function harness() {
   const jobsRoot = path.join(root, 'jobs');
   const worktreesRoot = path.join(root, 'worktrees');
   let n = 0;
+  const logs = [];
 
   async function build() {
     const store = createSuperagentStore({ rootDir: jobsRoot, now: () => T0, logImpl: quiet });
@@ -53,13 +54,13 @@ async function harness() {
       setIntervalImpl: () => 'timer',
       clearIntervalImpl: () => {},
       stopTickDeadlineMs: 20,
-      logImpl: quiet,
+      logImpl: (line) => logs.push(line),
       platform: process.platform,
       workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     return {
-      root, repo, baseSha, jobsRoot, worktreesRoot, store, sa, events,
+      root, repo, baseSha, jobsRoot, worktreesRoot, store, sa, events, logs,
       nextSlug: () => `add-hello-${String(n + 1).padStart(8, '0')}`,
       async restart() {
         registry._reset();
@@ -244,7 +245,7 @@ test('a subfolder of a repo records the repo top level', async () => {
     assert.equal(norm(primary.toplevel), norm(h.repo));
     assert.equal(primary.admittedHead, h.baseSha);
     assert.equal(extra.inPlace, undefined);
-    assert.equal(extra.toplevel, undefined);
+    assert.equal(norm(extra.toplevel), norm(lib));
     assert.equal(extra.admittedHead, undefined);
     assert.deepEqual(h.sa.getJob(job.jobId).repos.map((r) => r.inPlace), [true, false]);
     await assert.rejects(create(h), { code: 'ERR_FOLDER_IN_USE' });
@@ -292,6 +293,80 @@ test('reservations are rebuilt on start', async () => {
     await assert.rejects(create(fresh), { code: 'ERR_FOLDER_IN_USE' });
     await fresh.sa.stopJob('jr');
     const job = await create(fresh, { inPlace: [fresh.repo] });
+    assert.equal(job.state, 'running');
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test("a worktree repo's job-created carries toplevel but not inPlace", async () => {
+  try {
+    const h = await harness();
+    const sub = path.join(h.repo, 'sub');
+    await fs.mkdir(sub);
+    const job = await create(h, { primaryRepo: sub });
+    const [repo] = h.events(job.jobId)[0].repos;
+    assert.equal(repo.origin, path.resolve(sub));
+    assert.equal(norm(repo.toplevel), norm(h.repo));
+    assert.equal(repo.toplevel, path.resolve(repo.toplevel));
+    assert.equal('inPlace' in repo, false);
+    assert.equal('admittedHead' in repo, false);
+    assert.deepEqual(h.sa.getJob(job.jobId).repos.map((r) => r.inPlace), [false]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('after a restart an unfinished worktree job on a subfolder blocks an in-place job on its repo', async () => {
+  try {
+    const h = await harness();
+    const sub = path.join(h.repo, 'sub');
+    await fs.mkdir(sub);
+    const job = await create(h, { primaryRepo: sub });
+    assert.equal(job.state, 'running');
+    await h.sa.stop();
+
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    await assert.rejects(create(fresh, { inPlace: [fresh.repo] }), { code: 'ERR_FOLDER_IN_USE' });
+    const worktreeJob = await create(fresh);
+    assert.equal(worktreeJob.state, 'running');
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a job recorded without toplevel is resolved through git at start', async () => {
+  try {
+    const h = await harness();
+    const sub = path.join(h.repo, 'sub');
+    await fs.mkdir(sub);
+    const toplevel = path.resolve(gitIn(h.repo, 'rev-parse', '--show-toplevel'));
+    await h.store.append('jl', jobCreated({ jobId: 'jl', slug: 'l-jl', branch: 'superagent/l-jl', repos: [{ id: 'primary', origin: sub }] }));
+    await h.store.append('jl', { type: 'worktree-created', repo: 'primary', worktree: toplevel, branch: 'superagent/l-jl', baseSha: h.baseSha, settingsCopy: null });
+    await h.store.append('jl', { type: 'job-provisioned' });
+
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    assert.equal(fresh.sa.getJob('jl').repos[0].toplevel, null);
+    await assert.rejects(create(fresh, { inPlace: [fresh.repo] }), { code: 'ERR_FOLDER_IN_USE' });
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a job whose top level git cannot find keeps its folder reserved and is logged', async () => {
+  try {
+    const h = await harness();
+    const plain = path.join(h.root, 'plain');
+    await fs.mkdir(plain);
+    await h.store.append('jg', jobCreated({ jobId: 'jg', slug: 'g-jg', branch: 'superagent/g-jg', repos: [{ id: 'primary', origin: plain }] }));
+    await h.store.append('jg', { type: 'worktree-created', repo: 'primary', worktree: plain, branch: 'superagent/g-jg', baseSha: h.baseSha, settingsCopy: null });
+    await h.store.append('jg', { type: 'job-provisioned' });
+
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    assert.ok(fresh.logs.some((line) => line.includes(`could not find the top level of ${plain} for job jg`)), fresh.logs.join('\n'));
+    await initRepo(plain);
+    await assert.rejects(create(fresh, { primaryRepo: plain, inPlace: [plain] }), { code: 'ERR_FOLDER_IN_USE' });
+    await fresh.sa.stopJob('jg');
+    const job = await create(fresh, { primaryRepo: plain, inPlace: [plain] });
     assert.equal(job.state, 'running');
     await fresh.sa.stop();
   } finally { registry._reset(); }

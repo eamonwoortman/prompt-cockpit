@@ -185,14 +185,31 @@ export function createSuperagent({
     if (FINISHED_STATES.has(store.get(jobId)?.state)) release(jobId);
   }
 
-  function rebuildReservations() {
+  // A repo recorded before Plan 7 has no toplevel and is asked git for it; a
+  // git failure keeps the origin key alone. Keys are held only after every
+  // lookup, for jobs still unfinished then, so a stop meanwhile is not undone.
+  async function rebuildReservations() {
+    const wanted = [];
     for (const jobId of known) {
       const job = store.get(jobId);
       if (!job || FINISHED_STATES.has(job.state)) continue;
       for (const repo of job.repos) {
-        hold(normaliseTop(repo.origin, platform), { jobId, inPlace: repo.inPlace });
-        if (repo.toplevel) hold(normaliseTop(repo.toplevel, platform), { jobId, inPlace: repo.inPlace });
+        const keys = [normaliseTop(repo.origin, platform)];
+        let toplevel = repo.toplevel;
+        if (!toplevel) {
+          try {
+            toplevel = await repoToplevel({ git, origin: repo.origin });
+          } catch (err) {
+            log(`could not find the top level of ${repo.origin} for job ${jobId}, reserving the folder itself`, err);
+          }
+        }
+        if (toplevel) keys.push(normaliseTop(toplevel, platform));
+        wanted.push({ jobId, keys, inPlace: repo.inPlace });
       }
+    }
+    for (const { jobId, keys, inPlace } of wanted) {
+      if (FINISHED_STATES.has(store.get(jobId)?.state)) continue;
+      for (const key of keys) hold(key, { jobId, inPlace });
     }
   }
 
@@ -522,7 +539,7 @@ export function createSuperagent({
       log('could not list jobs', err);
     }
     for (const jobId of jobIds) await withJob(jobId, () => startJob(jobId));
-    rebuildReservations();
+    await rebuildReservations();
     if (stopping) return;
     if (!unintercept) unintercept = registry.addApprovalInterceptor(runner.onApprovalRequest);
     if (timer === null) timer = setIntervalImpl(() => { tick(); }, TICK_MS);
@@ -728,7 +745,11 @@ export function createSuperagent({
 
   async function admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved }) {
     const checked = await checkRepos(jobId, marked, { slug, branch });
-    const repos = marked.map(({ inPlace, ...repo }, i) => (inPlace ? { ...repo, inPlace: true, toplevel: path.resolve(checked[i].toplevel), admittedHead: checked[i].head } : repo));
+    const repos = marked.map(({ inPlace, ...repo }, i) => ({
+      ...repo,
+      toplevel: path.resolve(checked[i].toplevel),
+      ...(inPlace && { inPlace: true, admittedHead: checked[i].head }),
+    }));
     const createdDate = localDate(now());
     const created = {
       type: 'job-created',
