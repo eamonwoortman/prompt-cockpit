@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.1]
+- Chain: the full transcript goes to the new session as a private temp file
+  (tool results capped); the first message is a pointer plus the last
+  exchange. Falls back to the inline recap if the file cannot be written
+- Chained sessions open in a new browser tab; the source tab stays put
+- Chain: the auto permission mode carries over reliably, applied after the
+  provider reports its own init
+- Chain: "I'm away now" checkbox in Settings > Project replaces the Away
+  button in the activity bar; Report state moves to a Diagnostics row
+- Codex: rate-limit reset time shown when a 5h or 7d window is exhausted;
+  auto-continue enabled
+- Codex: MCP tool-call approvals show Allow and Deny instead of being declined
+- Sessions can ask each other with the ask_session and list_sessions MCP tools
+- Settings: checkbox to hide the built-in ListAgents and SendMessage tools
+  (new Claude sessions)
+- Launcher: one provider:account dropdown replaces the separate provider and
+  subscription selects; the last pick is remembered
+- /ask: backspacing the command keeps the picker open; Tab brings the name back
+- Tab title: the state emoji is the favicon and the title stays clean
+- Stats panel: session cost rounds up to the next cent
+- Git guard: titles accept comma-separated scopes; blank lines between bullets
+  are rejected with the fix explained
+- Pricing: gpt-6.1-terra added to the Codex table
+- Dependencies: zod declared as a direct dependency; lockfile refreshed for
+  hono and @hono/node-server
+
 ## [0.3.0]
 - Chain: continue a session in a new session on another provider or Claude
   login folder, from "Chain to..." or automatically on a rate limit
