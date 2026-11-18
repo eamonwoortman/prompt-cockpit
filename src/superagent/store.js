@@ -33,7 +33,7 @@ function routerDefaults() {
 // Plan 7 Decision 3: a job-created without `workflow` (pre-Plan-7, or a
 // fixture job) reads with today's artifact table and its `test` author phase
 // flagged. The event log itself is never rewritten.
-function legacyPipeline(pipeline) {
+export function legacyPipeline(pipeline) {
   return pipeline.map((p) => (p.kind === 'author' && p.phase === 'test' ? { ...p, test: true } : p));
 }
 

@@ -355,6 +355,11 @@ export function createSuperagentConfig({ filePath = path.join(defaultSuperagentR
       return resolveProjectConfig(fileConfig, projectPath);
     },
 
+    // The loaded file before any merge: the workflow loader looks for a raw `pipeline` and `workflow`.
+    raw() {
+      return structuredClone(fileConfig);
+    },
+
     async save(next) {
       const candidate = isPlainObject(next) ? next : {};
       const errors = validateDefaults(resolveProjectConfig(candidate, null)).errors.slice();

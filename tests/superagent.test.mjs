@@ -11,6 +11,7 @@ import { createSuperagentConfig, defaultConfig, MILESTONE_1_PIPELINE, MILESTONE_
 import { RESULT_FILE, artifactPaths, attemptDir } from '../src/superagent/results.js';
 import { createWorktree, defaultGit, slugify } from '../src/superagent/worktree.js';
 import { createSuperagent, TICK_MS } from '../src/superagent/index.js';
+import { workflowsDir } from '../src/superagent/workflows.js';
 
 const quiet = () => {};
 const gitIn = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -32,6 +33,7 @@ async function harness({ configJson = {}, ...over } = {}) {
   await fs.writeFile(configFile, JSON.stringify(typeof configJson === 'function' ? configJson(repo) : configJson));
   const jobsRoot = path.join(root, 'jobs');
   const worktreesRoot = path.join(root, 'worktrees');
+  const globalWorkflows = path.join(root, 'workflows');
   const clock = { t: T0 };
 
   async function build({ storeOpts = {}, ...opts } = {}) {
@@ -50,12 +52,13 @@ async function harness({ configJson = {}, ...over } = {}) {
       stopTickDeadlineMs: 20,
       logImpl: quiet,
       platform: 'linux',
+      workflowDirs: { builtin: workflowsDir(), global: globalWorkflows },
       ...opts,
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     const inputs = () => [...factory.impls.values()].flatMap((impl) => impl.allInputs ?? []);
     return {
-      root, repo, baseSha, jobsRoot, worktreesRoot, clock, store, config, factory, sa, events, inputs,
+      root, repo, baseSha, jobsRoot, worktreesRoot, globalWorkflows, configFile, clock, store, config, factory, sa, events, inputs,
       dirFor: (job, attemptId) => attemptDir(job.repos[0].worktree, { jobId: job.jobId, phase: 'spec', task: null, attemptId }),
       started: (jobId) => events(jobId).filter((e) => e.type === 'attempt-started'),
       async restart(opts2 = {}) {
@@ -198,7 +201,8 @@ test('stopJob closes the live attempt and archives the ledger', async () => {
 test('createJob refuses pipelines this plan cannot run', async () => {
   try {
     const h = await harness({ configJson: (repo) => ({ projects: { [repo]: { models: { 'spec-writer': { provider: 'grok' } } } } }) });
-    await assert.rejects(create(h, { fixture: undefined }), { code: 'ERR_INVALID_CONFIG' });
+    // The config's models feed the default workflow's validation.
+    await assert.rejects(create(h, { fixture: undefined }), { code: 'ERR_INVALID_WORKFLOW' });
     await assert.rejects(create(h, { fixture: 'milestone-9' }), { code: 'ERR_UNKNOWN_FIXTURE' });
     await assert.rejects(create(h), { code: 'ERR_INVALID_CONFIG' });
 
@@ -680,6 +684,145 @@ test('a project override template satisfies the check', async () => {
     const job = await create(h, { fixture: undefined });
     assert.equal(job.state, 'running');
     assert.equal(job.pipeline[0].role, 'brainstormer');
+  } finally { registry._reset(); }
+});
+
+// --- Plan 7: jobs are created from a workflow ---
+
+const NOTE_PROMPT = '# Note writer\n\nNOTE-WRITER-MARKER\n';
+const QUICK = {
+  format: 1,
+  id: 'quick',
+  name: 'Quick note',
+  artifacts: { note: 'docs/notes/{date}-{slug}.md' },
+  phases: [
+    { phase: 'write', kind: 'author', role: 'note-writer', inputs: ['idea'], outputs: ['note'] },
+    { phase: 'accept', kind: 'human', inputs: ['note'] },
+  ],
+  roles: { 'note-writer': { prompt: 'prompts/note-writer.md', model: 'claude-sonnet-5-5', maxTurns: 12 } },
+};
+
+async function writeWorkflow(dir, doc, { file = `${doc.id}.json`, prompts = { 'note-writer.md': NOTE_PROMPT } } = {}) {
+  await fs.mkdir(path.join(dir, 'prompts'), { recursive: true });
+  await fs.writeFile(path.join(dir, file), JSON.stringify(doc));
+  for (const [name, text] of Object.entries(prompts)) await fs.writeFile(path.join(dir, 'prompts', name), text);
+}
+
+const projectWorkflows = (repo) => path.join(repo, '.superpowers', 'superagent', 'workflows');
+const createFrom = (h, workflow, over = {}) => create(h, { fixture: null, workflow, ...over });
+// As a pre-Plan-7 config.json wrote it: no `test` flag.
+const shortPipeline = () => defaultConfig().pipeline.map(({ test, ...p }) => (p.phase === 'spec-review' ? { ...p, maxRounds: 1 } : p));
+
+test('createJob with a workflow records it', async () => {
+  try {
+    const h = await harness({
+      configJson: (repo) => ({
+        defaults: { models: { 'note-writer': { maxTurns: 30 } } },
+        projects: { [repo]: { models: { 'note-writer': { alternate: 'claude-opus-5-5' } } } },
+      }),
+    });
+    await writeWorkflow(h.globalWorkflows, QUICK);
+    const job = await createFrom(h, 'quick');
+    assert.equal(job.state, 'running');
+    const created = h.events(job.jobId)[0];
+    assert.deepEqual(created.workflow, { id: 'quick', name: 'Quick note', source: 'global', file: path.join(h.globalWorkflows, 'quick.json') });
+    assert.deepEqual(created.artifacts, { note: `docs/notes/${created.createdDate}-${job.slug}.md` });
+    assert.deepEqual(created.prompts, { 'note-writer': path.join(h.globalWorkflows, 'prompts', 'note-writer.md') });
+    assert.deepEqual(created.pipeline, QUICK.phases);
+    assert.deepEqual(created.models['note-writer'], { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 30, alternate: 'claude-opus-5-5' });
+    assert.deepEqual(created.models['spec-writer'], defaultConfig().models['spec-writer']);
+    assert.deepEqual([job.workflow, job.artifacts, job.prompts], [created.workflow, created.artifacts, created.prompts]);
+
+    await h.sa.tick();
+    assert.equal(h.started(job.jobId).at(-1).role, 'note-writer');
+    assert.match(h.factory.calls.at(-1).sdkOptions.appendSystemPrompt, /NOTE-WRITER-MARKER/);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('createJob refuses an unknown or invalid workflow before the job exists', async () => {
+  try {
+    const h = await harness();
+    await writeWorkflow(h.globalWorkflows, { ...QUICK, id: 'broken', phases: QUICK.phases.slice(0, 1) });
+    await assert.rejects(createFrom(h, 'nope'), { code: 'ERR_UNKNOWN_WORKFLOW' });
+    await assert.rejects(createFrom(h, 'broken'), (err) => {
+      assert.equal(err.code, 'ERR_INVALID_WORKFLOW');
+      assert.ok(err.errors.length > 0);
+      return true;
+    });
+
+    // A broken project `feature` shadows the built-in, also when it is the default.
+    await writeWorkflow(projectWorkflows(h.repo), { ...QUICK, id: 'feature', phases: QUICK.phases.slice(0, 1) });
+    await assert.rejects(createFrom(h, null), { code: 'ERR_INVALID_WORKFLOW' });
+    await assert.rejects(createFrom(h, 'feature'), { code: 'ERR_INVALID_WORKFLOW' });
+    await noJobDirs(h.jobsRoot);
+    assert.deepEqual(h.sa.listJobs(), []);
+  } finally { registry._reset(); }
+});
+
+test('a raw config pipeline is offered and pre-selected', async () => {
+  try {
+    const plain = await harness();
+    const none = await plain.sa.listWorkflows(plain.repo);
+    assert.equal(none.workflows.some((w) => w.id === 'config-pipeline'), false);
+    assert.equal(none.default, 'feature');
+    assert.ok(none.workflows.every((w) => !('doc' in w)));
+
+    const global = await harness({ configJson: { defaults: { pipeline: defaultConfig().pipeline } } });
+    const listed = await global.sa.listWorkflows(global.repo);
+    const entry = listed.workflows.find((w) => w.id === 'config-pipeline');
+    assert.deepEqual([entry.name, entry.valid, listed.default], ['custom (config.json)', true, 'config-pipeline']);
+    assert.ok(listed.workflows.some((w) => w.id === 'feature'));
+
+    const scoped = await harness({ configJson: (repo) => ({ defaults: { workflow: 'feature' }, projects: { [repo]: { pipeline: shortPipeline() } } }) });
+    assert.equal((await scoped.sa.listWorkflows(scoped.repo)).default, 'config-pipeline');
+    const job = await createFrom(scoped, 'config-pipeline');
+    const created = scoped.events(job.jobId)[0];
+    assert.equal(created.pipeline.find((p) => p.phase === 'spec-review').maxRounds, 1);
+    assert.deepEqual(created.workflow, { id: 'config-pipeline', name: 'custom (config.json)', source: 'config', file: null });
+    assert.equal(created.artifacts.spec, `docs/superpowers/specs/${created.createdDate}-${job.slug}-design.md`);
+    assert.equal(created.pipeline.find((p) => p.phase === 'test').test, true);
+  } finally { registry._reset(); }
+});
+
+test('createJob without workflow uses the default', async () => {
+  try {
+    const h = await harness();
+    const job = await createFrom(h, undefined);
+    const created = h.events(job.jobId)[0];
+    assert.deepEqual(created.workflow, { id: 'feature', name: 'Feature', source: 'built-in', file: path.join(workflowsDir(), 'feature.json') });
+    assert.deepEqual(created.pipeline, JSON.parse(JSON.stringify(defaultConfig().pipeline)));
+    assert.equal(created.artifacts.brief, `docs/superpowers/jobs/${job.slug}/brief.md`);
+    assert.ok(Object.keys(created.prompts).includes('spec-writer'));
+    assert.ok(Object.values(created.prompts).every((p) => p === null));
+  } finally { registry._reset(); }
+});
+
+test('createJob with fixture keeps the legacy shape', async () => {
+  try {
+    const h = await harness();
+    await writeWorkflow(h.globalWorkflows, QUICK);
+    const job = await create(h, { workflow: 'quick' });
+    const created = h.events(job.jobId)[0];
+    for (const key of ['workflow', 'artifacts', 'prompts']) assert.equal(key in created, false, key);
+    assert.deepEqual(created.pipeline, JSON.parse(JSON.stringify(MILESTONE_1_PIPELINE)));
+    assert.equal(job.workflow, null);
+  } finally { registry._reset(); }
+});
+
+test('an edited workflow file does not change an existing job', async () => {
+  try {
+    const h = await harness();
+    await writeWorkflow(h.globalWorkflows, QUICK);
+    const job = await createFrom(h, 'quick');
+    const edited = { ...QUICK, phases: [{ ...QUICK.phases[0], phase: 'draft' }, QUICK.phases[1]], roles: { 'note-writer': { ...QUICK.roles['note-writer'], maxTurns: 99 } } };
+    await writeWorkflow(h.globalWorkflows, edited);
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    const got = fresh.sa.getJob(job.jobId);
+    assert.deepEqual(got.pipeline, QUICK.phases);
+    assert.equal(got.models['note-writer'].maxTurns, 12);
+    await fresh.sa.stop();
   } finally { registry._reset(); }
 });
 

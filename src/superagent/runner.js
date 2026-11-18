@@ -331,6 +331,19 @@ export function createRunner({
     return { error: 'launch-failed' };
   }
 
+  // Spec "What a job records": a recorded workflow prompt that disappeared is
+  // never replaced by the built-in; the job goes stuck instead.
+  async function endPromptMissing(live, err) {
+    log(`launch of attempt ${live.attemptId} failed`, err);
+    const claimed = claim(live, async () => {
+      await finish(live, failed('prompt-missing', err.path));
+      if (live.pendingEnd) return;
+      await store.append(live.jobId, { type: 'needs-you', reason: 'stuck', detail: { why: 'prompt-missing', path: err.path, phase: live.phase, role: live.role } });
+    });
+    if (claimed) await claimed;
+    return { error: 'launch-failed' };
+  }
+
   // Re-checked after every await before the attempt gets a session.
   async function gate(live) {
     if (live.finishing) return { error: 'job-not-running' };
@@ -455,7 +468,7 @@ export function createRunner({
         projectDir: projectDirFor(current),
       });
     } catch (err) {
-      return endLaunch(live, err);
+      return err?.code === 'ERR_PROMPT_MISSING' ? endPromptMissing(live, err) : endLaunch(live, err);
     }
     blocked = await gate(live);
     if (blocked) return blocked;

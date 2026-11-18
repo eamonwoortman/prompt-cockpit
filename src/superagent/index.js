@@ -31,12 +31,14 @@
 import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateDefaults, validateMilestoneFixture } from './config.js';
+import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateMilestoneFixture } from './config.js';
 import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
 import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, buildFixTask, nextAction } from './sequencer.js';
+import { legacyPipeline } from './store.js';
+import { CONFIG_PIPELINE_ID, loadWorkflows, resolvePromptPath, resolveWorkflowModels, substituteArtifacts, workflowsDir } from './workflows.js';
 import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, repoIds, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
@@ -109,6 +111,7 @@ export function createSuperagent({
   logImpl = console.error,
   platform = process.platform,
   router = null,
+  workflowDirs = { builtin: workflowsDir(), global: path.join(defaultSuperagentRoot(), 'workflows') },
 }) {
   const runner = createRunner({ registry, store, git, now, idImpl, logImpl });
   const known = new Set();
@@ -514,28 +517,64 @@ export function createSuperagent({
     unintercept = null;
   }
 
-  // Decision 11: a project override template (under projectDir) counts.
-  async function resolvePipeline(resolved, fixture, projectDir) {
-    if (fixture != null && !Object.hasOwn(FIXTURES, fixture)) {
-      throw fail('ERR_UNKNOWN_FIXTURE', `superagent: unknown fixture ${JSON.stringify(fixture)}`);
-    }
-    const pipeline = fixture != null ? FIXTURES[fixture] : resolved.pipeline;
-    const { errors } = fixture != null ? validateMilestoneFixture(resolved, fixture) : validateDefaults(resolved);
+  function loadWorkflowList(origin, fileConfig) {
+    return loadWorkflows({ builtinDir: workflowDirs.builtin, globalDir: workflowDirs.global, projectDir: origin, fileConfig, projectPath: origin, platform });
+  }
+
+  async function listWorkflows(primaryPath) {
+    const { workflows, default: preselected, defaultNote } = await loadWorkflowList(primaryPath == null ? null : path.resolve(primaryPath), config.raw());
+    return { workflows: workflows.map(({ doc, ...entry }) => entry), default: preselected, defaultNote };
+  }
+
+  function fixturePlan(resolved, fixture) {
+    if (!Object.hasOwn(FIXTURES, fixture)) throw fail('ERR_UNKNOWN_FIXTURE', `superagent: unknown fixture ${JSON.stringify(fixture)}`);
+    const { errors } = validateMilestoneFixture(resolved, fixture);
     if (errors.length > 0) {
       throw fail('ERR_INVALID_CONFIG', `superagent config is invalid: ${errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`, { errors });
     }
-    const unsupported = pipeline.filter((p) => !RUNNABLE_KINDS.has(p.kind));
+    return { pipeline: FIXTURES[fixture], models: resolved.models, recorded: null };
+  }
+
+  // Validation already ran in the loader (config-pipeline's with composition on).
+  // A role's prompt is recorded only when it comes from the workflow file.
+  async function workflowPlan(id, origin) {
+    const fileConfig = config.raw();
+    const { workflows, default: preselected } = await loadWorkflowList(origin, fileConfig);
+    const wanted = id ?? preselected;
+    const entry = workflows.find((w) => w.id === wanted);
+    if (!entry) throw fail('ERR_UNKNOWN_WORKFLOW', `superagent: unknown workflow ${JSON.stringify(wanted)}`);
+    if (!entry.valid) {
+      throw fail('ERR_INVALID_WORKFLOW', `superagent: workflow ${JSON.stringify(wanted)} is invalid: ${entry.errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`, { errors: entry.errors });
+    }
+    const { doc } = entry;
+    const pipeline = entry.id === CONFIG_PIPELINE_ID ? legacyPipeline(doc.phases) : doc.phases;
+    const prompts = {};
+    for (const role of pipelineRoles(pipeline)) {
+      const found = entry.file === null ? null : await resolvePromptPath(role, { workflowFile: entry.file, promptField: doc.roles?.[role]?.prompt ?? null });
+      prompts[role] = found?.source === 'workflow' ? found.path : null;
+    }
+    return {
+      pipeline,
+      models: resolveWorkflowModels(doc, fileConfig, origin),
+      recorded: { workflow: { id: entry.id, name: entry.name, source: entry.source, file: entry.file }, artifacts: doc.artifacts, prompts },
+    };
+  }
+
+  // Decision 11: a project override template (under projectDir) counts.
+  async function resolvePipeline(resolved, { fixture, workflow }, projectDir) {
+    const plan = fixture != null ? fixturePlan(resolved, fixture) : await workflowPlan(workflow, projectDir);
+    const unsupported = plan.pipeline.filter((p) => !RUNNABLE_KINDS.has(p.kind));
     if (unsupported.length > 0) {
       throw fail('ERR_PHASE_KIND_UNSUPPORTED', `superagent: phase kinds not runnable yet: ${unsupported.map((p) => `${p.phase} (${p.kind})`).join(', ')}`);
     }
     const missing = [];
-    for (const role of pipelineRoles(pipeline)) {
-      if (!(await hasTemplate(role, { projectDir }))) missing.push(role);
+    for (const role of pipelineRoles(plan.pipeline)) {
+      if (!(await hasTemplate(role, { projectDir, recordedPrompt: plan.recorded?.prompts[role] ?? null }))) missing.push(role);
     }
     if (missing.length > 0) {
       throw fail('ERR_NO_TEMPLATE', `superagent: no prompt template for role${missing.length > 1 ? 's' : ''} ${missing.join(', ')}`, { roles: missing });
     }
-    return pipeline;
+    return plan;
   }
 
   // Built with the runner's own attemptDir, so the bound cannot drift from the
@@ -598,16 +637,18 @@ export function createSuperagent({
     return store.get(job.jobId);
   }
 
-  async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null }) {
+  // `inPlace` is accepted and not used yet.
+  async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null, workflow = null }) {
     const origin = path.resolve(primaryPath);
     const resolved = config.resolve(origin);
-    const pipeline = await resolvePipeline(resolved, fixture, origin);
+    const { pipeline, models, recorded } = await resolvePipeline(resolved, { fixture, workflow }, origin);
     if (mode === 'manual' && pipeline.some((p) => p.kind === 'brainstorm')) throw fail('ERR_MODE_UNSUPPORTED', 'superagent: manual mode is not built yet');
     const jobId = idImpl();
     const slug = fitSlug(pipeline, { title, jobId });
     const branch = BRANCH_PREFIX + slug;
     const repos = repoIds(origin, [...resolved.additionalRepos, ...additionalRepos].map((p) => path.resolve(p)));
     await checkRepos(repos, { slug, branch });
+    const createdDate = localDate(now());
     const created = {
       type: 'job-created',
       jobId,
@@ -616,10 +657,11 @@ export function createSuperagent({
       idea,
       mode,
       branch,
-      createdDate: localDate(now()),
+      createdDate,
       repos,
       pipeline,
-      models: resolved.models,
+      ...(recorded && { workflow: recorded.workflow, artifacts: substituteArtifacts(recorded.artifacts, { slug, date: createdDate }), prompts: recorded.prompts }),
+      models,
       limits: resolved.limits,
       router: { allowlist: resolved.routerModelAllowlist, maxInputTokens: resolved.routerMaxInputTokens, maxOutputTokens: resolved.routerMaxOutputTokens },
       workerPermissionMode: resolved.workerPermissionMode,
@@ -724,5 +766,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, accept, answerQuestion, stopJob, listJobs, getJob, orphanWorktrees };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, stopJob, listJobs, getJob, orphanWorktrees };
 }

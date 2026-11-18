@@ -524,3 +524,52 @@ test('the deny message follows the phase kind', () => {
   assert.notEqual(denyMessageFor('brainstorm'), UNATTENDED_DENY_MESSAGE);
   for (const kind of ['author', 'review', 'per-task', 'brainstormer', null, undefined]) assert.equal(denyMessageFor(kind), UNATTENDED_DENY_MESSAGE, String(kind));
 });
+
+test('prompt lookup order: project override, then the recorded workflow prompt, then the built-in', async () => {
+  const projectDir = await tempDir('sa-prompts-order-');
+  const workflowDir = await tempDir('sa-prompts-wf-');
+  const recorded = path.join(workflowDir, 'spec-writer.md');
+  await fs.writeFile(recorded, 'WORKFLOW-MARKER\n');
+  const jobWith = (prompts) => deriveJob(provisionedEvents({
+    jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', idea: IDEA,
+    workflow: { id: 'quick', name: 'Quick', source: 'global', file: path.join(workflowDir, 'quick.json') },
+    artifacts: { spec: 'docs/specs/add-hello.md' },
+    prompts,
+  }));
+  const { phase, attempt } = await fixture();
+  const systemFor = async (job) => (await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir })).system;
+
+  const builtin = await fs.readFile(path.join(templatesDir(), 'spec-writer.md'), 'utf8');
+  assert.ok((await systemFor(jobWith({ 'spec-writer': null }))).startsWith(builtin.trimEnd()));
+  assert.ok((await systemFor(jobWith({}))).startsWith(builtin.trimEnd()));
+  assert.ok((await systemFor(jobWith({ 'spec-writer': recorded }))).startsWith('WORKFLOW-MARKER'));
+  assert.equal(await hasTemplate('spec-writer', { projectDir, recordedPrompt: recorded }), true);
+
+  const overrides = path.join(projectDir, '.superpowers', 'superagent', 'prompts');
+  await fs.mkdir(overrides, { recursive: true });
+  await fs.writeFile(path.join(overrides, 'spec-writer.md'), 'OVERRIDE-MARKER\n');
+  assert.ok((await systemFor(jobWith({ 'spec-writer': recorded }))).startsWith('OVERRIDE-MARKER'));
+});
+
+test('a recorded workflow prompt that disappeared is ERR_PROMPT_MISSING unless a project override exists', async () => {
+  const projectDir = await tempDir('sa-prompts-missing-');
+  const recorded = path.join(await tempDir('sa-prompts-wf-'), 'gone.md');
+  const job = deriveJob(provisionedEvents({
+    jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', idea: IDEA,
+    workflow: { id: 'quick', name: 'Quick', source: 'global', file: path.join(path.dirname(recorded), 'quick.json') },
+    artifacts: { spec: 'docs/specs/add-hello.md' },
+    prompts: { 'spec-writer': recorded },
+  }));
+  const { phase, attempt } = await fixture();
+  await assert.rejects(buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir }), (err) => {
+    assert.equal(err.code, 'ERR_PROMPT_MISSING');
+    assert.equal(err.path, recorded);
+    return true;
+  });
+  assert.equal(await hasTemplate('spec-writer', { projectDir, recordedPrompt: recorded }), false);
+
+  const overrides = path.join(projectDir, '.superpowers', 'superagent', 'prompts');
+  await fs.mkdir(overrides, { recursive: true });
+  await fs.writeFile(path.join(overrides, 'spec-writer.md'), 'OVERRIDE-MARKER\n');
+  assert.ok((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir })).system.startsWith('OVERRIDE-MARKER'));
+});

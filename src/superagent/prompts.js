@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { artifactPaths, reviewPaths, requiredOutputs, reviseOutputs as reviseSet, BRAINSTORM_BATCH } from './results.js';
 import { brainstormLog, DEFAULT_REVIEW_ROUNDS } from './sequencer.js';
-import { ROLE_NAME, templatesDir } from './workflows.js';
+import { ROLE_NAME, resolvePromptPath, templatesDir } from './workflows.js';
 
 export { templatesDir };
 
@@ -22,10 +22,6 @@ const REVIEW_PURPOSES = new Set(['review', 'task-review']);
 const WORK_PURPOSES = new Set(['implement', 'fix']);
 const TARGET_PURPOSES = new Set(['review', 'fix', 'verify']);
 
-function overrideDir(projectDir) {
-  return path.join(projectDir, '.superpowers', 'superagent', 'prompts');
-}
-
 async function readIfExists(file) {
   try {
     return await fs.readFile(file, 'utf8');
@@ -35,22 +31,33 @@ async function readIfExists(file) {
   }
 }
 
-function roleFile(role) {
+function checkRole(role) {
   if (!ROLE_NAME.test(role ?? '')) throw Object.assign(new Error(`superagent: invalid role name ${JSON.stringify(role)}`), { code: 'ERR_NO_TEMPLATE' });
-  return `${role}.md`;
+  if (`${role}.md` === CONTRACT_FILE) throw Object.assign(new Error('superagent: contract is not a role'), { code: 'ERR_NO_TEMPLATE' });
 }
 
-async function loadRoleTemplate(role, projectDir) {
-  const file = roleFile(role);
-  if (file === CONTRACT_FILE) throw Object.assign(new Error('superagent: contract is not a role'), { code: 'ERR_NO_TEMPLATE' });
-  return (await readIfExists(path.join(overrideDir(projectDir), file))) ?? (await readIfExists(path.join(templatesDir(), file)));
+// `recordedPrompt` is the job's absolute workflow prompt path, or null for the
+// built-in. An absolute promptField resolves to itself, so it stands in for
+// the workflow file's prompt in the one lookup order.
+async function resolveTemplate(role, projectDir, recordedPrompt) {
+  checkRole(role);
+  const found = await resolvePromptPath(role, { projectDir, workflowFile: recordedPrompt, promptField: recordedPrompt });
+  if (found == null && recordedPrompt != null) {
+    throw Object.assign(new Error(`superagent: the workflow prompt for role ${JSON.stringify(role)} is missing: ${recordedPrompt}`), { code: 'ERR_PROMPT_MISSING', path: recordedPrompt });
+  }
+  return found;
 }
 
-export async function hasTemplate(role, { projectDir }) {
+async function loadRoleTemplate(role, projectDir, recordedPrompt = null) {
+  const found = await resolveTemplate(role, projectDir, recordedPrompt);
+  return found == null ? null : readIfExists(found.path);
+}
+
+export async function hasTemplate(role, { projectDir, recordedPrompt = null }) {
   try {
-    return (await loadRoleTemplate(role, projectDir)) != null;
+    return (await resolveTemplate(role, projectDir, recordedPrompt)) != null;
   } catch (err) {
-    if (err.code === 'ERR_NO_TEMPLATE') return false;
+    if (err.code === 'ERR_NO_TEMPLATE' || err.code === 'ERR_PROMPT_MISSING') return false;
     throw err;
   }
 }
@@ -154,7 +161,7 @@ function purposeFields(job, phase, attempt) {
 }
 
 export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir }) {
-  const template = await loadRoleTemplate(role, projectDir);
+  const template = await loadRoleTemplate(role, projectDir, job.prompts?.[role] ?? null);
   if (template == null) throw Object.assign(new Error(`superagent: no prompt template for role ${JSON.stringify(role)}`), { code: 'ERR_NO_TEMPLATE' });
   const contract = await fs.readFile(path.join(templatesDir(), CONTRACT_FILE), 'utf8');
 

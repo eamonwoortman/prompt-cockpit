@@ -17,6 +17,7 @@ import { MILESTONE_2_PIPELINE, createSuperagentConfig, defaultConfig } from '../
 import { brainstormLog } from '../src/superagent/sequencer.js';
 import { ANSWER_TAGS, artifactPaths } from '../src/superagent/results.js';
 import { createSuperagent, pipelineRoles } from '../src/superagent/index.js';
+import { workflowsDir } from '../src/superagent/workflows.js';
 import { ROUTER_SYSTEM_PROMPT } from '../src/superagent/router.js';
 
 const quiet = () => {};
@@ -81,6 +82,7 @@ async function harness({ handlers = handlersWith(), limits = null, defaults = {}
       stopTickDeadlineMs: 20,
       logImpl: quiet,
       platform: 'linux',
+      workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
       ...(router === undefined ? {} : { router }),
       ...(budgetCheck === undefined ? {} : { budgetCheck }),
     });

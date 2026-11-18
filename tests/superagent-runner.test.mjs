@@ -1314,3 +1314,30 @@ test('a removed attempt records the tokens last seen on its row', async () => {
     assert.equal(ends[0].tokens, 135);
   } finally { registry._reset(); }
 });
+
+test('a recorded prompt that disappeared makes the job stuck', async () => {
+  registry._reset();
+  try {
+    const root = await tempDir('sa-runner-prompt-');
+    const store = createSuperagentStore({ rootDir: path.join(root, 'jobs'), now: () => T0, logImpl: quiet });
+    const recorded = path.join(root, 'workflow', 'spec-writer.md');
+    await fs.mkdir(path.dirname(recorded), { recursive: true });
+    await fs.writeFile(recorded, '# Spec writer\n');
+    const job = await liveJob(store, {
+      repos: [{ id: 'primary', origin: path.join(root, 'origin') }],
+      workflow: { id: 'quick', name: 'Quick', source: 'global', file: path.join(root, 'workflow', 'quick.json') },
+      artifacts: { spec: 'docs/specs/add-hello.md' },
+      prompts: { 'spec-writer': recorded },
+    });
+    await fs.rm(recorded);
+    const factory = sessionFactory(registry);
+    const runner = createRunner({ registry: factory.registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    assert.deepEqual(await runner.launch(job, launchAction()), { error: 'launch-failed' });
+    await runner.drain();
+    assert.equal(factory.calls.length, 0);
+    assert.equal(runner.isLive(job.jobId), false);
+    const got = store.get(job.jobId);
+    assert.deepEqual([got.attempts.at(-1).outcome, got.attempts.at(-1).reason], ['failed', 'prompt-missing']);
+    assert.deepEqual([got.state, got.reason, got.detail.why, got.detail.path], ['needs-you', 'stuck', 'prompt-missing', recorded]);
+  } finally { registry._reset(); }
+});
