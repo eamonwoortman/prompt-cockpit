@@ -24,6 +24,8 @@ const STATUS_LABEL = {
 const CHIP_MARK = { done: ' ✓', running: ' ●', waiting: ' !', todo: '' };
 const IN_PLACE_LABEL = 'Use this folder directly (no new worktree)';
 const IN_PLACE_NOTE = "The job switches this folder to its own branch and works there. Don't work in this folder while the job runs.";
+const WORKFLOW_WAIT = 'Wait for the workflow list to load.';
+const WORKFLOW_FAILED = 'The workflow list could not be loaded; pick the primary folder again to retry.';
 const IN_PLACE_FINISHED = "This folder is still on the job's branch.";
 const READY_LABEL = { testReport: 'Test report' };
 
@@ -226,11 +228,15 @@ export function initSuperagentView() {
   // Workflow select: listed for the primary folder (project workflows live
   // in it), so it is refetched whenever that folder changes. `workflowFor` is
   // the folder the shown list belongs to; a stale response is dropped.
+  // `workflowStatus` is idle, loading, ready or failed. `workflowChoice` is
+  // the last settled selection, kept while a refetch shows a placeholder.
   const workflowSelect = el('select');
   const workflowHint = el('div', 'sa-note');
   const workflowNotes = el('div');
   let workflowFor = null;
   let workflowTicket = 0;
+  let workflowStatus = 'idle';
+  let workflowChoice = '';
 
   function placeholderOption(text) {
     const option = el('option', null, text);
@@ -238,7 +244,8 @@ export function initSuperagentView() {
     return option;
   }
 
-  function showWorkflowPlaceholder(text) {
+  function showWorkflowPlaceholder(text, status) {
+    workflowStatus = status;
     workflowSelect.textContent = '';
     workflowSelect.append(placeholderOption(text));
     workflowSelect.disabled = true;
@@ -267,8 +274,11 @@ export function initSuperagentView() {
     const pick = usable(previous) ? previous : (usable(listing.default) ? listing.default : '');
     if (!pick) workflowSelect.prepend(placeholderOption('Choose a workflow'));
     workflowSelect.value = pick;
+    workflowChoice = pick;
     workflowSelect.disabled = false;
     workflowSelect.required = true;
+    workflowStatus = 'ready';
+    if (formError.textContent === WORKFLOW_WAIT) formError.hidden = true;
 
     if (listing.defaultNote) workflowNotes.append(el('div', 'sa-note', `Default workflow: ${listing.defaultNote}`));
     if (!usable(listing.default)) {
@@ -283,7 +293,10 @@ export function initSuperagentView() {
       for (const w of invalid) list.append(el('li', null, `Invalid: ${w.name} (${w.source}) - ${firstError(w)}`));
     }
     describeWorkflow(entries);
-    workflowSelect.onchange = () => describeWorkflow(entries);
+    workflowSelect.onchange = () => {
+      workflowChoice = workflowSelect.value;
+      describeWorkflow(entries);
+    };
   }
 
   async function loadWorkflows() {
@@ -291,23 +304,34 @@ export function initSuperagentView() {
     if (primary === workflowFor) return;
     workflowFor = primary;
     const ticket = ++workflowTicket;
-    const previous = workflowSelect.value;
     if (!primary) {
-      showWorkflowPlaceholder('Choose a primary folder first');
+      showWorkflowPlaceholder('Choose a primary folder first', 'idle');
       return;
     }
-    showWorkflowPlaceholder('Loading…');
+    showWorkflowPlaceholder('Loading…', 'loading');
     try {
       const listing = await getJson(`/api/superagent/workflows?primary=${encodeURIComponent(primary)}`);
-      if (ticket === workflowTicket) renderWorkflows(listing, previous);
+      if (ticket === workflowTicket) renderWorkflows(listing, workflowChoice);
     } catch (err) {
       if (ticket !== workflowTicket) return;
       workflowFor = null;
-      showWorkflowPlaceholder('No workflows listed');
+      showWorkflowPlaceholder('No workflows listed', 'failed');
       workflowNotes.append(el('div', 'sa-error', errorText(err)));
     }
   }
-  showWorkflowPlaceholder('Choose a primary folder first');
+  showWorkflowPlaceholder('Choose a primary folder first', 'idle');
+
+  // Why Create must wait, or null: a job never falls back to the server's
+  // default workflow because the list was not ready for this folder.
+  function workflowBlock(primaryRepo) {
+    if (workflowStatus === 'failed') return WORKFLOW_FAILED;
+    if (workflowFor !== primaryRepo) {
+      loadWorkflows();
+      return WORKFLOW_WAIT;
+    }
+    if (workflowStatus !== 'ready') return WORKFLOW_WAIT;
+    return workflowSelect.value ? null : 'Choose a workflow.';
+  }
 
   function resetForm() {
     form.reset();
@@ -316,7 +340,8 @@ export function initSuperagentView() {
     renderExtraFolders();
     workflowFor = null;
     workflowTicket++;
-    showWorkflowPlaceholder('Choose a primary folder first');
+    workflowChoice = '';
+    showWorkflowPlaceholder('Choose a primary folder first', 'idle');
   }
 
   const actions = el('div', 'sa-actions');
@@ -340,18 +365,22 @@ export function initSuperagentView() {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     formError.hidden = true;
-    createBtn.disabled = true;
     const primaryRepo = primaryInput.value.trim();
+    const blocked = workflowBlock(primaryRepo);
+    if (blocked) {
+      formError.textContent = blocked;
+      formError.hidden = false;
+      return;
+    }
+    createBtn.disabled = true;
     const payload = {
       idea: ideaInput.value,
       title: titleInput.value,
       primaryRepo,
       additionalRepos: extraFolders.map((f) => f.path),
       inPlace: [...(primaryInPlace.input.checked ? [primaryRepo] : []), ...extraFolders.filter((f) => f.inPlace).map((f) => f.path)],
+      workflow: workflowSelect.value,
     };
-    // A list shown for another folder, or none at all, leaves the choice to
-    // the server's default.
-    if (workflowFor === primaryRepo && !workflowSelect.disabled && workflowSelect.value) payload.workflow = workflowSelect.value;
     try {
       const job = await postJson('/api/superagent/jobs', payload);
       resetForm();
