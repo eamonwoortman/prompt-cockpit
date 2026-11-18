@@ -3,11 +3,13 @@
 // Spec: docs/superpowers/specs/2026-11-03-superagent-design.md, Decisions 10-12
 // (isolated worktree per job, ignored local ledger, local settings copy only
 // when the repo ignores that file). Never delete automatically: nothing in this
-// module pushes, removes a worktree, deletes a branch or prunes. Orphans are
-// only listed; the operator decides.
+// module pushes, removes a worktree, deletes a branch or prunes, except
+// removeAbortedWorktree, which removes only the half-made worktree of a
+// provisioning a Stop cancelled. Orphans are only listed; the operator decides.
 import { execFile } from 'node:child_process';
-import { cp, copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
+import { cp, copyFile, mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { killProcessTree } from '../child-tracker.js';
 
 export const BRANCH_PREFIX = 'superagent/';
 
@@ -24,15 +26,35 @@ export function slugify(title, jobId, maxBase = 40) {
 // A system-level core.fsmonitor=true would start a never-exiting
 // `git fsmonitor--daemon` per job worktree. This covers superagent's own git
 // calls only; the workers' git commands are not covered.
-export function defaultGit(args, { cwd }) {
-  return new Promise((resolve) => {
-    execFile('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
-      let code = 0;
-      if (err) code = typeof err.code === 'number' ? err.code : 1;
-      resolve({ code, stdout: stdout ?? '', stderr: stderr || (err && typeof err.code !== 'number' ? err.message : '') });
+//
+// Resolves { code, stdout, stderr }, never rejects. With `signal`, an abort
+// kills git's whole process tree (git worktree add runs git-lfs under a
+// shell) and the result also carries `aborted: true` with a non-zero code; an
+// already-aborted signal starts no process at all. On POSIX killProcessTree
+// signals only git's own pid.
+export function createGit({ execFileImpl = execFile, killTree = killProcessTree } = {}) {
+  return function git(args, { cwd, signal } = {}) {
+    if (signal?.aborted) return Promise.resolve({ code: 1, stdout: '', stderr: 'superagent: git was not started: aborted', aborted: true });
+    return new Promise((resolve) => {
+      let aborted = false;
+      const onAbort = () => {
+        aborted = true;
+        if (!killTree(child.pid)) child.kill?.('SIGKILL');
+      };
+      const child = execFileImpl('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+        signal?.removeEventListener('abort', onAbort);
+        let code = 0;
+        if (err) code = typeof err.code === 'number' ? err.code : 1;
+        if (aborted && code === 0) code = 1;
+        const res = { code, stdout: stdout ?? '', stderr: stderr || (err && typeof err.code !== 'number' ? err.message : '') };
+        resolve(aborted ? { ...res, aborted: true } : res);
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
-  });
+  };
 }
+
+export const defaultGit = createGit();
 
 export function repoIds(primary, additional) {
   const seen = new Map();
@@ -82,11 +104,18 @@ export async function checkRepo({ git = defaultGit, origin, worktree, branch }) 
   return { toplevel };
 }
 
-export async function createWorktree({ git = defaultGit, origin, worktree, branch, copyLocalClaudeSettings }) {
+// `signal` reaches only `git worktree add`, the one long step. An abort
+// rejects with ERR_ABORTED; once the add has started, `err.partial` names the
+// half-made worktree for removeAbortedWorktree.
+export async function createWorktree({ git = defaultGit, origin, worktree, branch, copyLocalClaudeSettings, signal }) {
   const { baseSha } = await preflight({ git, origin, worktree, branch });
+  if (signal?.aborted) throw fail('ERR_ABORTED', `superagent: provisioning of ${worktree} was stopped before git worktree add`);
 
   await mkdir(path.dirname(worktree), { recursive: true });
-  const add = await git(['worktree', 'add', '-b', branch, worktree, 'HEAD'], { cwd: origin });
+  const add = await git(['worktree', 'add', '-b', branch, worktree, 'HEAD'], { cwd: origin, ...(signal && { signal }) });
+  if (add.aborted) {
+    throw Object.assign(fail('ERR_ABORTED', `superagent: git worktree add of ${worktree} was stopped`), { partial: { worktree, branch, baseSha } });
+  }
   if (add.code !== 0) throw new Error(`superagent: git worktree add failed: ${add.stderr.trim()}`);
 
   const ledgerRoot = path.join(worktree, '.superpowers', 'superagent');
@@ -107,6 +136,80 @@ export async function createWorktree({ git = defaultGit, origin, worktree, branc
     }
   }
   return { worktree, branch, baseSha, settingsCopy };
+}
+
+const fold = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+
+function isStrictlyInside(root, p) {
+  const rel = path.relative(fold(root), fold(p));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+async function realpathOrNull(p) {
+  try {
+    return await realpath(p);
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+// The half-made worktree of a provisioning a Stop cancelled, and nothing else:
+// `worktree` must lie strictly inside `worktreesRoot`, by path and (when it
+// exists) by real path, or nothing runs. The branch goes only while it still
+// points at `baseSha`, so a branch with a commit is never deleted. Never
+// throws; whatever could not be done is described in `notes`.
+export async function removeAbortedWorktree({ git = defaultGit, origin, worktree, branch, baseSha, worktreesRoot }) {
+  const notes = [];
+  const result = { worktreeRemoved: false, branchDeleted: false, notes };
+  const step = async (what, fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      notes.push(`${what}: ${String(err?.message ?? err)}`);
+      return null;
+    }
+  };
+
+  const contained = await step(`could not check ${worktree}`, async () => {
+    if (!isStrictlyInside(path.resolve(worktreesRoot), path.resolve(worktree))) return false;
+    const real = await realpathOrNull(worktree);
+    return real === null || isStrictlyInside(await realpath(worktreesRoot), real);
+  });
+  if (contained !== true) {
+    if (contained === false) notes.push(`${worktree} is outside ${worktreesRoot}; nothing removed`);
+    return result;
+  }
+
+  const removed = await step('git worktree remove failed', () => git(['worktree', 'remove', '--force', '--force', worktree], { cwd: origin }));
+  if (removed?.code === 0) result.worktreeRemoved = true;
+  else {
+    if (removed) notes.push(`git worktree remove failed: ${removed.stderr.trim()}`);
+    const pruned = await step('git worktree prune failed', () => git(['worktree', 'prune'], { cwd: origin }));
+    if (pruned && pruned.code !== 0) notes.push(`git worktree prune failed: ${pruned.stderr.trim()}`);
+    await step(`could not delete ${worktree}`, async () => {
+      const real = await realpathOrNull(worktree);
+      if (real === null) return;
+      if (!isStrictlyInside(await realpath(worktreesRoot), real)) {
+        notes.push(`${worktree} now resolves outside ${worktreesRoot}; kept`);
+        return;
+      }
+      await rm(real, { recursive: true, force: true });
+      result.worktreeRemoved = true;
+    });
+  }
+
+  const ref = await step(`could not read branch ${branch}`, () => git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: origin }));
+  if (ref?.code !== 0) return result;
+  const head = ref.stdout.trim();
+  if (head !== baseSha) {
+    notes.push(`kept branch ${branch}: it points at ${head}, not the base commit ${baseSha}`);
+    return result;
+  }
+  const deleted = await step(`git branch -D ${branch} failed`, () => git(['branch', '-D', branch], { cwd: origin }));
+  if (deleted?.code === 0) result.branchDeleted = true;
+  else if (deleted) notes.push(`git branch -D ${branch} failed: ${deleted.stderr.trim()}`);
+  return result;
 }
 
 export async function inspectWorktree({ git = defaultGit, worktree }) {

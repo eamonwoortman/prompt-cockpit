@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { tempDir, initRepo } from './superagent-helpers.mjs';
-import { slugify, repoIds, checkRepo, repoToplevel, createWorktree, inspectWorktree, archiveLedger, listOrphanWorktrees, defaultGit } from '../src/superagent/worktree.js';
+import { slugify, repoIds, checkRepo, repoToplevel, createWorktree, inspectWorktree, archiveLedger, listOrphanWorktrees, defaultGit, createGit, removeAbortedWorktree } from '../src/superagent/worktree.js';
 
 const norm = (p) => realpathSync.native(path.resolve(p)).toLowerCase();
 const SETTINGS = '{"permissions":{"allow":["Bash(npm test)"]}}';
@@ -166,4 +166,223 @@ test('checkRepo reports each refusal with its code', async () => {
   const ok = await checkRepo({ origin, worktree: path.join(r2, 'wt'), branch: 'superagent/free' });
   assert.deepEqual(ok, { toplevel: await repoToplevel({ origin }) });
   assert.equal(norm(ok.toplevel), norm(origin));
+});
+
+const gitOut = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+const hasBranch = (cwd, branch) => {
+  try {
+    gitOut(cwd, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const isRunning = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+};
+
+test('git: an abort while git runs kills the process tree of its pid and settles as aborted', async () => {
+  const killed = [];
+  let finish;
+  const execFileImpl = (file, args, opts, cb) => {
+    finish = cb;
+    return { pid: 4242, kill: () => assert.fail('child.kill is only the fallback') };
+  };
+  const git = createGit({
+    execFileImpl,
+    killTree: (pid) => {
+      killed.push(pid);
+      finish(Object.assign(new Error('killed'), { code: 1 }), '', '');
+      return true;
+    },
+  });
+  const controller = new AbortController();
+  const running = git(['worktree', 'add', '-b', 'b', 'wt', 'HEAD'], { cwd: '/repo', signal: controller.signal });
+  controller.abort();
+  assert.deepEqual(killed, [4242]);
+  const res = await running;
+  assert.equal(res.aborted, true);
+  assert.notEqual(res.code, 0);
+});
+
+test('git: a failed tree kill falls back to killing the child itself', async () => {
+  let finish;
+  const kills = [];
+  const git = createGit({
+    execFileImpl: (file, args, opts, cb) => {
+      finish = cb;
+      return { pid: 7, kill: (sig) => { kills.push(sig); finish(Object.assign(new Error('killed'), { code: null, signal: sig }), '', ''); } };
+    },
+    killTree: () => false,
+  });
+  const controller = new AbortController();
+  const running = git(['status'], { cwd: '/repo', signal: controller.signal });
+  controller.abort();
+  const res = await running;
+  assert.deepEqual(kills, ['SIGKILL']);
+  assert.equal(res.aborted, true);
+  assert.notEqual(res.code, 0);
+});
+
+test('git: an already-aborted signal starts no process; defaultGit settles as aborted', async () => {
+  let spawned = 0;
+  const git = createGit({ execFileImpl: () => { spawned += 1; return { pid: 1 }; }, killTree: () => assert.fail('nothing to kill') });
+  const res = await git(['status'], { cwd: '/repo', signal: AbortSignal.abort() });
+  assert.equal(spawned, 0);
+  assert.equal(res.aborted, true);
+  assert.notEqual(res.code, 0);
+
+  const { origin } = await setup();
+  const real = await defaultGit(['status'], { cwd: origin, signal: AbortSignal.abort() });
+  assert.equal(real.aborted, true);
+  assert.notEqual(real.code, 0);
+});
+
+test('git: an abort kills a real hanging git and no process is left running', async () => {
+  const { origin } = await setup();
+  const pids = [];
+  const git = createGit({ execFileImpl: (...a) => { const child = execFile(...a); pids.push(child.pid); return child; } });
+  const controller = new AbortController();
+  // hash-object --stdin waits on a stdin execFile never closes.
+  const running = git(['hash-object', '--stdin'], { cwd: origin, signal: controller.signal });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(isRunning(pids[0]), true);
+  controller.abort();
+  const res = await running;
+  assert.equal(res.aborted, true);
+  assert.equal(isRunning(pids[0]), false);
+});
+
+test('git: a run that is never aborted reports no aborted flag', async () => {
+  const { origin } = await setup();
+  const res = await defaultGit(['rev-parse', 'HEAD'], { cwd: origin, signal: new AbortController().signal });
+  assert.equal(res.code, 0);
+  assert.equal('aborted' in res, false);
+});
+
+test('createWorktree: an abort during worktree add rejects with ERR_ABORTED and the half-made worktree; before the add, nothing is made', async () => {
+  const { root, origin, sha } = await setup();
+  const controller = new AbortController();
+  const seen = [];
+  const git = (args, opts) => {
+    seen.push({ args, signal: opts.signal });
+    if (args[0] === 'worktree' && args[1] === 'add') {
+      return new Promise((resolve) => opts.signal.addEventListener('abort', () => resolve({ code: 1, stdout: '', stderr: '', aborted: true })));
+    }
+    return defaultGit(args, opts);
+  };
+  const worktree = path.join(root, 'wts', 'slug', 'primary');
+  const making = createWorktree({ git, origin, worktree, branch: 'superagent/x', copyLocalClaudeSettings: false, signal: controller.signal });
+  while (!seen.some((c) => c.args[1] === 'add')) await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  await assert.rejects(making, (err) => {
+    assert.equal(err.code, 'ERR_ABORTED');
+    assert.deepEqual(err.partial, { worktree, branch: 'superagent/x', baseSha: sha });
+    return true;
+  });
+  assert.deepEqual(seen.filter((c) => c.signal).map((c) => c.args[1]), ['add'], 'only worktree add gets the signal');
+
+  const early = await setup();
+  const calls = [];
+  const spy = (args, opts) => { calls.push(args); return defaultGit(args, opts); };
+  const wt2 = path.join(early.root, 'wts', 'slug', 'primary');
+  await assert.rejects(createWorktree({ git: spy, origin: early.origin, worktree: wt2, branch: 'superagent/y', copyLocalClaudeSettings: false, signal: AbortSignal.abort() }), (err) => {
+    assert.equal(err.code, 'ERR_ABORTED');
+    assert.equal(err.partial, undefined);
+    return true;
+  });
+  assert.equal(calls.some((a) => a[0] === 'worktree'), false);
+  await assert.rejects(fs.access(path.join(early.root, 'wts')));
+});
+
+test('removeAbortedWorktree removes a locked half-made worktree and its branch while it is still at baseSha', async () => {
+  const { root, origin, sha } = await setup();
+  const worktreesRoot = path.join(root, 'wts');
+  const worktree = path.join(worktreesRoot, 'slug', 'primary');
+  await fs.mkdir(path.dirname(worktree), { recursive: true });
+  gitOut(origin, 'worktree', 'add', '-q', '-b', 'superagent/x', worktree, 'HEAD');
+  gitOut(origin, 'worktree', 'lock', '--reason', 'initializing', worktree);
+  const res = await removeAbortedWorktree({ origin, worktree, branch: 'superagent/x', baseSha: sha, worktreesRoot });
+  assert.deepEqual(res, { worktreeRemoved: true, branchDeleted: true, notes: [] });
+  await assert.rejects(fs.access(worktree));
+  assert.equal(hasBranch(origin, 'superagent/x'), false);
+  assert.ok(!gitOut(origin, 'worktree', 'list', '--porcelain').toLowerCase().includes('slug'));
+});
+
+test('removeAbortedWorktree keeps a branch that has moved past baseSha and says why', async () => {
+  const { root, origin, sha } = await setup();
+  const worktreesRoot = path.join(root, 'wts');
+  const worktree = path.join(worktreesRoot, 'slug', 'primary');
+  await fs.mkdir(path.dirname(worktree), { recursive: true });
+  gitOut(origin, 'worktree', 'add', '-q', '-b', 'superagent/x', worktree, 'HEAD');
+  await fs.writeFile(path.join(worktree, 'work.txt'), 'work\n');
+  gitOut(worktree, 'add', 'work.txt');
+  gitOut(worktree, 'commit', '-q', '-m', 'work');
+  const moved = gitOut(worktree, 'rev-parse', 'HEAD');
+  const res = await removeAbortedWorktree({ origin, worktree, branch: 'superagent/x', baseSha: sha, worktreesRoot });
+  assert.equal(res.worktreeRemoved, true);
+  assert.equal(res.branchDeleted, false);
+  assert.equal(res.notes.length, 1);
+  assert.match(res.notes[0], new RegExp(`kept branch superagent/x.*${moved}`));
+  assert.equal(gitOut(origin, 'rev-parse', 'refs/heads/superagent/x'), moved);
+});
+
+test('removeAbortedWorktree prunes and deletes an unregistered leftover folder inside the worktrees root', async () => {
+  const { root, origin, sha } = await setup();
+  const worktreesRoot = path.join(root, 'wts');
+  const worktree = path.join(worktreesRoot, 'slug', 'primary');
+  await fs.mkdir(worktree, { recursive: true });
+  await fs.writeFile(path.join(worktree, 'partial.txt'), 'x');
+  const calls = [];
+  const git = (args, opts) => { calls.push(args.join(' ')); return defaultGit(args, opts); };
+  const res = await removeAbortedWorktree({ git, origin, worktree, branch: 'superagent/x', baseSha: sha, worktreesRoot });
+  assert.equal(res.worktreeRemoved, true);
+  assert.equal(res.branchDeleted, false);
+  assert.ok(calls.includes('worktree prune'));
+  await assert.rejects(fs.access(worktree));
+  await fs.access(path.join(worktreesRoot, 'slug'));
+});
+
+test('removeAbortedWorktree touches nothing outside the worktrees root, by path or through a link', async () => {
+  const { root, origin, sha } = await setup();
+  const worktreesRoot = path.join(root, 'wts');
+  await fs.mkdir(worktreesRoot, { recursive: true });
+  const calls = [];
+  const git = (args, opts) => { calls.push(args.join(' ')); return defaultGit(args, opts); };
+
+  const outside = path.join(root, 'outside');
+  await fs.mkdir(outside);
+  await fs.writeFile(path.join(outside, 'keep.txt'), 'keep');
+  for (const worktree of [outside, worktreesRoot, origin]) {
+    const res = await removeAbortedWorktree({ git, origin, worktree, branch: 'superagent/x', baseSha: sha, worktreesRoot });
+    assert.equal(res.worktreeRemoved, false);
+    assert.equal(res.notes.length, 1);
+  }
+  assert.deepEqual(calls, []);
+
+  const link = path.join(worktreesRoot, 'slug', 'primary');
+  await fs.mkdir(path.dirname(link), { recursive: true });
+  await fs.symlink(outside, link, 'junction');
+  const res = await removeAbortedWorktree({ git, origin, worktree: link, branch: 'superagent/x', baseSha: sha, worktreesRoot });
+  assert.equal(res.worktreeRemoved, false);
+  assert.match(res.notes.join('\n'), /outside/);
+  assert.deepEqual(calls, [], 'a link out of the root is refused before any git command');
+  assert.equal(await fs.readFile(path.join(outside, 'keep.txt'), 'utf8'), 'keep');
+  assert.equal(gitOut(origin, 'rev-parse', 'HEAD'), sha);
+});
+
+test('removeAbortedWorktree never throws: a git that throws becomes notes', async () => {
+  const { root, origin, sha } = await setup();
+  const worktreesRoot = path.join(root, 'wts');
+  const worktree = path.join(worktreesRoot, 'slug', 'primary');
+  const git = async () => { throw new Error('spawn EPERM'); };
+  const res = await removeAbortedWorktree({ git, origin, worktree, branch: 'superagent/x', baseSha: sha, worktreesRoot });
+  assert.equal(res.worktreeRemoved, false);
+  assert.equal(res.branchDeleted, false);
+  assert.match(res.notes.join('\n'), /spawn EPERM/);
 });

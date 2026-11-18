@@ -96,6 +96,7 @@ export function initSuperagentView() {
   let detailError = null;
   let refreshing = null;
   let pollAgain = false;
+  const stopsPending = new Set();
   const artifactCache = new Map();
   // Draft answers by needs-you key, so switching jobs and back keeps them.
   const answerDrafts = new Map();
@@ -428,7 +429,8 @@ export function initSuperagentView() {
     target.hidden = !err;
   }
 
-  async function act(name, target, payload = {}) {
+  // onSettled runs before the refresh, so a re-render already sees its effect.
+  async function act(name, target, payload = {}, { onSettled } = {}) {
     const jobId = selectedId;
     showError(target, null);
     try {
@@ -438,16 +440,27 @@ export function initSuperagentView() {
       showError(target, err);
       return false;
     } finally {
+      onSettled?.();
       await refresh();
     }
   }
 
+  // Polls re-render the button while a stop is pending, so the pending state
+  // lives in stopsPending, not on the button.
   function stopButton(target) {
-    const stop = button('Stop job', 'btn-danger', async () => {
+    const jobId = selectedId;
+    const label = () => (stopsPending.has(jobId) ? 'Stopping…' : 'Stop job');
+    const stop = button(label(), 'btn-danger', async () => {
       if (!confirm('Stop this job? Its live worker is closed and the job cannot be resumed. Its worktree and branch are kept.')) return;
+      stopsPending.add(jobId);
       stop.disabled = true;
-      if (!(await act('stop', target))) stop.disabled = false;
+      stop.textContent = label();
+      if (!(await act('stop', target, {}, { onSettled: () => stopsPending.delete(jobId) }))) {
+        stop.disabled = false;
+        stop.textContent = label();
+      }
     });
+    stop.disabled = stopsPending.has(jobId);
     return stop;
   }
 

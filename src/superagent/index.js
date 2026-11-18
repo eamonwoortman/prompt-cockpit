@@ -13,6 +13,10 @@
 // so a stop can never interleave with a launch. stopJob marks the job in
 // stopRequested synchronously, before it queues, so a tick step already
 // waiting on a budget check sees the stop on its recheck and launches nothing.
+// It also aborts the job's provisioning controller before it queues: that
+// kills a running `git worktree add`, whose half-made worktree is removed,
+// and provision() records job-stopped itself, so the queued stop finds the
+// job already stopped.
 //
 // A rejected store append may still have landed, and store.get() keeps
 // serving the last good state until the next append or load re-reads. Every
@@ -46,7 +50,7 @@ import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, attemptsFor, buildFixTask, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
 import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
-import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, repoIds, repoToplevel, slugify } from './worktree.js';
+import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, removeAbortedWorktree, repoIds, repoToplevel, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -130,6 +134,8 @@ export function createSuperagent({
   const provisioningNow = new Set();
   const stopRequested = new Set();
   const routing = new Map();
+  // jobId -> the AbortController of its running provision().
+  const provisioning = new Map();
   const pendingDecisions = new Map();
   // Decision 7: normalised top level -> [{ jobId, inPlace }], held from the
   // start of createJob's folder preflight until the job is finished.
@@ -761,21 +767,62 @@ export function createSuperagent({
     return checked;
   }
 
+  // Only the worktree this run was creating goes; worktrees of repos already
+  // provisioned are kept, as for any stopped job.
+  async function removeHalfMade(jobId, { origin }, { worktree, branch, baseSha }) {
+    const { worktreeRemoved, branchDeleted, notes } = await removeAbortedWorktree({ git, origin, worktree, branch, baseSha, worktreesRoot });
+    log(`stopping job ${jobId} cancelled git worktree add; ${worktreeRemoved ? 'removed' : 'could not remove'} ${worktree}, ${branchDeleted ? 'deleted' : 'did not delete'} ${branch}`);
+    for (const note of notes) log(`job ${jobId}: ${note}`);
+  }
+
+  // A failed append is left to the stopJob queued behind this provisioning,
+  // which finds the job unfinished and records the stop itself.
+  async function recordProvisioningStop(jobId) {
+    try {
+      await appendConfirmed(jobId, { type: 'job-stopped' }, (j) => j.state === 'stopped');
+    } catch (err) {
+      log(`could not record the stop of job ${jobId} during provisioning`, err);
+      await reload(jobId);
+    }
+  }
+
+  // stopJob aborts the controller before it queues behind this. An in-place
+  // switch never gets the signal (killing it could leave index.lock in the
+  // user's folder); the stop takes effect once it returns.
   async function provision(job) {
+    const { jobId } = job;
+    const controller = new AbortController();
+    provisioning.set(jobId, controller);
+    const stopped = () => stopRequested.has(jobId) || controller.signal.aborted;
     try {
       for (const repo of job.repos) {
+        if (stopped()) break;
         const inPlace = repo.inPlace === true;
-        const made = inPlace
-          ? await provisionInPlace({ git, folder: repo.toplevel, branch: job.branch, jobId: job.jobId, expectedHead: repo.admittedHead })
-          : await createWorktree({ git, origin: repo.origin, worktree: path.join(worktreesRoot, job.slug, repo.id), branch: job.branch, copyLocalClaudeSettings: job.copyLocalClaudeSettings });
-        await store.append(job.jobId, { type: 'worktree-created', repo: repo.id, worktree: made.worktree, branch: made.branch, baseSha: made.baseSha, settingsCopy: made.settingsCopy, ...(inPlace && { inPlace: true }) });
+        let made;
+        try {
+          made = inPlace
+            ? await provisionInPlace({ git, folder: repo.toplevel, branch: job.branch, jobId, expectedHead: repo.admittedHead })
+            : await createWorktree({ git, origin: repo.origin, worktree: path.join(worktreesRoot, job.slug, repo.id), branch: job.branch, copyLocalClaudeSettings: job.copyLocalClaudeSettings, signal: controller.signal });
+        } catch (err) {
+          if (err?.partial) await removeHalfMade(jobId, repo, err.partial);
+          throw err;
+        }
+        await store.append(jobId, { type: 'worktree-created', repo: repo.id, worktree: made.worktree, branch: made.branch, baseSha: made.baseSha, settingsCopy: made.settingsCopy, ...(inPlace && { inPlace: true }) });
       }
-      await store.append(job.jobId, { type: 'job-provisioned' });
+      if (stopped()) await recordProvisioningStop(jobId);
+      else await store.append(jobId, { type: 'job-provisioned' });
     } catch (err) {
-      log(`provisioning job ${job.jobId} failed, worktrees kept`, err);
-      await store.append(job.jobId, { type: 'job-failed', error: messageOf(err) });
+      if (stopped()) {
+        if (err?.code !== 'ERR_ABORTED') log(`provisioning job ${jobId} failed while stopping, recorded as stopped`, err);
+        await recordProvisioningStop(jobId);
+      } else {
+        log(`provisioning job ${jobId} failed, worktrees kept`, err);
+        await store.append(jobId, { type: 'job-failed', error: messageOf(err) });
+      }
+    } finally {
+      provisioning.delete(jobId);
     }
-    return store.get(job.jobId);
+    return store.get(jobId);
   }
 
   function inPlaceOrigins(inPlace, repos) {
@@ -903,6 +950,7 @@ export function createSuperagent({
   function stopJob(jobId) {
     stopRequested.add(jobId);
     routing.get(jobId)?.controller.abort();
+    provisioning.get(jobId)?.abort();
     return withJob(jobId, async () => {
       try {
         const job = await requireJob(jobId);
