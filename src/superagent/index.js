@@ -32,6 +32,7 @@ import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateMilestoneFixture } from './config.js';
+import { checkInPlace, normaliseTop } from './inplace.js';
 import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
@@ -39,10 +40,11 @@ import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, buildFixTask, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
 import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, substituteArtifacts, workflowsDir } from './workflows.js';
-import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, repoIds, slugify } from './worktree.js';
+import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, repoIds, repoToplevel, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
 const ANSWER_MAX_CHARS = 4000;
+const FINISHED_STATES = new Set(['done', 'stopped', 'failed']);
 
 // Decision 14: MAX_PATH less its terminating NUL. Validation bounds phase ids
 // at 24 characters and task ids at 12; attempt ids are uuids. On win32 the
@@ -121,6 +123,9 @@ export function createSuperagent({
   const stopRequested = new Set();
   const routing = new Map();
   const pendingDecisions = new Map();
+  // Decision 7: normalised top level -> [{ jobId, inPlace }], held from the
+  // start of createJob's folder preflight until the job is finished.
+  const reservations = new Map();
   let maxConcurrentSessions = config.resolve(null).maxConcurrentSessions;
   let stopping = false;
   let timer = null;
@@ -146,6 +151,49 @@ export function createSuperagent({
       if (chains.get(jobId) === run) chains.delete(jobId);
     }).catch(() => {});
     return run;
+  }
+
+  function holder(key, { jobId, inPlace }) {
+    return (reservations.get(key) ?? []).find((r) => r.jobId !== jobId && (inPlace || r.inPlace)) ?? null;
+  }
+
+  function hold(key, { jobId, inPlace }) {
+    const entries = reservations.get(key) ?? [];
+    const own = entries.find((r) => r.jobId === jobId);
+    if (own) own.inPlace ||= inPlace;
+    else reservations.set(key, [...entries, { jobId, inPlace }]);
+  }
+
+  // All or nothing: a conflict on any key takes none of them.
+  function reserve(jobId, wanted) {
+    for (const { key, folder, inPlace } of wanted) {
+      const other = holder(key, { jobId, inPlace });
+      if (other) throw fail('ERR_FOLDER_IN_USE', `superagent: ${folder} is in use by job ${other.jobId}, which is not finished`);
+    }
+    for (const { key, inPlace } of wanted) hold(key, { jobId, inPlace });
+  }
+
+  function release(jobId) {
+    for (const [key, entries] of reservations) {
+      const kept = entries.filter((r) => r.jobId !== jobId);
+      if (kept.length === 0) reservations.delete(key);
+      else if (kept.length !== entries.length) reservations.set(key, kept);
+    }
+  }
+
+  function releaseIfFinished(jobId) {
+    if (FINISHED_STATES.has(store.get(jobId)?.state)) release(jobId);
+  }
+
+  function rebuildReservations() {
+    for (const jobId of known) {
+      const job = store.get(jobId);
+      if (!job || FINISHED_STATES.has(job.state)) continue;
+      for (const repo of job.repos) {
+        hold(normaliseTop(repo.origin, platform), { jobId, inPlace: repo.inPlace });
+        if (repo.toplevel) hold(normaliseTop(repo.toplevel, platform), { jobId, inPlace: repo.inPlace });
+      }
+    }
   }
 
   async function reload(jobId) {
@@ -474,6 +522,7 @@ export function createSuperagent({
       log('could not list jobs', err);
     }
     for (const jobId of jobIds) await withJob(jobId, () => startJob(jobId));
+    rebuildReservations();
     if (stopping) return;
     if (!unintercept) unintercept = registry.addApprovalInterceptor(runner.onApprovalRequest);
     if (timer === null) timer = setIntervalImpl(() => { tick(); }, TICK_MS);
@@ -611,16 +660,21 @@ export function createSuperagent({
   }
 
   // Every folder is checked before job-created, so a bad or repeated folder
-  // never leaves a failed job and a kept worktree behind.
-  async function checkRepos(repos, { slug, branch }) {
+  // never leaves a failed job and a kept worktree behind. Each folder's real
+  // top level is reserved as soon as it is known, before its slower checks.
+  async function checkRepos(jobId, repos, { slug, branch }) {
     const seen = new Map();
+    const checked = [];
     for (const repo of repos) {
-      const { toplevel } = await checkRepo({ git, origin: repo.origin, worktree: path.join(worktreesRoot, slug, repo.id), branch });
-      const resolved = path.resolve(toplevel);
-      const key = platform === 'win32' ? resolved.toLowerCase() : resolved;
+      const key = normaliseTop(await repoToplevel({ git, origin: repo.origin }), platform);
       if (seen.has(key)) throw fail('ERR_DUPLICATE_REPO', `superagent: ${repo.origin} is the same repository as ${seen.get(key)}`);
       seen.set(key, repo.origin);
+      reserve(jobId, [{ key, folder: repo.origin, inPlace: repo.inPlace }]);
+      checked.push(repo.inPlace
+        ? await checkInPlace({ git, folder: repo.origin, branch })
+        : { ...(await checkRepo({ git, origin: repo.origin, worktree: path.join(worktreesRoot, slug, repo.id), branch })), head: null });
     }
+    return checked;
   }
 
   async function provision(job) {
@@ -638,8 +692,21 @@ export function createSuperagent({
     return store.get(job.jobId);
   }
 
-  // `inPlace` is accepted and not used yet.
-  async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null, workflow = null }) {
+  function inPlaceOrigins(inPlace, repos) {
+    if (!Array.isArray(inPlace) || inPlace.some((p) => typeof p !== 'string' || p.length === 0)) {
+      throw fail('ERR_INVALID_REQUEST', 'superagent: inPlace must be an array of folder paths');
+    }
+    const origins = new Set(repos.map((r) => r.origin));
+    const wanted = new Set();
+    for (const p of inPlace) {
+      const folder = path.resolve(p);
+      if (!origins.has(folder)) throw fail('ERR_INVALID_REQUEST', `superagent: inPlace folder is not one of the job's folders: ${folder}`);
+      wanted.add(folder);
+    }
+    return wanted;
+  }
+
+  async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null, workflow = null, inPlace = [] }) {
     const origin = path.resolve(primaryPath);
     const resolved = config.resolve(origin);
     const { pipeline, models, recorded } = await resolvePipeline(resolved, { fixture, workflow }, origin);
@@ -647,8 +714,21 @@ export function createSuperagent({
     const jobId = idImpl();
     const slug = fitSlug(pipeline, { title, jobId });
     const branch = BRANCH_PREFIX + slug;
-    const repos = repoIds(origin, [...resolved.additionalRepos, ...additionalRepos].map((p) => path.resolve(p)));
-    await checkRepos(repos, { slug, branch });
+    const folders = repoIds(origin, [...resolved.additionalRepos, ...additionalRepos].map((p) => path.resolve(p)));
+    const inPlaceSet = inPlaceOrigins(inPlace, folders);
+    const marked = folders.map((repo) => ({ ...repo, inPlace: inPlaceSet.has(repo.origin) }));
+    reserve(jobId, marked.map((repo) => ({ key: normaliseTop(repo.origin, platform), folder: repo.origin, inPlace: repo.inPlace })));
+    try {
+      return await admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved });
+    } finally {
+      if (store.get(jobId)) releaseIfFinished(jobId);
+      else release(jobId);
+    }
+  }
+
+  async function admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved }) {
+    const checked = await checkRepos(jobId, marked, { slug, branch });
+    const repos = marked.map(({ inPlace, ...repo }, i) => (inPlace ? { ...repo, inPlace: true, toplevel: path.resolve(checked[i].toplevel), admittedHead: checked[i].head } : repo));
     const createdDate = localDate(now());
     const created = {
       type: 'job-created',
@@ -703,6 +783,7 @@ export function createSuperagent({
         throw fail('ERR_INVALID_STATE', `superagent: job ${jobId} is ${job.state}${job.reason ? ` (${job.reason})` : ''}, not ready to try`);
       }
       const accepted = await appendConfirmed(jobId, { type: 'job-accepted' }, (j) => j.state === 'done');
+      releaseIfFinished(jobId);
       await archive(accepted);
       return accepted;
     });
@@ -741,6 +822,7 @@ export function createSuperagent({
         }
         await runner.stopAttempt(jobId);
         const stopped = await appendConfirmed(jobId, { type: 'job-stopped' }, (j) => j.state === 'stopped');
+        releaseIfFinished(jobId);
         pendingDecisions.delete(jobId);
         await archive(stopped);
         return stopped;
