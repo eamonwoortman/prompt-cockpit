@@ -5,6 +5,7 @@ import path from 'node:path';
 import { createSuperagentStore, deriveJob } from '../src/superagent/store.js';
 import { tempDir, jobCreated, provisionedEvents, taskCreated, ev } from './superagent-helpers.mjs';
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
+import { artifactPaths } from '../src/superagent/results.js';
 
 const quiet = () => {};
 const stamp = (events) => events.map((e, i) => ({ seq: i + 1, at: 1000 + i, ...e }));
@@ -391,4 +392,63 @@ test('needsYouSeq tracks the needs-you that set the state', () => {
   assert.equal(stamp(again).at(-1).seq, 12);
   assert.equal(deriveJob(stamp(again)).needsYouSeq, 12);
   assert.equal(deriveJob(stamp([...again, { type: 'job-stopped' }])).needsYouSeq, null);
+});
+
+const withoutTestFlag = (pipeline) => pipeline.map(({ test: _flag, ...phase }) => ({ ...phase }));
+
+test('a legacy job derives the old artifacts and test flag', () => {
+  const legacy = (...more) => deriveJob(stamp([jobCreated({ pipeline: withoutTestFlag(MILESTONE_2_PIPELINE) }), { type: 'job-provisioned' }, ...more]));
+  const job = legacy();
+  assert.equal(job.workflow, null);
+  assert.deepEqual(job.prompts, {});
+  assert.deepEqual(job.artifacts, {
+    brief: 'docs/superpowers/jobs/add-hello/brief.md',
+    spec: 'docs/superpowers/specs/2026-11-04-add-hello-design.md',
+    plan: 'docs/superpowers/plans/2026-11-04-add-hello.md',
+    tasks: 'docs/superpowers/jobs/add-hello/tasks.json',
+    testReport: 'docs/superpowers/jobs/add-hello/test-report.md',
+  });
+  assert.deepEqual(artifactPaths(job), job.artifacts);
+  assert.deepEqual(job.pipeline.filter((p) => p.test === true).map((p) => p.phase), ['test']);
+  assert.deepEqual(job.repos.map(({ inPlace, toplevel, admittedHead }) => ({ inPlace, toplevel, admittedHead })), [{ inPlace: false, toplevel: null, admittedHead: null }]);
+
+  const toLegacyTest = [ev.tasksLoaded([taskCreated('t1')]), ...['spec', 'spec-review', 'plan', 'plan-review', 'implement'].map((phase) => ev.phaseCompleted(phase, 1))];
+  assert.equal(legacy(...toLegacyTest).phaseId, 'test');
+  const routed = legacy(...toLegacyTest, ev.testRouted('tt1', taskCreated('fix1', { origin: 'test', fromAttemptId: 'tt1' })));
+  assert.deepEqual([routed.phaseIndex, routed.phaseId, routed.visits.implement], [4, 'implement', 2]);
+});
+
+test('a workflow job keeps its recorded artifacts and phases', () => {
+  const pipeline = [
+    { phase: 'diagnose', kind: 'author', role: 'investigator', inputs: ['idea'], outputs: ['diagnosis', 'tasks'] },
+    { phase: 'fix', kind: 'per-task', role: 'fixer', inputs: ['tasks'] },
+    { phase: 'verify', kind: 'author', role: 'verifier-tester', inputs: ['diagnosis', 'tasks'], outputs: ['testReport'], test: true },
+    { phase: 'test', kind: 'author', role: 'tester', inputs: ['testReport'], outputs: ['testReport'] },
+    { phase: 'accept', kind: 'human', inputs: ['testReport'] },
+  ];
+  const workflow = { id: 'troubleshoot', name: 'Troubleshooting', source: 'built-in', file: '/cockpit/workflows/troubleshoot.json' };
+  const artifacts = { diagnosis: 'd.md', tasks: 't.json', testReport: 'r.md' };
+  const prompts = { investigator: '/cockpit/workflows/investigator.md', fixer: null };
+  const repos = [{ id: 'primary', origin: '/repo', inPlace: true, toplevel: '/repo', admittedHead: 'abc123' }];
+  const created = jobCreated({ pipeline, workflow, artifacts, prompts, repos });
+  const wf = (...more) => deriveJob(stamp([created, { type: 'job-provisioned' }, ...more]));
+  const job = wf();
+  assert.deepEqual(job.workflow, workflow);
+  assert.deepEqual(job.prompts, prompts);
+  assert.deepEqual(artifactPaths(job), artifacts);
+  assert.deepEqual(job.pipeline, pipeline, 'a workflow job is not normalised: the phase named test gains no flag');
+  assert.deepEqual(job.repos.map(({ inPlace, toplevel, admittedHead }) => ({ inPlace, toplevel, admittedHead })), [{ inPlace: true, toplevel: '/repo', admittedHead: 'abc123' }]);
+  job.artifacts.diagnosis = 'changed.md';
+  job.workflow.id = 'changed';
+  assert.deepEqual([created.artifacts.diagnosis, created.workflow.id], ['d.md', 'troubleshoot'], 'the derived job does not alias job-created');
+
+  const toVerify = [ev.phaseCompleted('diagnose', 1), ev.tasksLoaded([taskCreated('t1')]), ev.phaseCompleted('fix', 1)];
+  assert.equal(wf(...toVerify).phaseId, 'verify');
+  const fix = taskCreated('fix1', { origin: 'test', fromAttemptId: 'v1' });
+  const routed = wf(...toVerify, ev.testRouted('v1', fix));
+  assert.deepEqual([routed.phaseIndex, routed.phaseId, routed.visits.fix], [1, 'fix', 2]);
+  assert.deepEqual(routed.tasks.map((t) => t.id), ['t1', 'fix1']);
+  const atTest = wf(...toVerify, ev.phaseCompleted('verify', 1));
+  assert.equal(atTest.phaseId, 'test');
+  assert.equal(wf(...toVerify, ev.phaseCompleted('verify', 1), ev.testRouted('v2', fix)).phaseId, 'test', 'the unflagged phase named test does not route');
 });

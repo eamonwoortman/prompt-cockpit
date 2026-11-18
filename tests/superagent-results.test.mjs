@@ -32,7 +32,7 @@ async function writeResult(dir, value) {
   await fs.rename(tmp, path.join(dir, RESULT_FILE));
 }
 
-async function fixture({ commitSpec = true, specContent = '# Hello design\n', pipeline, extraRepos = [] } = {}) {
+async function fixture({ commitSpec = true, specContent = '# Hello design\n', pipeline, extraRepos = [], created = {} } = {}) {
   const root = await tempDir('sa-res-');
   const origin = path.join(root, 'origin');
   await initRepo(origin);
@@ -47,7 +47,7 @@ async function fixture({ commitSpec = true, specContent = '# Hello design\n', pi
     worktrees[id] = { worktree: wt, ...(await createWorktree({ origin: path.join(root, id), worktree: wt, branch, copyLocalClaudeSettings: false })) };
   }
   const repos = [{ id: 'primary', origin }, ...extraRepos.map((id) => ({ id, origin: path.join(root, id) }))];
-  const events = provisionedEvents({ jobId: JOB_ID, slug, branch, createdDate: '2026-11-03', repos, ...(pipeline ? { pipeline } : {}) })
+  const events = provisionedEvents({ jobId: JOB_ID, slug, branch, createdDate: '2026-11-03', repos, ...(pipeline ? { pipeline } : {}), ...created })
     .map((ev) => (ev.type === 'worktree-created' ? { ...ev, worktree: worktrees[ev.repo].worktree, baseSha: worktrees[ev.repo].baseSha } : ev));
   const job = deriveJob(events);
   const phase = job.pipeline.find((p) => p.phase === 'spec');
@@ -951,4 +951,33 @@ test('spec carries the brief headings when the job brainstorms', async () => {
   const m2 = await fixture({ specContent, pipeline: MILESTONE_2_PIPELINE });
   const plain = await m2.check(m2.goodResult(), { attempt });
   assert.equal(plain.ok, true, JSON.stringify(plain.errors));
+});
+
+test('the headings check follows the brief input', async () => {
+  const pipeline = [
+    { phase: 'brainstorm', kind: 'brainstorm', role: 'brainstormer', inputs: ['idea'], outputs: ['brief'] },
+    { phase: 'diagnose', kind: 'author', role: 'diagnosis-writer', inputs: ['brief'], outputs: ['diagnosis', 'notes'] },
+    { phase: 'summarise', kind: 'author', role: 'summariser', inputs: ['diagnosis'], outputs: ['summary'] },
+    { phase: 'accept', kind: 'human', inputs: ['summary'] },
+  ];
+  const workflow = { id: 'troubleshoot', name: 'Troubleshooting', source: 'built-in', file: '/w/troubleshoot.json' };
+  const artifacts = { brief: 'work/brief.md', diagnosis: 'work/diagnosis.md', notes: 'work/notes.md', summary: 'work/summary.md' };
+  const f = await fixture({ commitSpec: false, pipeline, created: { workflow, artifacts } });
+  const attempt = { purpose: 'author' };
+  const publish = async (phaseId, keys) => {
+    const rels = keys.map((k) => artifacts[k]);
+    const shas = [];
+    for (const rel of rels) shas.push(await f.commit(rel, '# No headings here\n'));
+    const value = f.goodResult({ phaseId, artifacts: rels, evidence: { commits: shas } });
+    return f.check(value, { phase: f.job.pipeline.find((p) => p.phase === phaseId), expect: { phaseId }, attempt });
+  };
+
+  const diagnosed = await publish('diagnose', ['diagnosis', 'notes']);
+  assert.equal(diagnosed.ok, false);
+  assert.deepEqual(diagnosed.errors, [
+    'diagnosis is missing the heading "## Assumptions made for you"',
+    'diagnosis is missing the heading "## Your answers"',
+  ]);
+  const summarised = await publish('summarise', ['summary']);
+  assert.equal(summarised.ok, true, JSON.stringify(summarised.errors));
 });

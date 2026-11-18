@@ -19,6 +19,7 @@ import path from 'node:path';
 import { writeJsonAtomic } from '../json-store.js';
 import { isSafeSessionId } from '../safe-id.js';
 import { defaultConfig, defaultSuperagentRoot } from './config.js';
+import { LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
 
 export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered'];
 
@@ -29,9 +30,18 @@ function routerDefaults() {
   return { allowlist: d.routerModelAllowlist, maxInputTokens: d.routerMaxInputTokens, maxOutputTokens: d.routerMaxOutputTokens };
 }
 
+// Plan 7 Decision 3: a job-created without `workflow` (pre-Plan-7, or a
+// fixture job) reads with today's artifact table and its `test` author phase
+// flagged. The event log itself is never rewritten.
+function legacyPipeline(pipeline) {
+  return pipeline.map((p) => (p.kind === 'author' && p.phase === 'test' ? { ...p, test: true } : p));
+}
+
 export function deriveJob(events) {
   const first = events[0];
   if (first?.type !== 'job-created') throw new Error('superagent: events must start with job-created');
+  const legacy = first.workflow == null;
+  const pipeline = structuredClone(first.pipeline ?? []);
   const job = {
     jobId: first.jobId,
     slug: first.slug,
@@ -41,8 +51,20 @@ export function deriveJob(events) {
     branch: first.branch,
     createdAt: first.at ?? null,
     createdDate: first.createdDate,
-    repos: (first.repos ?? []).map((r) => ({ id: r.id, origin: r.origin, worktree: null, baseSha: null, settingsCopy: null })),
-    pipeline: structuredClone(first.pipeline ?? []),
+    repos: (first.repos ?? []).map((r) => ({
+      id: r.id,
+      origin: r.origin,
+      inPlace: r.inPlace === true,
+      toplevel: r.toplevel ?? null,
+      admittedHead: r.admittedHead ?? null,
+      worktree: null,
+      baseSha: null,
+      settingsCopy: null,
+    })),
+    workflow: legacy ? null : structuredClone(first.workflow),
+    artifacts: legacy ? substituteArtifacts(LEGACY_ARTIFACTS, { slug: first.slug, date: first.createdDate }) : structuredClone(first.artifacts ?? {}),
+    prompts: structuredClone(first.prompts ?? {}),
+    pipeline: legacy ? legacyPipeline(pipeline) : pipeline,
     models: structuredClone(first.models ?? {}),
     limits: structuredClone(first.limits ?? {}),
     router: structuredClone(first.router ?? routerDefaults()),
@@ -168,12 +190,13 @@ export function deriveJob(events) {
         if (job.tasks === null) job.tasks = structuredClone(ev.tasks ?? []);
         break;
       case 'test-routed': {
-        const implementIndex = job.pipeline.findIndex((p) => p.phase === 'implement');
-        if (job.pipeline[job.phaseIndex]?.phase !== 'test' || implementIndex < 0) break;
+        const perTaskIndex = job.pipeline.findIndex((p) => p.kind === 'per-task');
+        if (job.pipeline[job.phaseIndex]?.test !== true || perTaskIndex < 0) break;
         if ((job.tasks ?? []).some((t) => t.fromAttemptId === ev.attemptId)) break;
+        const perTaskId = job.pipeline[perTaskIndex].phase;
         job.tasks = [...(job.tasks ?? []), structuredClone(ev.task)];
-        job.phaseIndex = implementIndex;
-        job.visits.implement = (job.visits.implement ?? 1) + 1;
+        job.phaseIndex = perTaskIndex;
+        job.visits[perTaskId] = (job.visits[perTaskId] ?? 1) + 1;
         break;
       }
       case 'phase-completed': {

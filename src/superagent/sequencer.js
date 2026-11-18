@@ -193,7 +193,7 @@ export function pickTask(job) {
 // routed from it yet. Dedupe is by fromAttemptId, never by task id. A blocked
 // tester (reason 'blocked') ran no real test, so its findings are not routed.
 export function routeTestFailure(job, phase) {
-  if (!job.pipeline.some((p) => p.phase === 'implement')) return null;
+  if (!perTaskPhase(job)) return null;
   const attempts = attemptsFor(job, phase.phase);
   const last = attempts[attempts.length - 1];
   if (last?.outcome !== 'failed' || last.reason !== 'failed') return null;
@@ -335,7 +335,7 @@ function authorAction(job, phase, ctx) {
   const used = attempts.filter((a) => consumes(job, a));
   if (used.length >= attemptCap(limits, null)) return stuck('attempt-cap');
 
-  const isTest = phase.phase === 'test';
+  const isTest = phase.test === true;
   if (isTest) {
     const route = routeTestFailure(job, phase);
     if (route) return { type: 'route-test-failure', ...route };

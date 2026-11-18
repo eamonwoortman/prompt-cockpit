@@ -40,7 +40,7 @@ if (home.toLowerCase() === os.homedir().toLowerCase()) {
 process.env.COCKPIT_HOME = home;
 
 const { defaultConfig, defaultSuperagentRoot, createSuperagentConfig } = await import('../src/superagent/config.js');
-const { createSuperagentStore } = await import('../src/superagent/store.js');
+const { createSuperagentStore, deriveJob } = await import('../src/superagent/store.js');
 const { createSuperagent } = await import('../src/superagent/index.js');
 const { artifactPaths, reviewPaths } = await import('../src/superagent/results.js');
 const { BRANCH_PREFIX, createWorktree, slugify } = await import('../src/superagent/worktree.js');
@@ -102,7 +102,7 @@ async function seedJob({ title, idea, files = () => ({}), events }) {
     copyLocalClaudeSettings: false,
   });
   const made = await createWorktree({ origin: repo, worktree: path.join(worktreesRoot, slug, 'primary'), branch, copyLocalClaudeSettings: false });
-  const job = { slug, createdDate: created.createdDate };
+  const job = deriveJob([created]);
   const writes = files(job);
   if (Object.keys(writes).length) {
     for (const [rel, text] of Object.entries(writes)) {

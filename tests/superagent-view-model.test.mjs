@@ -138,3 +138,31 @@ test('a corrupt job summarises without throwing', () => {
   assert.equal(artifactPath(corrupt, 'spec'), null);
   assert.deepEqual(superagentNotifications([corrupt]), []);
 });
+
+test('workflow artifact keys are listed', () => {
+  const pipeline = [
+    { phase: 'diagnose', kind: 'author', role: 'investigator', inputs: ['idea'], outputs: ['diagnosis', 'tasks'] },
+    { phase: 'fix', kind: 'per-task', role: 'fixer', inputs: ['tasks'] },
+    { phase: 'verify', kind: 'author', role: 'verifier-tester', inputs: ['diagnosis', 'tasks'], outputs: ['testReport'], test: true },
+    { phase: 'accept', kind: 'human', inputs: ['testReport'] },
+  ];
+  const workflow = { id: 'troubleshoot', name: 'Troubleshooting', source: 'built-in', file: '/w/troubleshoot.json' };
+  const artifacts = { diagnosis: 'docs/jobs/x/diagnosis.md', tasks: 'docs/jobs/x/tasks.json', testReport: 'docs/jobs/x/report.md' };
+  const job = deriveJob(stamp([...provisionedEvents({ pipeline, workflow, artifacts }), start('a1', 'diagnose')]));
+  assert.deepEqual(artifactKeys(job), ['diagnosis', 'tasks']);
+  assert.deepEqual(jobDetail(job, notLive).artifacts, [{ key: 'diagnosis', label: 'diagnosis' }, { key: 'tasks', label: 'tasks' }]);
+  assert.equal(artifactPath(job, 'diagnosis'), 'docs/jobs/x/diagnosis.md');
+  assert.equal(artifactPath(job, 'testReport'), 'docs/jobs/x/report.md');
+  for (const unknown of ['spec', 'brief', 'plan', 'constructor', '__proto__', 'toString']) assert.equal(artifactPath(job, unknown), null, unknown);
+});
+
+test('the brief is listed when the job has one', () => {
+  const brainstorming = [
+    { phase: 'brainstorm', kind: 'brainstorm', role: 'brainstormer', inputs: ['idea'], outputs: ['brief'] },
+    { phase: 'spec', kind: 'author', role: 'spec-writer', inputs: ['brief'], outputs: ['spec'] },
+    { phase: 'accept', kind: 'human', inputs: ['spec'] },
+  ];
+  const job = deriveJob(stamp([...provisionedEvents({ pipeline: brainstorming }), phaseDone('brainstorm'), start('a1', 'spec')]));
+  assert.deepEqual(artifactKeys(job), ['brief', 'spec']);
+  assert.equal(artifactPath(job, 'brief'), artifactPaths(job).brief);
+});

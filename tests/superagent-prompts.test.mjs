@@ -8,7 +8,7 @@ import { artifactPaths, reviewPaths, requiredOutputs } from '../src/superagent/r
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import { brainstormLog } from '../src/superagent/sequencer.js';
 import { ANSWER_TAGS, BRAINSTORM_BATCH } from '../src/superagent/results.js';
-import { READ_ONLY_ROLES, READ_ONLY_TOOLS, RECOVERY_NOTE, templatesDir, hasTemplate, buildWorkerPrompt, nudgeText } from '../src/superagent/prompts.js';
+import { READ_ONLY_ROLES, READ_ONLY_TOOLS, RECOVERY_NOTE, UNATTENDED_DENY_MESSAGE, templatesDir, hasTemplate, buildWorkerPrompt, denyMessageFor, nudgeText } from '../src/superagent/prompts.js';
 
 const IDEA = 'Line one of the idea.\n\n  Indented line two with "quotes" and \ backslash.\nLast line';
 
@@ -517,4 +517,10 @@ test('userAnswers stay on the answered task: T1 cards carry them, T2 cards do no
   assert.deepEqual(t1.userAnswers, [{ question: 'T1Q?', answer: 'T1A' }]);
   const t2 = await card('implementer', 'implement', { purpose: 'implement', task: 'T2', taskDef: { ...TASK_DEF, id: 'T2' } });
   assert.equal('userAnswers' in t2, false);
+});
+
+test('the deny message follows the phase kind', () => {
+  assert.match(denyMessageFor('brainstorm'), /questions/);
+  assert.notEqual(denyMessageFor('brainstorm'), UNATTENDED_DENY_MESSAGE);
+  for (const kind of ['author', 'review', 'per-task', 'brainstormer', null, undefined]) assert.equal(denyMessageFor(kind), UNATTENDED_DENY_MESSAGE, String(kind));
 });

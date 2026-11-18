@@ -49,15 +49,11 @@ export function attemptDir(primaryWorktree, { jobId, phase, task, attemptId }) {
   return path.join(primaryWorktree, '.superpowers', 'superagent', ...parts);
 }
 
+// The job's resolved artifact map, which deriveJob() always sets (today's
+// table for a job without a workflow).
 export function artifactPaths(job) {
-  const { slug, createdDate } = job;
-  return {
-    brief: `docs/superpowers/jobs/${slug}/brief.md`,
-    spec: `docs/superpowers/specs/${createdDate}-${slug}-design.md`,
-    plan: `docs/superpowers/plans/${createdDate}-${slug}.md`,
-    tasks: `docs/superpowers/jobs/${slug}/tasks.json`,
-    testReport: `docs/superpowers/jobs/${slug}/test-report.md`,
-  };
+  if (!isPlainObject(job?.artifacts)) throw new Error('superagent: artifactPaths needs a derived job (deriveJob sets job.artifacts)');
+  return job.artifacts;
 }
 
 // The keys of reviewPaths, which are also the view's attempt artifact key kinds.
@@ -631,12 +627,13 @@ export function headingErrors(text, label) {
 
 const asksQuestions = (value, attempt) => attempt?.purpose === 'ask' && Array.isArray(value.questions) && value.questions.length > 0;
 
-// Decision 11. The brief, and the spec of a job that brainstorms, must carry
-// both brief headings. Fix rounds aren't checked.
+// Decision 11. The brief, and in a job that brainstorms the first output of
+// an author phase that takes the brief, must carry both brief headings. Fix
+// rounds aren't checked.
 function headingsTarget(job, phase, attempt) {
   if (attempt?.purpose === 'ask') return 'brief';
   const brainstorms = job.pipeline.some((p) => p.kind === 'brainstorm');
-  if (attempt?.purpose === 'author' && brainstorms && (phase?.outputs ?? []).includes('spec')) return 'spec';
+  if (attempt?.purpose === 'author' && brainstorms && phase?.kind === 'author' && (phase.inputs ?? []).includes('brief')) return phase.outputs?.[0] ?? null;
   return null;
 }
 

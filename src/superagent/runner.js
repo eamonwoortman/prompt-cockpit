@@ -10,7 +10,7 @@
 //   count as progress, so telemetry (rate-limit, status) cannot keep a dead
 //   worker alive.
 // - Permissions (spike S1): every ask from a worker is denied with
-//   denyMessageFor(role), whatever the permission mode, including the
+//   denyMessageFor(phase kind), whatever the permission mode, including the
 //   brainstormer's AskUserQuestion: no question reaches the user except through
 //   needs-you. The session is started with interceptEveryPermission so asks
 //   reach the interceptor at all.
@@ -83,7 +83,8 @@ export function createRunner({
 }) {
   const lives = new Map();
   const bySession = new Map();
-  const ownedRoles = new Map();
+  // Session id -> the phase kind its deny message is chosen by.
+  const ownedPhaseKinds = new Map();
   const tracked = new Set();
   let stopping = false;
 
@@ -360,6 +361,7 @@ export function createRunner({
     const { jobId } = job;
     if (lives.has(jobId)) return { error: 'busy' };
     const task = action.task ?? null;
+    const phaseDef = job.pipeline.find((p) => p.phase === action.phase);
     let attemptId;
     let dir;
     try {
@@ -374,6 +376,8 @@ export function createRunner({
       attemptId,
       role: action.role,
       phase: action.phase,
+      // Only the phase's own worker gets its kind: the stand-in also runs in the brainstorm phase.
+      phaseKind: phaseDef?.role === action.role ? phaseDef.kind : null,
       task,
       dir,
       purpose: action.purpose ?? 'author',
@@ -479,7 +483,7 @@ export function createRunner({
     } catch (err) {
       return endLaunch(live, err);
     }
-    ownedRoles.set(row.id, live.role);
+    ownedPhaseKinds.set(row.id, live.phaseKind);
     live.sessionId = row.id;
     live.promptSeq = live.scannedThrough = row.eventLog.nextSeq - 1;
     live.lastProgressAt = now();
@@ -536,13 +540,13 @@ export function createRunner({
   // asks the SDK actually makes. Ownership outlives the attempt: a row whose
   // close failed, or that shutdown has yet to close, is still denied.
   function onApprovalRequest({ row }) {
-    const role = ownedRoles.get(row?.id);
-    if (role === undefined) return null;
-    return { behavior: 'deny', message: denyMessageFor(role) };
+    const phaseKind = ownedPhaseKinds.get(row?.id);
+    if (phaseKind === undefined) return null;
+    return { behavior: 'deny', message: denyMessageFor(phaseKind) };
   }
 
   function onSessionRemoved({ id, reason }) {
-    ownedRoles.delete(id);
+    ownedPhaseKinds.delete(id);
     const live = bySession.get(id);
     if (!live) return;
     removed(live, reason);
@@ -559,7 +563,7 @@ export function createRunner({
     stopAttempt,
     onApprovalRequest,
     onSessionRemoved,
-    ownsSession: (sessionId) => ownedRoles.has(sessionId),
+    ownsSession: (sessionId) => ownedPhaseKinds.has(sessionId),
     liveCount: () => lives.size,
     isLive: (jobId) => lives.has(jobId),
     setStopping(flag) {

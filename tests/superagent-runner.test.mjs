@@ -436,17 +436,33 @@ test('every ask is denied, including the brainstormer\'s AskUserQuestion', async
     const sessionId = lastAttempt(store, job.jobId).sessionId;
     const worker = factory.impls.get(sessionId);
     const asked = await worker.emitApprovalRequest({ questions: [{ question: 'Which?' }] }, 'AskUserQuestion');
-    assert.deepEqual(asked, { behavior: 'deny', message: denyMessageFor('brainstormer') });
+    assert.deepEqual(asked, { behavior: 'deny', message: denyMessageFor('brainstorm') });
     assert.match(asked.message, /questions/);
     assert.equal(registry.get(sessionId).pendingApprovals.length, 0, 'nothing reaches the human');
     const bash = await worker.emitApprovalRequest({ command: 'curl x' }, 'Bash');
-    assert.deepEqual(bash, { behavior: 'deny', message: denyMessageFor('brainstormer') });
+    assert.deepEqual(bash, { behavior: 'deny', message: denyMessageFor('brainstorm') });
 
     const job2 = await newJob('j2');
     await runner.launch(job2, standInAction());
     const standIn = factory.impls.get(lastAttempt(store, 'j2').sessionId);
     assert.deepEqual(await standIn.emitApprovalRequest({ questions: [{ question: 'Which?' }] }, 'AskUserQuestion'), { behavior: 'deny', message: UNATTENDED_DENY_MESSAGE });
-    for (const role of ['stand-in', 'spec-writer', 'verifier']) assert.equal(denyMessageFor(role), UNATTENDED_DENY_MESSAGE, role);
+  } finally { registry._reset(); }
+});
+
+test('the brainstorm deny message follows the phase kind, whatever the role is called', async () => {
+  registry._reset();
+  try {
+    const pipeline = defaultConfig().pipeline.map((p) => (p.kind === 'brainstorm' ? { ...p, role: 'interviewer' } : p));
+    const { store, job } = await setup({ pipeline });
+    const overrides = path.join(job.repos[0].origin, '.superpowers', 'superagent', 'prompts');
+    await fs.mkdir(overrides, { recursive: true });
+    await fs.writeFile(path.join(overrides, 'interviewer.md'), '# Interviewer\n');
+    const factory = sessionFactory(registry);
+    const runner = createRunner({ registry: factory.registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    registry.addApprovalInterceptor(runner.onApprovalRequest);
+    await runner.launch(job, brainstormerAction({ role: 'interviewer' }));
+    const worker = factory.impls.get(lastAttempt(store, job.jobId).sessionId);
+    assert.deepEqual(await worker.emitApprovalRequest({ questions: [{ question: 'Which?' }] }, 'AskUserQuestion'), { behavior: 'deny', message: denyMessageFor('brainstorm') });
   } finally { registry._reset(); }
 });
 

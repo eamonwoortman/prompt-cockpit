@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
-import { artifactPaths } from '../src/superagent/results.js';
 import {
   CONFIG_PIPELINE_ID,
   LEGACY_ARTIFACTS,
@@ -76,8 +75,13 @@ test('the default pipeline and milestone-2 mark their test phase', () => {
 });
 
 test('LEGACY_ARTIFACTS substituted is today\'s fixed artifact table', () => {
-  const job = { slug: 'add-hello-12345678', createdDate: '2026-11-03' };
-  assert.deepEqual(substituteArtifacts(LEGACY_ARTIFACTS, { slug: job.slug, date: job.createdDate }), artifactPaths(job));
+  assert.deepEqual(substituteArtifacts(LEGACY_ARTIFACTS, { slug: 'add-hello-12345678', date: '2026-11-03' }), {
+    brief: 'docs/superpowers/jobs/add-hello-12345678/brief.md',
+    spec: 'docs/superpowers/specs/2026-11-03-add-hello-12345678-design.md',
+    plan: 'docs/superpowers/plans/2026-11-03-add-hello-12345678.md',
+    tasks: 'docs/superpowers/jobs/add-hello-12345678/tasks.json',
+    testReport: 'docs/superpowers/jobs/add-hello-12345678/test-report.md',
+  });
 });
 
 test('substituteArtifacts replaces every {slug} and {date}', () => {

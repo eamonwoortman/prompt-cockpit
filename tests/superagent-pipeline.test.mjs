@@ -1302,3 +1302,104 @@ test('a dismissed blocker closes after the extra round', { timeout: TEST_TIMEOUT
     await h.sa.stop();
   } finally { registry._reset(); }
 });
+
+// The default pipeline as Plan 6 recorded it: no phase carries `test`.
+const PRE_PLAN_7_PIPELINE = [
+  { phase: 'brainstorm', kind: 'brainstorm', role: 'brainstormer', inputs: ['idea'], outputs: ['brief'] },
+  { phase: 'spec', kind: 'author', role: 'spec-writer', inputs: ['brief'], outputs: ['spec'] },
+  { phase: 'spec-review', kind: 'review', role: 'spec-reviewer', author: 'spec-writer', target: 'spec', maxRounds: 3 },
+  { phase: 'plan', kind: 'author', role: 'planner', inputs: ['spec'], outputs: ['plan', 'tasks'] },
+  { phase: 'plan-review', kind: 'review', role: 'plan-reviewer', author: 'planner', target: 'plan', inputs: ['spec', 'tasks'], maxRounds: 3 },
+  { phase: 'implement', kind: 'per-task', role: 'implementer', taskReview: 'task-reviewer', inputs: ['tasks'] },
+  { phase: 'test', kind: 'author', role: 'tester', inputs: ['spec', 'tasks'], outputs: ['testReport'] },
+  { phase: 'accept', kind: 'human', inputs: ['testReport'] },
+];
+
+test('a pre-Plan-7 job resumes and routes a test failure', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    let tests = 0;
+    const h = await harness({
+      handlers: handlersWith({
+        test: ({ publish }) => (++tests === 1 ? failedTest('1 test fails', [{ id: 'E1', severity: 'major', text: 'GET /hello returns 500' }]) : publish()),
+      }),
+    });
+    const job = await createDefaultJob(h);
+    await h.sa.stop();
+    const [created, ...provisioned] = h.events(job.jobId);
+    assert.deepEqual(provisioned.map((e) => e.type), ['worktree-created', 'job-provisioned']);
+    const { slug, createdDate } = created;
+    const today = {
+      brief: `docs/superpowers/jobs/${slug}/brief.md`,
+      spec: `docs/superpowers/specs/${createdDate}-${slug}-design.md`,
+      plan: `docs/superpowers/plans/${createdDate}-${slug}.md`,
+      tasks: `docs/superpowers/jobs/${slug}/tasks.json`,
+      testReport: `docs/superpowers/jobs/${slug}/test-report.md`,
+    };
+
+    const wt = job.repos.find((r) => r.id === 'primary').worktree;
+    const files = { [today.brief]: headed('Brief'), [today.spec]: headed('Spec'), [today.plan]: '# plan\n', [today.tasks]: JSON.stringify([task('T1')], null, 2) };
+    for (const [rel, text] of Object.entries(files)) {
+      await fs.mkdir(path.dirname(path.join(wt, ...rel.split('/'))), { recursive: true });
+      await fs.writeFile(path.join(wt, ...rel.split('/')), text);
+    }
+    const git = (...args) => execFileSync('git', args, { cwd: wt, encoding: 'utf8', timeout: 60_000 });
+    git('add', '--', ...Object.keys(files));
+    git('commit', '-q', '-m', 'the job so far');
+
+    // Written field by field, as Plan 6 wrote it: no workflow, artifacts,
+    // prompts or test flag, and repos without the in-place fields.
+    const oldCreated = {
+      seq: created.seq, at: created.at, type: 'job-created', jobId: created.jobId, slug, title: created.title, idea: created.idea, mode: created.mode,
+      branch: created.branch, createdDate, repos: created.repos.map(({ id, origin }) => ({ id, origin })), pipeline: PRE_PLAN_7_PIPELINE,
+      models: created.models, limits: created.limits, router: created.router, workerPermissionMode: created.workerPermissionMode, copyLocalClaudeSettings: created.copyLocalClaudeSettings,
+    };
+    const doneAttempt = (phase, role, purpose, started = {}, ended = {}) => {
+      const attemptId = randomUUID();
+      return [
+        { type: 'attempt-started', attemptId, phase, task: null, role, model: 'claude-opus-5-5', n: 1, recovery: false, previousAttemptId: null, dir: null, purpose, round: null, final: false, ...started },
+        { type: 'attempt-ended', attemptId, outcome: 'done', summary: 'written by hand', commits: [], ...ended },
+      ];
+    };
+    const later = [
+      ...doneAttempt('brainstorm', 'brainstormer', 'ask', {}, { questions: [] }),
+      ...doneAttempt('spec', 'spec-writer', 'author'),
+      ev.phaseCompleted('spec-review', 1),
+      ...doneAttempt('plan', 'planner', 'author'),
+      ev.phaseCompleted('plan-review', 1),
+      ev.tasksLoaded([{ ...task('T1'), origin: 'plan', fromAttemptId: null }]),
+      ...doneAttempt('implement', 'implementer', 'implement', { task: 'T1' }),
+      ...doneAttempt('implement', 'task-reviewer', 'task-review', { task: 'T1', round: 1 }, { verdict: 'approve', findings: [] }),
+      ev.phaseCompleted('implement', 1),
+    ];
+    const log = [oldCreated, ...provisioned, ...later.map((e, i) => ({ seq: provisioned.at(-1).seq + 1 + i, at: h.clock.t, ...e }))];
+    await fs.writeFile(path.join(h.store.jobDir(job.jobId), 'events.jsonl'), log.map((e) => JSON.stringify(e)).join('\n') + '\n');
+
+    const fresh = await h.restart();
+    const resumed = await fresh.store.load(job.jobId);
+    assert.deepEqual([resumed.state, resumed.phaseId, resumed.workflow], ['running', 'test', null]);
+    assert.deepEqual(resumed.artifacts, today);
+    await fresh.sa.start();
+
+    const routed = await fresh.drive(job.jobId, lastEvent('test-routed'));
+    assert.deepEqual([routed.phaseIndex, routed.phaseId, routed.visits.implement], [5, 'implement', 2]);
+    const got = await fresh.drive(job.jobId);
+    assert.deepEqual(fresh.worker.errors, []);
+    assert.deepEqual([got.state, got.reason], ['needs-you', 'ready-to-try']);
+
+    const [failed] = fresh.started(job.jobId, 'test');
+    const fixId = `F-${failed.attemptId.slice(0, 8)}`;
+    assert.deepEqual(steps(fresh.started(job.jobId)), [
+      ['test', null, 'test', 'tester'],
+      ['implement', fixId, 'implement', 'implementer'],
+      ['implement', fixId, 'task-review', 'task-reviewer'],
+      ['test', null, 'test', 'tester'],
+    ]);
+    assert.deepEqual(got.tasks.map((t) => [t.id, t.origin]), [['T1', 'plan'], [fixId, 'test']]);
+    assert.equal(got.visits.implement, 2);
+    const testerCards = fresh.worker.cards().filter((c) => c.phaseId === 'test');
+    assert.equal(testerCards.length, 2);
+    for (const c of testerCards) assert.deepEqual([c.inputs, c.outputs], [{ spec: today.spec, tasks: today.tasks }, { testReport: today.testReport }]);
+    assert.match(readFileSync(path.join(wt, ...today.testReport.split('/')), 'utf8'), /^# test test /);
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});

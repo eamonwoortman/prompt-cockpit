@@ -1107,3 +1107,29 @@ test('attemptContext rebuilds ask and answer context', () => {
   assert.deepEqual(context, { ...NONE, purpose: 'ask', final: true, openQuestions: null, askedIds: ['Q1', 'Q2'] });
   assert.deepEqual(pick(context, 'final', 'askedIds'), pick(launched, 'final', 'askedIds'));
 });
+
+test('test routing follows the test flag, not the id', () => {
+  const pipeline = (flag) => [
+    { phase: 'diagnose', kind: 'author', role: 'planner', inputs: ['idea'], outputs: ['diagnosis', 'tasks'] },
+    { phase: 'fix', kind: 'per-task', role: 'implementer', inputs: ['tasks'] },
+    { phase: 'verify', kind: 'author', role: 'tester', inputs: ['diagnosis', 'tasks'], outputs: ['testReport'], ...(flag ? { test: true } : {}) },
+    { phase: 'accept', kind: 'human', inputs: ['testReport'] },
+  ];
+  const workflow = { id: 'troubleshoot', name: 'Troubleshooting', source: 'built-in', file: '/w/troubleshoot.json' };
+  const artifacts = { diagnosis: 'd.md', tasks: 't.json', testReport: 'r.md' };
+  const atVerify = (flag) => deriveJob([
+    ...provisionedEvents({ pipeline: pipeline(flag), workflow, artifacts }),
+    ev.phaseCompleted('diagnose', 1), ev.tasksLoaded([taskCreated('T1')]), ev.phaseCompleted('fix', 1),
+    ...attempt({ id: 'v1', phase: 'verify', purpose: flag ? 'test' : 'author', outcome: 'failed', reason: 'failed', signature: 'sig-v1', findings: TF }),
+  ].map((e, i) => ({ seq: i + 1, at: 1, ...e })));
+
+  const flagged = atVerify(true);
+  assert.equal(flagged.phaseId, 'verify');
+  assert.deepEqual(nextAction(flagged, ctx()), { type: 'route-test-failure', attemptId: 'v1', findings: TF });
+  assert.deepEqual(routeTestFailure(flagged, flagged.pipeline[2]), { attemptId: 'v1', findings: TF });
+
+  const plain = atVerify(false);
+  assert.equal(plain.phaseId, 'verify');
+  assert.notEqual(nextAction(plain, ctx({ now: T0 + 60 * MIN })).type, 'route-test-failure');
+  assert.equal(nextAction(plain, ctx({ now: T0 + 60 * MIN })).purpose, 'author');
+});

@@ -9,7 +9,7 @@ import { createRouter } from '../src/router.js';
 import { registerSuperagentRoutes } from '../src/routes/superagent.js';
 import { registerNotificationRoutes } from '../src/routes/notifications.js';
 
-const job = (over = {}) => ({ jobId: 'job-1', title: 'Login page', state: 'running', phaseId: 'spec', pipeline: [], attempts: [], repos: [], ...over });
+const job = (over = {}) => ({ jobId: 'job-1', title: 'Login page', state: 'running', phaseId: 'spec', pipeline: [], attempts: [], repos: [], artifacts: {}, ...over });
 
 function fakeHost({ supervisor = {}, refusal = null, readable = true, notifications = [], notificationsReady = true } = {}) {
   return {

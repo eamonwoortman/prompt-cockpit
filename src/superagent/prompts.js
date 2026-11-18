@@ -13,8 +13,8 @@ export const READ_ONLY_ROLES = new Set(['stand-in']);
 export const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob'];
 const BRAINSTORMER_DENY_MESSAGE = 'You are running unattended. Put your questions in result.json\'s `questions` list; the stand-in answers them.';
 
-export function denyMessageFor(role) {
-  return role === 'brainstormer' ? BRAINSTORMER_DENY_MESSAGE : UNATTENDED_DENY_MESSAGE;
+export function denyMessageFor(phaseKind) {
+  return phaseKind === 'brainstorm' ? BRAINSTORMER_DENY_MESSAGE : UNATTENDED_DENY_MESSAGE;
 }
 
 const CONTRACT_FILE = 'contract.md';

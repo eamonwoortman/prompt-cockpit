@@ -2,7 +2,6 @@ import { attemptCap, taskStatus } from './sequencer.js';
 import { PHASE_ATTEMPT_KINDS, TASK_ATTEMPT_KINDS, artifactPaths, reviewPaths } from './results.js';
 
 const CORRUPT_TITLE = 'corrupt event log';
-const FIXED_KEYS = ['brief', 'spec', 'plan', 'tasks', 'testReport'];
 const isCorrupt = (job) => job?.reason === 'corrupt-events' && !job.pipeline;
 
 function statusOf(job) {
@@ -57,11 +56,12 @@ function attemptKey(a) {
 
 export function artifactKeys(job) {
   if (isCorrupt(job)) return [];
+  const known = Object.keys(artifactPaths(job));
   const keys = new Set();
   for (const p of job.pipeline ?? []) {
     if (!(job.attempts ?? []).some((a) => a.phase === p.phase)) continue;
-    for (const k of [...(p.outputs ?? []), ...(p.inputs ?? [])]) if (k === 'brief') keys.add(k);
-    for (const k of p.outputs ?? []) if (FIXED_KEYS.includes(k)) keys.add(k);
+    for (const k of [...(p.outputs ?? []), ...(p.inputs ?? [])]) if (k === 'brief' && known.includes(k)) keys.add(k);
+    for (const k of p.outputs ?? []) if (known.includes(k)) keys.add(k);
   }
   for (const a of job.attempts ?? []) {
     const key = attemptKey(a);
@@ -74,7 +74,8 @@ const ROUND = /^[1-9]\d{0,5}$/;
 
 export function artifactPath(job, key) {
   if (isCorrupt(job) || typeof key !== 'string') return null;
-  if (FIXED_KEYS.includes(key)) return artifactPaths(job)[key];
+  const paths = artifactPaths(job);
+  if (Object.hasOwn(paths, key)) return paths[key];
   const [kind, id, round, ...rest] = key.split(':');
   if (rest.length || !id) return null;
   if (round !== undefined && !ROUND.test(round)) return null;
