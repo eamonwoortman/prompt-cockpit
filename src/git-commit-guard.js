@@ -323,6 +323,11 @@ export function validateScopedCommitMessage(message) {
   if (lines.length === 1) return { valid: true };
   if (lines[1] !== '') return { valid: false, reason: 'the body must start after one blank line' };
   const bullets = lines.slice(2);
+  // Git puts a blank line between repeated -m flags, so one -m per bullet
+  // lands here; name the fix instead of the generic bullet-shape error.
+  if (bullets.includes('')) {
+    return { valid: false, reason: 'no blank lines between bullets: put all bullets in one -m ("- a\\n- b"), git adds a blank line between repeated -m flags' };
+  }
   if (bullets.length > 4) return { valid: false, reason: 'the body may contain at most four bullets' };
   for (const bullet of bullets) {
     if (!/^[-]\s+\S.*$/.test(bullet)) return { valid: false, reason: 'body lines must be one-line bullets starting with "- "' };

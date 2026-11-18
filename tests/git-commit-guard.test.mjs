@@ -70,6 +70,16 @@ test('commit command validator inspects -m and rejects opaque messages', async (
   assert.match(opaque.reason, /not visible/);
 });
 
+test('title -m plus one body -m is accepted; one -m per bullet is rejected with the fix spelled out', async () => {
+  const check = async (command) => validateCommitCommand(command, process.cwd());
+  assert.equal((await check('git commit -m "scope: title" -m "- one\n- two"')).valid, true);
+  assert.equal((await check('git commit -m "scope: title" -m "- one"')).valid, true);
+
+  const perBullet = await check('git commit -m "scope: title" -m "- one" -m "- two"');
+  assert.equal(perBullet.valid, false, 'git would insert a blank line between the bullets');
+  assert.match(perBullet.reason, /no blank lines between bullets.*one -m/);
+});
+
 test('commit command validator inspects a -F message file', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'prompt-cockpit-commit-'));
   const file = path.join(dir, 'message.txt');
