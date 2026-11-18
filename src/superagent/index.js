@@ -506,12 +506,19 @@ export function createSuperagent({
     }
   }
 
-  // A restored job launches on the next tick, not this one.
+  // A restored job launches on the next tick, not this one. A folder still in
+  // a bad state, but a different one, refreshes the pause so it names the
+  // current problem.
   async function restoreStep(jobId) {
     if (stopping || stopRequested.has(jobId)) return;
     try {
       const check = await inPlaceGate(store.get(jobId));
-      if (!check.ok || stopping || stopRequested.has(jobId) || !pausedForFolder(store.get(jobId))) return;
+      const job = store.get(jobId);
+      if (stopping || stopRequested.has(jobId) || !pausedForFolder(job)) return;
+      if (!check.ok) {
+        if (check.text !== job.detail?.text || check.folder !== job.detail?.folder) await store.append(jobId, folderChangedEvent(check));
+        return;
+      }
       await store.append(jobId, { type: 'folder-restored' });
     } catch (err) {
       log(`restoring job ${jobId} failed`, err);

@@ -683,6 +683,36 @@ test('a branch switch during a pending budget check still blocks the launch', as
   } finally { registry._reset(); }
 });
 
+test('a paused folder that comes back in a different bad state refreshes the pause text once', async () => {
+  try {
+    const h = await harness();
+    const own = currentBranch(h.repo);
+    const job = await create(h, { inPlace: [h.repo] });
+    gitIn(h.repo, 'switch', '-q', own);
+    await h.sa.tick();
+    const first = h.sa.getJob(job.jobId);
+    assert.equal(first.detail.text, pausedText(own, job.branch));
+
+    gitIn(h.repo, 'switch', '-q', job.branch);
+    await conflictingMerge(h.repo);
+    await h.sa.tick();
+    const second = h.sa.getJob(job.jobId);
+    assert.deepEqual([second.state, second.reason], ['needs-you', 'folder-changed']);
+    assert.deepEqual(second.detail, { why: 'folder-changed', text: 'this folder has a git operation in progress (MERGE_HEAD); finish or abort it to continue', folder: job.repos[0].worktree });
+    assert.notEqual(second.needsYouSeq, first.needsYouSeq);
+
+    const count = h.events(job.jobId).length;
+    await h.sa.tick();
+    assert.equal(h.events(job.jobId).length, count);
+
+    gitIn(h.repo, 'merge', '--abort');
+    await h.sa.tick();
+    assert.equal(lastEvent(h, job.jobId).type, 'folder-restored');
+    assert.equal(h.events(job.jobId).filter((e) => e.type === 'needs-you').length, 2);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('a stop during a pending restoration check appends no folder-restored', async () => {
   try {
     let hold = null;
