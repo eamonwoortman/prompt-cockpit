@@ -2369,7 +2369,41 @@ async function startSession({ cwd, resume, model, provider, name, effort, thinki
     }).catch(() => {});
   }
   connect(id, token);
+  void checkForToolUpdate(provider);
 }
+
+// Async, best-effort "newer version available" popup after a session starts.
+// The server decides whether there's anything to show (newer version exists
+// and this tool hasn't been shown in the last 4 hours), so a quiet {update:
+// null} means do nothing at all.
+const updateAvailableModal = document.getElementById('updateAvailableModal');
+const updateAvailableCommandEl = document.getElementById('updateAvailableCommand');
+async function checkForToolUpdate(provider) {
+  try {
+    const res = await fetch(`/api/update-check?provider=${encodeURIComponent(provider)}`);
+    if (!res.ok) return;
+    const { update } = await res.json();
+    if (!update || updateAvailableModal.open) return;
+    document.getElementById('updateAvailableTitle').textContent = `${update.label} update available`;
+    document.getElementById('updateAvailableSummary').textContent =
+      `Version ${update.latest} is out (you have ${update.current}). To update, run:`;
+    updateAvailableCommandEl.textContent = update.command;
+    document.getElementById('updateAvailableNote').textContent = update.note || '';
+    document.getElementById('updateAvailableCopyBtn').textContent = 'Copy command';
+    updateAvailableModal.showModal();
+  } catch {
+    // best-effort - a failed version check is never worth surfacing
+  }
+}
+document.getElementById('updateAvailableCloseBtn').addEventListener('click', () => updateAvailableModal.close());
+document.getElementById('updateAvailableCopyBtn').addEventListener('click', async (event) => {
+  try {
+    await navigator.clipboard.writeText(updateAvailableCommandEl.textContent);
+    event.currentTarget.textContent = 'Copied';
+  } catch {
+    // clipboard blocked - the command is selectable in the dialog
+  }
+});
 
 // `reconnect: true` means this is the *same* session picking its websocket
 // back up - the DOM, compose state and command list all stay put, and

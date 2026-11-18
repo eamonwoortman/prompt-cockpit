@@ -297,6 +297,21 @@
     </div>
   </dialog>
 
+  <dialog id="updateAvailableModal" class="modal" aria-labelledby="updateAvailableTitle">
+    <div class="modal-box">
+      <header class="modal-header"><strong id="updateAvailableTitle">Update available</strong></header>
+      <div class="modal-body">
+        <p id="updateAvailableSummary"></p>
+        <pre><code id="updateAvailableCommand"></code></pre>
+        <p id="updateAvailableNote"></p>
+      </div>
+      <footer>
+        <button type="button" id="updateAvailableCopyBtn" class="btn" title="Copy the command">Copy command</button>
+        <button type="button" id="updateAvailableCloseBtn" class="btn" title="Close (won't show again for 4 hours)">Close</button>
+      </footer>
+    </div>
+  </dialog>
+
   <dialog id="codexGitGuardSetupModal" class="modal" aria-labelledby="codexGitGuardSetupTitle">
     <div class="modal-box">
       <header class="modal-header"><strong id="codexGitGuardSetupTitle">Set up Git checks for AI sessions</strong></header>

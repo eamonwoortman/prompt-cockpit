@@ -14,6 +14,7 @@ import { computeGlobalStats } from '../global-stats.js';
 import { fetchAccountLimits } from '../account-limits.js';
 import { accountUsageCache } from '../account-usage-cache.js';
 import { resolveClaudeSubscription } from '../claude-subscriptions.js';
+import { updateChecker, UPDATE_CHECK_TOOLS } from '../update-check.js';
 import { readGitGuardSettings, readGitGuardSettingsState, setGitGuardSettings, GIT_GUARD_MODES } from '../git-commit-guard.js';
 
 export function registerSystemRoutes(router) {
@@ -181,6 +182,18 @@ export function registerSystemRoutes(router) {
       // default (enabled) applies same as if the key were simply unset
     }
     return respondJson(res, 200, { enabled: settings.promptSuggestionEnabled !== false });
+  });
+
+  // Launcher update popup. Always 200 {update: null} unless a newer version
+  // exists AND this tool's popup hasn't been handed out in the last 4 hours;
+  // failures (offline, CLI missing) also read as "nothing to show". See
+  // update-check.js.
+  router.get('/api/update-check', async (req, res, url) => {
+    const tool = url.searchParams.get('provider');
+    if (!UPDATE_CHECK_TOOLS.includes(tool)) {
+      return respondJson(res, 400, { error: `provider must be one of ${UPDATE_CHECK_TOOLS.join(', ')}` });
+    }
+    return respondJson(res, 200, { update: await updateChecker.check(tool) });
   });
 
   router.get('/api/account-limits', async (req, res, url) => {

@@ -135,7 +135,7 @@ function resolveCodexSpawn(resolveBin = resolveCodexBin) {
   return unwrapCodexShim(command) || { command, prefixArgs: [] };
 }
 
-async function resolveCodexSpawnAsync(resolveBin = resolveCodexBinAsync) {
+export async function resolveCodexSpawnAsync(resolveBin = resolveCodexBinAsync) {
   const command = await resolveBin();
   return await unwrapCodexShimAsync(command) || { command, prefixArgs: [] };
 }
