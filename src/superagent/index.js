@@ -43,7 +43,7 @@ import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
 import { createRunner } from './runner.js';
-import { RUNNABLE_KINDS, buildFixTask, nextAction } from './sequencer.js';
+import { RUNNABLE_KINDS, attemptsFor, buildFixTask, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
 import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, substituteArtifacts, workflowsDir } from './workflows.js';
 import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, repoIds, repoToplevel, slugify } from './worktree.js';
@@ -356,8 +356,7 @@ export function createSuperagent({
     if (stopping || stopRequested.has(jobId) || controller.signal.aborted) return true;
     const job = store.get(jobId);
     if (job?.state !== 'running' || hasDecision(job, action.forAttemptId)) return true;
-    const scope = job.attempts.filter((a) => a.phase === action.phase && (a.task ?? null) === (action.task ?? null));
-    return scope.at(-1)?.attemptId !== action.forAttemptId;
+    return attemptsFor(job, action.phase, action.task ?? null).at(-1)?.attemptId !== action.forAttemptId;
   }
 
   function decisionEvent(job, action, request, result) {

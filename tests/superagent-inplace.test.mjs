@@ -41,7 +41,7 @@ async function harness({ git, platform = process.platform, worktreesRoot: worktr
   let n = 0;
   const logs = [];
 
-  async function build() {
+  async function build({ router = null, now = () => T0 } = {}) {
     const store = createSuperagentStore({ rootDir: jobsRoot, now: () => T0, logImpl: quiet });
     const config = createSuperagentConfig({ filePath: configFile });
     await config.load();
@@ -51,7 +51,7 @@ async function harness({ git, platform = process.platform, worktreesRoot: worktr
       store,
       config,
       worktreesRoot,
-      now: () => T0,
+      now,
       idImpl: () => `${String(++n).padStart(8, '0')}-0000-4000-8000-000000000000`,
       setIntervalImpl: () => 'timer',
       clearIntervalImpl: () => {},
@@ -60,15 +60,16 @@ async function harness({ git, platform = process.platform, worktreesRoot: worktr
       platform,
       ...(git && { git }),
       ...(budgetCheck && { budgetCheck }),
+      router,
       workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     return {
       root, repo, baseSha, jobsRoot, worktreesRoot, store, sa, events, logs, factory,
       nextSlug: () => `add-hello-${String(n + 1).padStart(8, '0')}`,
-      async restart() {
+      async restart(opts) {
         registry._reset();
-        return build();
+        return build(opts);
       },
     };
   }
@@ -766,6 +767,44 @@ test('the gate holds the task list read of a folder that changed', async () => {
     const paused = fresh.sa.getJob('jt');
     assert.deepEqual([paused.state, paused.reason, paused.detail.text], ['needs-you', 'folder-changed', pausedText(own, branch)]);
     assert.equal(paused.tasks, null);
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a gated attempt after a routed failure does not stall the route', async () => {
+  try {
+    const h = await harness();
+    const toplevel = path.resolve(gitIn(h.repo, 'rev-parse', '--show-toplevel'));
+    const branch = 'superagent/r-jg';
+    gitIn(h.repo, 'switch', '-q', '-c', branch);
+    const repos = [{ id: 'primary', origin: h.repo, inPlace: true, toplevel, admittedHead: h.baseSha }];
+    await h.store.append('jg', jobCreated({ jobId: 'jg', slug: 'r-jg', branch, repos }));
+    await h.store.append('jg', { type: 'worktree-created', repo: 'primary', worktree: toplevel, branch, baseSha: h.baseSha, settingsCopy: 'in-place', inPlace: true });
+    await h.store.append('jg', { type: 'job-provisioned' });
+    const started = (attemptId, n) => ({ type: 'attempt-started', attemptId, phase: 'spec', task: null, role: 'spec-writer', model: 'claude-opus-5-5', n });
+    await h.store.append('jg', started('x1', 1));
+    await h.store.append('jg', { type: 'attempt-ended', attemptId: 'x1', outcome: 'failed', reason: 'no-result', signature: 'no-result|' });
+    await h.store.append('jg', started('g1', 2));
+    await h.store.append('jg', { type: 'attempt-ended', attemptId: 'g1', outcome: 'failed', reason: 'folder-changed', signature: 'folder-changed|moved' });
+
+    const requests = [];
+    const router = {
+      decide(req) {
+        requests.push(req);
+        return Promise.resolve({ ok: true, action: 'escalate', note: 'enough', usage: null, latencyMs: 1 });
+      },
+    };
+    const fresh = await h.restart({ router, now: () => T0 + 10 * 60_000 });
+    await fresh.sa.start();
+    await fresh.sa.tick();
+    await fresh.sa.drain();
+    assert.equal(requests.length, 1);
+    const decided = fresh.events('jg').filter((e) => e.type === 'router-decided');
+    assert.deepEqual(decided.map((d) => [d.forAttemptId, d.action]), [['x1', 'escalate']]);
+    await fresh.sa.tick();
+    const job = fresh.sa.getJob('jg');
+    assert.deepEqual([job.state, job.reason, job.detail.why], ['needs-you', 'stuck', 'router-escalated']);
+    assert.equal(fresh.factory.calls.length, 0);
     await fresh.sa.stop();
   } finally { registry._reset(); }
 });
