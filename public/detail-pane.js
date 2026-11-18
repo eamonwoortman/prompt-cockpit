@@ -170,6 +170,12 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     if (activeTab === 'changes' || (currentRecord && currentRecord.id === id)) render();
   }
 
+  // Streamed output for a running command: refresh only when the Result tab
+  // is showing that exact record, so a pinned different row is left alone.
+  function onToolOutput(container, id) {
+    if (activeTab === 'result' && currentRecord && currentRecord.id === id) render();
+  }
+
   function followLive() {
     pinnedId = null;
     textView = null;
@@ -328,7 +334,16 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   }
 
   function renderResultTab(record) {
-    if (record.resultText == null) { line('(pending - waiting for the tool result)', 'detail-pane-note'); return; }
+    if (record.resultText == null) {
+      if (!record.liveOutput) { line('(pending - waiting for the tool result)', 'detail-pane-note'); return; }
+      line('(running - live output, replaced by the final result)', 'detail-pane-note');
+      const live = document.createElement('div');
+      live.className = 'body';
+      renderBody(live, record.liveOutput);
+      body.append(live);
+      body.scrollTop = body.scrollHeight;
+      return;
+    }
     const wrap = document.createElement('div');
     wrap.className = 'body';
     renderBody(wrap, resultBody(record));
@@ -824,6 +839,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     showText,
     onToolCallStarted,
     onToolResultArrived,
+    onToolOutput,
     followLive,
     setEnabled,
     reset,

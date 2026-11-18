@@ -45,6 +45,15 @@ after changing Codex wiring: `node tests/codex-live.manual.mjs`. It uses the
 signed-in Codex account, so its approval and rewind probes are opt-in via
 `CODEX_LIVE_APPROVAL=1` and `CODEX_LIVE_REWIND=1`.
 
+Codex live command output and retry notices: `codex-messages.test.mjs` covers
+the `item/commandExecution/outputDelta` translation and the retryable `error`
+notice (a terminal error stays silent). `codex-session.test.mjs` covers the
+100 ms coalescing and the flush-before-result ordering. `tool-call-store.test.mjs`
+covers the pending-only accumulator and its 64 KB tail cap. Hand-verified only:
+that a real Codex turn emits `item/commandExecution/outputDelta` while a command
+runs (the name comes from the generated app-server schema, not a live capture),
+and the detail pane's Result tab updating in a browser (no jsdom here).
+
 ## MVP4 - live stats panel
 
 `usage.test.mjs` covers `src/usage.js` directly: `costForUsage` against the

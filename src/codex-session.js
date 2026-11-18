@@ -13,6 +13,8 @@ function unsupported(name) {
   return async () => { throw new Error(`${name} is not supported on Codex sessions yet`); };
 }
 
+const OUTPUT_FLUSH_MS = 100;
+
 function eventBelongsToHandle(params, threadId, ownedTurnIds, recentTurnIds, method) {
   if (!params?.threadId || params.threadId !== threadId) return false;
   const eventTurnId = params?.turnId || params?.turn?.id;
@@ -128,6 +130,35 @@ export function startCodexSession({
 
   function emitQueue() {
     onQueueChange?.(queueSnapshot());
+  }
+
+  // Command output arrives as many tiny deltas. Emitting each one would flood
+  // the byte-capped replay log and evict real history, so they are merged per
+  // command and flushed on a short timer, and always before the command's
+  // final result so ordering holds.
+  const outputBuffers = new Map(); // itemId -> text
+  let outputTimer = null;
+
+  function flushOutput() {
+    if (outputTimer) { clearTimeout(outputTimer); outputTimer = null; }
+    if (closed) { outputBuffers.clear(); return; }
+    const buffered = [...outputBuffers];
+    outputBuffers.clear();
+    for (const [itemId, delta] of buffered) {
+      for (const message of codexNotificationToMessages('item/commandExecution/outputDelta', { itemId, delta }, threadId)) {
+        resultEpoch.stamp(message);
+        onMessage(message);
+      }
+    }
+  }
+
+  function bufferOutput(params) {
+    if (!params?.itemId || !params.delta) return;
+    outputBuffers.set(params.itemId, (outputBuffers.get(params.itemId) || '') + params.delta);
+    if (!outputTimer) {
+      outputTimer = setTimeout(flushOutput, OUTPUT_FLUSH_MS);
+      outputTimer.unref?.();
+    }
   }
 
   function settleTurn(turnId, params) {
@@ -247,6 +278,8 @@ export function startCodexSession({
       }
     }
     if (!eventBelongsToHandle(params, threadId, ownedTurnIds, recentTurnIds, method)) return;
+    if (method === 'item/commandExecution/outputDelta') { bufferOutput(params); return; }
+    if (method === 'item/completed' || method === 'turn/completed') flushOutput();
     // thread/start and thread/resume expose the resolved model at the
     // response's top level, while a later safety reroute is a notification.
     // Keep the model current because token-usage notifications do not carry

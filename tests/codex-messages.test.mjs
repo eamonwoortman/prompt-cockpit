@@ -261,6 +261,20 @@ test('a retryable mid-turn Codex error surfaces as a system notice', () => {
   assert.equal(messages[0].codex_error_info, 'httpConnectionFailed');
 });
 
+test('command output deltas become tool_output system messages keyed by the tool call id', () => {
+  const [message] = codexNotificationToMessages('item/commandExecution/outputDelta', {
+    threadId: 'th', turnId: 't', itemId: 'cmd-1', delta: 'line one\n',
+  }, 'th');
+  assert.equal(message.type, 'system');
+  assert.equal(message.subtype, 'tool_output');
+  assert.equal(message.session_id, 'th');
+  assert.equal(message.tool_use_id, 'cmd-1');
+  assert.equal(message.delta, 'line one\n');
+  assert.deepEqual(codexNotificationToMessages('item/commandExecution/outputDelta', {
+    threadId: 'th', turnId: 't', itemId: 'cmd-1', delta: '',
+  }, 'th'), []);
+});
+
 test('a terminal Codex error adds no notice because turn/completed reports it', () => {
   assert.deepEqual(codexNotificationToMessages('error', {
     threadId: 'th', turnId: 't', willRetry: false, error: { message: 'boom' },

@@ -627,6 +627,51 @@ test('Codex still applies item/completed after the turn is done', async () => {
   handle.close();
 });
 
+test('Codex coalesces command output deltas and flushes them before the tool result', async () => {
+  const manager = createManager();
+  manager.completeTurns = false;
+  const { handle, messages } = startOptions(manager);
+  handle.pushInput('run it');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'turn start');
+  manager.emit('item/started', {
+    threadId: 'thread-new', turnId: 'turn-1',
+    item: { id: 'cmd-1', type: 'commandExecution', command: 'build', status: 'inProgress' },
+  });
+  for (const delta of ['a', 'b', 'c']) {
+    manager.emit('item/commandExecution/outputDelta', {
+      threadId: 'thread-new', turnId: 'turn-1', itemId: 'cmd-1', delta,
+    });
+  }
+  assert.equal(messages.filter((m) => m.subtype === 'tool_output').length, 0, 'deltas are buffered, not emitted one by one');
+
+  manager.emit('item/completed', {
+    threadId: 'thread-new', turnId: 'turn-1',
+    item: { id: 'cmd-1', type: 'commandExecution', command: 'build', status: 'completed', aggregatedOutput: 'abc' },
+  });
+  const outputs = messages.filter((m) => m.subtype === 'tool_output');
+  assert.equal(outputs.length, 1);
+  assert.equal(outputs[0].tool_use_id, 'cmd-1');
+  assert.equal(outputs[0].delta, 'abc');
+  const outputAt = messages.indexOf(outputs[0]);
+  const resultAt = messages.findIndex((m) => m.message?.content?.[0]?.type === 'tool_result');
+  assert.ok(outputAt >= 0 && outputAt < resultAt, 'the flush lands before the final result');
+  handle.close();
+});
+
+test('Codex flushes buffered command output on a short timer while the command runs', async () => {
+  const manager = createManager();
+  manager.completeTurns = false;
+  const { handle, messages } = startOptions(manager);
+  handle.pushInput('long run');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'turn start');
+  manager.emit('item/commandExecution/outputDelta', {
+    threadId: 'thread-new', turnId: 'turn-1', itemId: 'cmd-2', delta: 'tick',
+  });
+  await waitFor(() => messages.some((m) => m.subtype === 'tool_output'), 'timer flush');
+  assert.equal(messages.find((m) => m.subtype === 'tool_output').delta, 'tick');
+  handle.close();
+});
+
 test('Codex resume accepts token usage replay before any local turn', async () => {
   const manager = createManager();
   const { handle, messages } = startOptions(manager, { resume: 'thread-existing' });

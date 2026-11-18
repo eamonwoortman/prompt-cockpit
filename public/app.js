@@ -2548,6 +2548,7 @@ function connect(id, token, { reconnect = false } = {}) {
           detailPane.onToolResultArrived(container, id);
           runningAgentToolIds.delete(id);
         },
+        onToolOutput: (container, id) => detailPane.onToolOutput(container, id),
         onShowDelegatedTrace: selectDelegatedTrace,
       });
       // One bar per priced assistant turn (turn-chart.js) - same

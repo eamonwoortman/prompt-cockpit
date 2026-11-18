@@ -4,7 +4,7 @@
 // one "group" summary row ("3 tool calls: Bash -> Read -> Edit") that stays
 // open until real text/thinking or turn end (see closeGroup call sites).
 
-import { resetToolCallStore, createToolCallRecord, completeToolCallRecord, mergeToolCallStore, recordOrphanResult, popOrphanResult } from '/tool-call-store.js';
+import { resetToolCallStore, createToolCallRecord, completeToolCallRecord, appendToolOutput, mergeToolCallStore, recordOrphanResult, popOrphanResult } from '/tool-call-store.js';
 import { renderMarkdown } from '/markdown.js';
 import { joinStreamText, createFenceTracker } from '/stream-join.js';
 import { createDelegateView } from '/delegate-view.js';
@@ -212,7 +212,7 @@ export function renderMessage(container, message, { onRewindClick, hasFileCheckp
 
   switch (message.type) {
     case 'system':
-      return renderSystem(container, message, timestampMs);
+      return renderSystem(container, message, timestampMs, toolOpts);
     case 'assistant':
       return renderAssistant(container, message, turnPointIndex, assistantLabel, timestampMs, toolOpts);
     case 'user':
@@ -230,8 +230,17 @@ export function renderMessage(container, message, { onRewindClick, hasFileCheckp
   }
 }
 
-function renderSystem(container, message, timestampMs = null) {
+function renderSystem(container, message, timestampMs = null, toolOpts = {}) {
   if (SILENT_SYSTEM_SUBTYPES.has(message.subtype)) return;
+
+  if (message.subtype === 'tool_output') {
+    // Streamed output for a running command: lands on its record for the
+    // detail pane's Result tab, no transcript block (and no group close).
+    if (appendToolOutput(container, message.tool_use_id, message.delta)) {
+      toolOpts.onToolOutput?.(container, message.tool_use_id);
+    }
+    return;
+  }
 
   if (message.subtype === 'init') {
     if (seenInitByContainer.get(container)) return; // priming sentinel causes a harmless second init

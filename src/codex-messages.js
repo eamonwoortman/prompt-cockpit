@@ -303,6 +303,16 @@ export function codexNotificationToMessages(method, params, sessionId, {
     const text = params.delta || params.text || '';
     return text ? [assistantMessage(sessionId, [{ type: 'thinking', thinking: text }], model)] : [];
   }
+  if (method === 'item/commandExecution/outputDelta') {
+    // Live stdout/stderr for a still-running command. Not a transcript block:
+    // the browser appends it to the pending tool call's record until the
+    // final tool_result replaces it.
+    if (!params.itemId || !params.delta) return [];
+    return [{
+      type: 'system', subtype: 'tool_output', session_id: sessionId,
+      tool_use_id: params.itemId, delta: params.delta,
+    }];
+  }
   if (method === 'item/started') {
     const item = params.item;
     if (!item || item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'reasoning') return [];

@@ -43,6 +43,7 @@ export function createToolCallRecord(container, { id, name, kind, input, payload
   const record = {
     id, name, kind, input, payload,
     resultText: null,
+    liveOutput: '', // streamed stdout while pending; superseded by resultText
     usage,
     startedAtMs: startedAtMs ?? null,
     resultAtMs: null,
@@ -64,6 +65,20 @@ export function completeToolCallRecord(container, id, { resultText, isError, res
   record.resultText = resultText;
   record.resultAtMs = resultAtMs ?? null;
   record.status = isError ? 'error' : 'done';
+  return record;
+}
+
+// A chatty command can stream megabytes; the pane only needs the recent end,
+// and the final tool_result carries the authoritative full output anyway.
+export const MAX_LIVE_OUTPUT_CHARS = 64 * 1024;
+
+// Appends streamed output to a still-pending record and returns it, or null
+// when there is nothing to update (unknown id, or the result already landed).
+export function appendToolOutput(container, id, delta) {
+  const record = recordsByContainer.get(container)?.get(id);
+  if (!record || record.status !== 'pending') return null;
+  const next = record.liveOutput + delta;
+  record.liveOutput = next.length > MAX_LIVE_OUTPUT_CHARS ? next.slice(-MAX_LIVE_OUTPUT_CHARS) : next;
   return record;
 }
 
