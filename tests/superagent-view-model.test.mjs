@@ -208,3 +208,22 @@ test('summary and detail carry the workflow, repo in-place flags and readyInputs
   assert.equal(jobDetail(legacy, notLive).workflow, null);
   assert.deepEqual(jobDetail(legacy, notLive).readyInputs, MILESTONE_2_PIPELINE.at(-1).inputs);
 });
+
+test('an attempt the in-place gate ended is marked paused before launch', () => {
+  const gated = (attemptId) => ({ type: 'attempt-ended', attemptId, outcome: 'failed', reason: 'folder-changed' });
+  const job = m2([
+    start('a1', 'spec'), gated('a1'),
+    needsYou('folder-changed', { why: 'folder-changed', text: 'moved', folder: '/repo' }), { type: 'folder-restored' },
+    start('a2', 'spec'), { type: 'attempt-ended', attemptId: 'a2', outcome: 'failed', reason: 'no-result' },
+    start('a3', 'spec', { n: 2 }),
+  ]);
+  const flags = jobDetail(job, notLive).attempts.map((a) => [a.attemptId, a.n, a.pausedBeforeLaunch]);
+  assert.deepEqual(flags, [['a1', 1, true], ['a2', 1, false], ['a3', 2, false]]);
+});
+
+test('a phase whose only attempt the in-place gate ended lists no artifacts', () => {
+  const gatedSpec = m2([start('a1', 'spec'), { type: 'attempt-ended', attemptId: 'a1', outcome: 'failed', reason: 'folder-changed' }]);
+  assert.deepEqual(artifactKeys(gatedSpec), []);
+  const ranSpec = m2([start('a1', 'spec'), { type: 'attempt-ended', attemptId: 'a1', outcome: 'failed', reason: 'no-result' }]);
+  assert.deepEqual(artifactKeys(ranSpec), ['spec']);
+});

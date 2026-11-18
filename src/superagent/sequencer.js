@@ -39,7 +39,7 @@ export const DEFAULT_REVIEW_ROUNDS = 3;
 // An attempt the in-place safety gate ended never had a session: it is left
 // out of its scope, so it counts toward no cap, repeated-error, back-off,
 // recovery or attempt number.
-const gatedOut = (a) => a.outcome === 'failed' && a.reason === 'folder-changed';
+export const gatedOut = (a) => a.outcome === 'failed' && a.reason === 'folder-changed';
 
 export function attemptsFor(job, phase, task = null) {
   return job.attempts.filter((a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a));

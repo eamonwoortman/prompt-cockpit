@@ -22,6 +22,18 @@ const STATUS_LABEL = {
   running: 'running', 'needs-you': 'needs you', done: 'done', stopped: 'stopped', failed: 'failed', provisioning: 'provisioning',
 };
 const CHIP_MARK = { done: ' ✓', running: ' ●', waiting: ' !', todo: '' };
+const IN_PLACE_LABEL = 'Use this folder directly (no new worktree)';
+const IN_PLACE_NOTE = "The job switches this folder to its own branch and works there. Don't work in this folder while the job runs.";
+const IN_PLACE_FINISHED = "This folder is still on the job's branch.";
+const READY_LABEL = { testReport: 'Test report' };
+
+const statusLabel = (job) => (job.reason === 'folder-changed' && job.status === 'needs-you' ? 'paused' : (STATUS_LABEL[job.status] ?? job.status));
+
+function firstError(workflow) {
+  const e = workflow.errors?.[0];
+  if (!e) return 'invalid';
+  return e.path ? `${e.path}: ${e.message}` : e.message;
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -134,7 +146,10 @@ export function initSuperagentView() {
   left.append(el('h2', 'sa-heading', 'Jobs'));
   const newJobBtn = left.appendChild(button('+ New job', 'btn-primary', () => {
     form.hidden = !form.hidden;
-    if (!form.hidden) ideaInput.focus();
+    if (!form.hidden) {
+      ideaInput.focus();
+      loadWorkflows();
+    }
   }));
   newJobBtn.title = 'Create a new superagent job';
 
@@ -163,24 +178,146 @@ export function initSuperagentView() {
     row.append(el('span', 'sa-field-label', label), ...controls);
     return row;
   };
+  // The checkbox's note shows only while it is checked; sync() re-reads it
+  // after form.reset() unchecks it without a change event.
+  function inPlaceToggle(checked, onToggle = () => {}) {
+    const box = el('div', 'sa-in-place');
+    const label = box.appendChild(el('label', 'sa-check'));
+    const input = el('input');
+    input.type = 'checkbox';
+    input.checked = checked;
+    label.append(input, el('span', null, IN_PLACE_LABEL));
+    const note = box.appendChild(el('div', 'sa-note', IN_PLACE_NOTE));
+    const sync = () => { note.hidden = !input.checked; };
+    input.addEventListener('change', () => {
+      sync();
+      onToggle(input.checked);
+    });
+    sync();
+    return { box, input, sync };
+  }
+
   const primaryRow = el('div', 'sa-folder-row');
-  primaryRow.append(primaryInput, button('Browse', '', () => dirBrowser.open(primaryInput.value.trim(), (p) => { primaryInput.value = p; })));
+  primaryRow.append(primaryInput, button('Browse', '', () => dirBrowser.open(primaryInput.value.trim(), (p) => {
+    primaryInput.value = p;
+    loadWorkflows();
+  })));
+  const primaryInPlace = inPlaceToggle(false);
+  primaryInput.addEventListener('change', () => loadWorkflows());
 
   function renderExtraFolders() {
     extraList.textContent = '';
     extraFolders.forEach((folder, i) => {
-      const li = el('li', 'sa-folder-row');
-      li.append(el('span', 'sa-path', folder), button('Remove', '', () => {
+      const li = el('li', 'sa-folder-item');
+      const row = li.appendChild(el('div', 'sa-folder-row'));
+      row.append(el('span', 'sa-path', folder.path), button('Remove', '', () => {
         extraFolders.splice(i, 1);
         renderExtraFolders();
       }));
+      li.append(inPlaceToggle(folder.inPlace, (on) => { folder.inPlace = on; }).box);
       extraList.append(li);
     });
   }
   const addFolderBtn = button('+ Add folder', '', () => dirBrowser.open(primaryInput.value.trim(), (p) => {
-    extraFolders.push(p);
+    extraFolders.push({ path: p, inPlace: false });
     renderExtraFolders();
   }));
+
+  // Workflow select: listed for the primary folder (project workflows live
+  // in it), so it is refetched whenever that folder changes. `workflowFor` is
+  // the folder the shown list belongs to; a stale response is dropped.
+  const workflowSelect = el('select');
+  const workflowHint = el('div', 'sa-note');
+  const workflowNotes = el('div');
+  let workflowFor = null;
+  let workflowTicket = 0;
+
+  function placeholderOption(text) {
+    const option = el('option', null, text);
+    option.value = '';
+    return option;
+  }
+
+  function showWorkflowPlaceholder(text) {
+    workflowSelect.textContent = '';
+    workflowSelect.append(placeholderOption(text));
+    workflowSelect.disabled = true;
+    workflowSelect.required = false;
+    workflowHint.textContent = '';
+    workflowNotes.textContent = '';
+  }
+
+  function describeWorkflow(entries) {
+    const chosen = entries.find((w) => w.id === workflowSelect.value);
+    workflowHint.textContent = chosen?.description ?? '';
+  }
+
+  function renderWorkflows(listing, previous) {
+    const entries = listing.workflows ?? [];
+    const usable = (id) => entries.some((w) => w.id === id && w.valid);
+    workflowSelect.textContent = '';
+    workflowNotes.textContent = '';
+    for (const w of entries) {
+      const option = el('option', null, `${w.name} (${w.source})${w.valid ? '' : ' - invalid'}`);
+      option.value = w.id ?? '';
+      option.disabled = !w.valid || w.id == null;
+      option.title = w.valid ? w.description : firstError(w);
+      workflowSelect.append(option);
+    }
+    const pick = usable(previous) ? previous : (usable(listing.default) ? listing.default : '');
+    if (!pick) workflowSelect.prepend(placeholderOption('Choose a workflow'));
+    workflowSelect.value = pick;
+    workflowSelect.disabled = false;
+    workflowSelect.required = true;
+
+    if (listing.defaultNote) workflowNotes.append(el('div', 'sa-note', `Default workflow: ${listing.defaultNote}`));
+    if (!usable(listing.default)) {
+      const entry = entries.find((w) => w.id === listing.default);
+      workflowNotes.append(el('div', 'sa-error', entry
+        ? `The default workflow "${entry.name}" is invalid: ${firstError(entry)}`
+        : `The default workflow "${listing.default}" is not available`));
+    }
+    const invalid = entries.filter((w) => !w.valid);
+    if (invalid.length) {
+      const list = workflowNotes.appendChild(el('ul', 'sa-list sa-note'));
+      for (const w of invalid) list.append(el('li', null, `Invalid: ${w.name} (${w.source}) - ${firstError(w)}`));
+    }
+    describeWorkflow(entries);
+    workflowSelect.onchange = () => describeWorkflow(entries);
+  }
+
+  async function loadWorkflows() {
+    const primary = primaryInput.value.trim();
+    if (primary === workflowFor) return;
+    workflowFor = primary;
+    const ticket = ++workflowTicket;
+    const previous = workflowSelect.value;
+    if (!primary) {
+      showWorkflowPlaceholder('Choose a primary folder first');
+      return;
+    }
+    showWorkflowPlaceholder('Loading…');
+    try {
+      const listing = await getJson(`/api/superagent/workflows?primary=${encodeURIComponent(primary)}`);
+      if (ticket === workflowTicket) renderWorkflows(listing, previous);
+    } catch (err) {
+      if (ticket !== workflowTicket) return;
+      workflowFor = null;
+      showWorkflowPlaceholder('No workflows listed');
+      workflowNotes.append(el('div', 'sa-error', errorText(err)));
+    }
+  }
+  showWorkflowPlaceholder('Choose a primary folder first');
+
+  function resetForm() {
+    form.reset();
+    primaryInPlace.sync();
+    extraFolders.length = 0;
+    renderExtraFolders();
+    workflowFor = null;
+    workflowTicket++;
+    showWorkflowPlaceholder('Choose a primary folder first');
+  }
 
   const actions = el('div', 'sa-actions');
   actions.append(createBtn, button('Cancel', '', () => { form.hidden = true; }));
@@ -188,6 +325,10 @@ export function initSuperagentView() {
     field('Idea', ideaInput),
     field('Title', titleInput),
     field('Primary folder', primaryRow),
+    primaryInPlace.box,
+    field('Workflow', workflowSelect),
+    workflowHint,
+    workflowNotes,
     el('div', 'sa-field-label', 'Additional folders'),
     extraList,
     addFolderBtn,
@@ -200,16 +341,20 @@ export function initSuperagentView() {
     event.preventDefault();
     formError.hidden = true;
     createBtn.disabled = true;
+    const primaryRepo = primaryInput.value.trim();
+    const payload = {
+      idea: ideaInput.value,
+      title: titleInput.value,
+      primaryRepo,
+      additionalRepos: extraFolders.map((f) => f.path),
+      inPlace: [...(primaryInPlace.input.checked ? [primaryRepo] : []), ...extraFolders.filter((f) => f.inPlace).map((f) => f.path)],
+    };
+    // A list shown for another folder, or none at all, leaves the choice to
+    // the server's default.
+    if (workflowFor === primaryRepo && !workflowSelect.disabled && workflowSelect.value) payload.workflow = workflowSelect.value;
     try {
-      const job = await postJson('/api/superagent/jobs', {
-        idea: ideaInput.value,
-        title: titleInput.value,
-        primaryRepo: primaryInput.value.trim(),
-        additionalRepos: [...extraFolders],
-      });
-      form.reset();
-      extraFolders.length = 0;
-      renderExtraFolders();
+      const job = await postJson('/api/superagent/jobs', payload);
+      resetForm();
       form.hidden = true;
       select(job.jobId);
     } catch (err) {
@@ -235,7 +380,8 @@ export function initSuperagentView() {
       row.append(el('span', 'sa-job-title', job.title));
       const meta = el('span', 'sa-job-meta');
       if (job.phaseId) meta.append(el('span', 'sa-job-phase', job.phaseId));
-      meta.append(el('span', 'sa-status', STATUS_LABEL[job.status] ?? job.status));
+      if (job.workflow) meta.append(el('span', 'sa-job-workflow', job.workflow.name));
+      meta.append(el('span', 'sa-status', statusLabel(job)));
       row.append(meta);
       row.addEventListener('click', () => select(job.jobId));
       jobList.append(row);
@@ -282,6 +428,12 @@ export function initSuperagentView() {
     return box;
   }
 
+  function branchLine(repo) {
+    const li = el('li', null, `${repo.id}: ${detail.branch ?? '—'}`);
+    if (repo.inPlace) li.append(' ', el('span', 'sa-marker', 'in place'));
+    return li;
+  }
+
   function openWorker(sessionId) {
     window.open(`/?attach=${encodeURIComponent(sessionId)}`, '_blank');
   }
@@ -289,7 +441,11 @@ export function initSuperagentView() {
   function attemptRow(a) {
     const row = el('li', 'sa-attempt');
     const scope = [a.phase, a.task].filter(Boolean).join(' / ');
-    const parts = [a.role, a.model, a.outcome ?? 'running', `${a.n}/${a.cap ?? '?'}`];
+    // A gated attempt never launched and takes no attempt number, so the
+    // launch after it reuses its n; it must not read as a second attempt n.
+    const parts = a.pausedBeforeLaunch
+      ? [a.role, a.model, 'paused before launch (folder changed)', 'not counted']
+      : [a.role, a.model, a.outcome ?? 'running', `${a.n}/${a.cap ?? '?'}`];
     if (a.round != null) parts.push(`round ${a.round}`);
     row.append(el('span', 'sa-attempt-scope', scope), el('span', 'sa-attempt-meta', parts.join(' · ')));
     if (a.live && a.sessionId) {
@@ -315,9 +471,10 @@ export function initSuperagentView() {
       return;
     }
     const head = el('div', 'sa-job-head');
-    head.append(el('h2', 'sa-heading', detail.title), el('span', `sa-status status-${detail.status}`, STATUS_LABEL[detail.status] ?? detail.status));
+    head.append(el('h2', 'sa-heading', detail.title), el('span', `sa-status status-${detail.status}`, statusLabel(detail)));
     if (!FINISHED.has(detail.status)) head.append(stopButton(middleError));
     middleBody.append(head);
+    if (detail.workflow) middleBody.append(el('div', 'sa-note', `Workflow: ${detail.workflow.name}`));
     if (detail.idea) middleBody.append(el('div', 'sa-idea', detail.idea));
 
     if (detail.phases.length) {
@@ -333,7 +490,12 @@ export function initSuperagentView() {
     if (detail.repos.length) {
       const box = section('Branches');
       const list = el('ul', 'sa-list');
-      for (const r of detail.repos) list.append(el('li', null, `${r.id}: ${detail.branch ?? '—'} (${r.origin})`));
+      for (const r of detail.repos) {
+        const li = branchLine(r);
+        li.append(` (${r.origin})`);
+        if (r.inPlace && FINISHED.has(detail.status)) li.append(el('div', 'sa-note', IN_PLACE_FINISHED));
+        list.append(li);
+      }
       box.append(list);
       middleBody.append(box);
     }
@@ -482,10 +644,14 @@ export function initSuperagentView() {
     } else if (needsYou.type === 'ready-to-try') {
       box.append(el('h3', 'sa-subheading', 'Ready to try'));
       const branches = el('ul', 'sa-list');
-      for (const r of detail.repos) branches.append(el('li', null, `${r.id}: ${detail.branch ?? '—'}`));
+      for (const r of detail.repos) branches.append(branchLine(r));
       box.append(branches);
-      box.append(artifactBlock('Test report', cachedArtifact(detail.jobId, needsYou.key, 'testReport')));
-      if (detail.artifacts.some((a) => a.key === 'brief')) {
+      // The final human phase's own inputs; the brief, when there is one,
+      // is shown as its assumptions section as before.
+      for (const key of detail.readyInputs.filter((k) => k !== 'idea' && k !== 'brief')) {
+        box.append(artifactBlock(READY_LABEL[key] ?? key, cachedArtifact(detail.jobId, needsYou.key, key)));
+      }
+      if (detail.readyInputs.includes('brief') || detail.artifacts.some((a) => a.key === 'brief')) {
         box.append(artifactBlock('Assumptions made for you', cachedArtifact(detail.jobId, needsYou.key, 'brief'), (text) => briefSection(text)));
       }
       const row = el('div', 'sa-actions');
@@ -496,6 +662,11 @@ export function initSuperagentView() {
       accept.title = 'Mark the job done. Nothing is merged or pushed.';
       row.append(accept, stopButton(rightError));
       box.append(row);
+    } else if (needsYou.reason === 'folder-changed') {
+      // Not terminal: the supervisor re-checks the folder every heartbeat.
+      box.append(el('h3', 'sa-subheading', 'Paused'), preBlock(needsYou.text ?? ''));
+      box.append(el('div', 'sa-note', 'The job continues on its own once the folder is back.'));
+      box.appendChild(el('div', 'sa-actions')).append(stopButton(rightError));
     } else {
       box.append(el('h3', 'sa-subheading', 'Stuck'));
       box.append(el('div', 'sa-reason', needsYou.detail?.why ?? needsYou.type));

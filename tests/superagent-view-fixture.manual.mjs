@@ -1,5 +1,6 @@
-// Superagent view, Plan 6 Task 11: seeds four jobs for hand-verifying the
-// Superagent tab (public/superagent-view.js).
+// Superagent view, Plan 6 Task 11 and Plan 7 Task 9: seeds six jobs and one
+// invalid global workflow file for hand-verifying the Superagent tab
+// (public/superagent-view.js).
 //
 // NOT run by npm test. Run by hand, with Cockpit STOPPED on that home:
 //   node tests/superagent-view-fixture.manual.mjs <cockpitHome> <repoDir>
@@ -7,13 +8,22 @@
 // under it, never the real ~/.prompt-cockpit).
 //
 // <repoDir> is created and committed to if it is missing or empty; otherwise it
-// must already be a git repo with a commit. Each job gets a real worktree under
-// <cockpitHome>/.prompt-cockpit/superagent/worktrees, made by worktree.js's own
-// createWorktree, and an event log written through the real store:
+// must already be a git repo with a commit. Each worktree job gets a real
+// worktree under <cockpitHome>/.prompt-cockpit/superagent/worktrees, made by
+// worktree.js's own createWorktree, and an event log written through the real
+// store:
 //   - needs-you / question   (HTML-looking, long, multi-line question; router decisions)
 //   - needs-you / ready-to-try (brief, spec, plan, tasks, reviews and test report committed)
 //   - needs-you / stuck      (attempt cap; router decisions)
 //   - done                   (accepted)
+//   - needs-you / ready-to-try, Troubleshooting workflow (diagnosis, tasks,
+//     reviews and test report committed; no brief)
+// plus one in-place Feature job on <repoDir>-inplace (created like <repoDir>),
+// paused at needs-you / folder-changed: its superagent/<slug> branch exists but
+// the folder is left on its own branch, so the real in-place gate fails on
+// every heartbeat. Its first brainstorm attempt and its spec attempt were
+// ended by that gate (paused before launch), with a folder-restored between.
+// The invalid workflow file is <superagent root>/workflows/broken.json.
 // None of them is a state the supervisor resumes. That is PROVEN before the
 // script exits, not assumed: it builds a real supervisor over the seeded store
 // with a registry whose createSession records the call and throws, runs
@@ -40,6 +50,8 @@ if (home.toLowerCase() === os.homedir().toLowerCase()) {
 process.env.COCKPIT_HOME = home;
 
 const { defaultConfig, defaultSuperagentRoot, createSuperagentConfig } = await import('../src/superagent/config.js');
+const { checkGate, folderChangedEvent } = await import('../src/superagent/inplace.js');
+const { resolveWorkflowModels, substituteArtifacts, workflowsDir } = await import('../src/superagent/workflows.js');
 const { createSuperagentStore, deriveJob } = await import('../src/superagent/store.js');
 const { createSuperagent } = await import('../src/superagent/index.js');
 const { artifactPaths, reviewPaths } = await import('../src/superagent/results.js');
@@ -50,21 +62,40 @@ const root = defaultSuperagentRoot();
 const worktreesRoot = path.join(root, 'worktrees');
 const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8' }).trim();
 
-if (!existsSync(repo) || readdirSync(repo).length === 0) {
-  await initRepo(repo);
-  console.log(`initialised ${repo}`);
-} else {
-  git(repo, 'rev-parse', 'HEAD');
+async function ensureRepo(dir) {
+  if (!existsSync(dir) || readdirSync(dir).length === 0) {
+    await initRepo(dir);
+    console.log(`initialised ${dir}`);
+  } else {
+    git(dir, 'rev-parse', 'HEAD');
+  }
 }
+await ensureRepo(repo);
+const inPlaceRepo = `${repo}-inplace`;
+await ensureRepo(inPlaceRepo);
 
 const store = createSuperagentStore({ rootDir: path.join(root, 'jobs') });
 const defaults = defaultConfig();
 const pipeline = defaults.pipeline;
-const modelFor = (role) => defaults.models[role]?.model ?? 'claude-opus-5-5';
 const routerModel = defaults.models.router.model;
 
-function attemptEvents(a) {
-  const startedEv = { type: 'attempt-started', attemptId: a.id, phase: a.phase, task: a.task ?? null, role: a.role, model: modelFor(a.role), n: a.n ?? 1, purpose: a.purpose, round: a.round ?? null };
+// A built-in workflow as createJob records it (Plan 7): pipeline, workflow,
+// artifacts, prompts and models.
+async function builtinWorkflow(id, slug, createdDate) {
+  const file = path.join(workflowsDir(), `${id}.json`);
+  const doc = JSON.parse(await fs.readFile(file, 'utf8'));
+  const roles = [...new Set(doc.phases.flatMap((p) => [p.role, p.taskReview].filter(Boolean)))];
+  return {
+    pipeline: doc.phases,
+    workflow: { id: doc.id, name: doc.name, source: 'built-in', file },
+    artifacts: substituteArtifacts(doc.artifacts, { slug, date: createdDate }),
+    prompts: Object.fromEntries(roles.map((role) => [role, null])),
+    models: resolveWorkflowModels(doc, {}, repo),
+  };
+}
+
+function attemptEvents(a, models = defaults.models) {
+  const startedEv = { type: 'attempt-started', attemptId: a.id, phase: a.phase, task: a.task ?? null, role: a.role, model: models[a.role]?.model ?? 'claude-opus-5-5', n: a.n ?? 1, purpose: a.purpose, round: a.round ?? null };
   const events = [startedEv];
   if (a.sessionId) events.push({ type: 'attempt-session', attemptId: a.id, sessionId: a.sessionId });
   events.push({
@@ -77,7 +108,7 @@ function attemptEvents(a) {
     question: a.question ?? null,
     verdict: a.verdict ?? null,
     questions: a.questions ?? null,
-    tokens: 12_345,
+    tokens: a.tokens === undefined ? 12_345 : a.tokens,
   });
   return events;
 }
@@ -89,15 +120,18 @@ const routerDecided = (forAttemptId, action, note, estimatedTokens) => ({
 
 // Provisions the worktree with createWorktree, commits `files` into it, then
 // writes job-created, worktree-created, job-provisioned and `events`.
-async function seedJob({ title, idea, files = () => ({}), events }) {
+// `workflowId` records a built-in workflow; `events` may then be a function of
+// its models.
+async function seedJob({ title, idea, files = () => ({}), events, workflowId = null }) {
   const jobId = randomUUID();
   const slug = slugify(title, jobId);
   const branch = BRANCH_PREFIX + slug;
+  const createdDate = new Date().toISOString().slice(0, 10);
+  const recorded = workflowId ? await builtinWorkflow(workflowId, slug, createdDate) : { pipeline };
   const created = jobCreated({
-    jobId, slug, title, idea, branch,
-    createdDate: new Date().toISOString().slice(0, 10),
+    jobId, slug, title, idea, branch, createdDate,
     repos: [{ id: 'primary', origin: repo }],
-    pipeline,
+    ...recorded,
     router: { allowlist: defaults.routerModelAllowlist, maxInputTokens: defaults.routerMaxInputTokens, maxOutputTokens: defaults.routerMaxOutputTokens },
     copyLocalClaudeSettings: false,
   });
@@ -116,9 +150,62 @@ async function seedJob({ title, idea, files = () => ({}), events }) {
   await store.append(jobId, created);
   await store.append(jobId, { type: 'worktree-created', repo: 'primary', worktree: made.worktree, branch: made.branch, baseSha: made.baseSha, settingsCopy: made.settingsCopy });
   await store.append(jobId, { type: 'job-provisioned' });
+  for (const ev of typeof events === 'function' ? events(recorded.models) : events) await store.append(jobId, ev);
+  return jobId;
+}
+
+// In place, as createJob + provisionInPlace would record it, except that the
+// folder is NOT switched: superagent/<slug> is only created, so the folder
+// stays on its own branch and the real gate's text is what the job shows.
+async function seedInPlaceJob({ title, idea }) {
+  const jobId = randomUUID();
+  const slug = slugify(title, jobId);
+  const branch = BRANCH_PREFIX + slug;
+  const createdDate = new Date().toISOString().slice(0, 10);
+  const recorded = await builtinWorkflow('feature', slug, createdDate);
+  const head = git(inPlaceRepo, 'rev-parse', 'HEAD');
+  git(inPlaceRepo, 'branch', branch);
+  const created = jobCreated({
+    jobId, slug, title, idea, branch, createdDate,
+    repos: [{ id: 'primary', origin: inPlaceRepo, toplevel: inPlaceRepo, inPlace: true, admittedHead: head }],
+    ...recorded,
+    router: { allowlist: defaults.routerModelAllowlist, maxInputTokens: defaults.routerMaxInputTokens, maxOutputTokens: defaults.routerMaxOutputTokens },
+    copyLocalClaudeSettings: false,
+  });
+  const check = await checkGate({ folder: inPlaceRepo, branch, baseSha: head });
+  if (check.ok) throw new Error(`fixture: ${inPlaceRepo} passes the in-place gate; it must stay off ${branch}`);
+  const paused = folderChangedEvent({ text: check.text, folder: inPlaceRepo });
+  const gated = (phase, role, purpose) => attemptEvents({ id: randomUUID(), phase, role, purpose, outcome: 'failed', reason: 'folder-changed', summary: null, tokens: null }, recorded.models);
+  const events = [
+    created,
+    { type: 'worktree-created', repo: 'primary', worktree: inPlaceRepo, branch, baseSha: head, settingsCopy: 'in-place', inPlace: true },
+    { type: 'job-provisioned' },
+    ...gated('brainstorm', 'brainstormer', 'ask'),
+    paused,
+    { type: 'folder-restored' },
+    ...attemptEvents({ id: randomUUID(), phase: 'brainstorm', role: 'brainstormer', purpose: 'ask', questions: [], sessionId: randomUUID() }, recorded.models),
+    ...gated('spec', 'spec-writer', 'author'),
+    paused,
+  ];
   for (const ev of events) await store.append(jobId, ev);
   return jobId;
 }
+
+// One invalid global workflow file, for the New job form's Workflow select.
+const globalWorkflows = path.join(root, 'workflows');
+await fs.mkdir(globalWorkflows, { recursive: true });
+const brokenWorkflow = {
+  format: 1,
+  id: 'broken',
+  name: 'Broken (seeded)',
+  description: 'A seeded invalid global workflow.',
+  artifacts: { notes: 'docs/notes.md' },
+  phases: [
+    { phase: 'write', kind: 'author', role: 'spec-writer', inputs: ['idea'], outputs: ['missing'] },
+    { phase: 'accept', kind: 'human', inputs: ['notes'] },
+  ],
+};
+await fs.writeFile(path.join(globalWorkflows, 'broken.json'), `${JSON.stringify(brokenWorkflow, null, 2)}\n`);
 
 const brainstormDone = () => attemptEvents({ id: randomUUID(), phase: 'brainstorm', role: 'brainstormer', purpose: 'ask', questions: [] });
 
@@ -171,6 +258,34 @@ function finishedPipeline() {
   return { events, files };
 }
 
+// The Troubleshooting pipeline up to its accept phase, every artifact committed.
+function troubleshootingPipeline() {
+  const tasks = [{ id: 't1', title: 'Guard the empty header', repos: ['primary'], dependsOn: [], acceptance: 'a failing test now passes', verify: '', origin: 'plan', fromAttemptId: null }];
+  const events = (models) => [
+    ...attemptEvents({ id: randomUUID(), phase: 'investigate', role: 'investigator', purpose: 'author' }, models),
+    ...attemptEvents({ id: randomUUID(), phase: 'diagnosis-review', role: 'diagnosis-reviewer', purpose: 'review', round: 1, verdict: 'approve' }, models),
+    { type: 'phase-completed', phase: 'diagnosis-review', visit: 1, unresolved: [], verification: null },
+    { type: 'tasks-loaded', tasks },
+    ...attemptEvents({ id: randomUUID(), phase: 'fix', task: 't1', role: 'fixer', purpose: 'implement' }, models),
+    ...attemptEvents({ id: randomUUID(), phase: 'fix', task: 't1', role: 'fix-reviewer', purpose: 'task-review', round: 1, verdict: 'approve' }, models),
+    { type: 'phase-completed', phase: 'fix', visit: 1, unresolved: [], verification: null },
+    ...attemptEvents({ id: randomUUID(), phase: 'verify', role: 'verifier-tester', purpose: 'test' }, models),
+    { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } },
+  ];
+  const files = (job) => {
+    const p = artifactPaths(job);
+    return {
+      [p.diagnosis]: '# Diagnosis\n\nThe export skips row 0 when the header cell is empty.\n',
+      [p.tasks]: `${JSON.stringify({ tasks }, null, 2)}\n`,
+      [p.testReport]: '# Test report (troubleshooting)\n\n- Reproduced: the header row was missing before the fix\n- `npm test`: 43 passing, including the new failing-first test\n',
+      [reviewPaths(job, { phase: 'diagnosis-review', round: 1 }).review]: '# Diagnosis review r1\n\nApprove.\n',
+      [reviewPaths(job, { taskId: 't1' }).report]: '# t1 report\n\nFixed.\n',
+      [reviewPaths(job, { taskId: 't1', round: 1 }).taskReview]: '# t1 review r1\n\nApprove.\n',
+    };
+  };
+  return { events, files };
+}
+
 const questionSpec1 = randomUUID();
 const questionSpec2 = randomUUID();
 const stuckIds = [randomUUID(), randomUUID(), randomUUID()];
@@ -202,6 +317,8 @@ seeded.push(await seedJob({
   ],
 }));
 seeded.push(await seedJob({ title: 'Update README badge', idea: 'Point the build badge at the new CI.', files: done.files, events: [...done.events, { type: 'job-accepted' }] }));
+seeded.push(await seedJob({ title: 'Header row missing in export', idea: 'The CSV export loses its header row when the first cell is empty.', workflowId: 'troubleshooting', ...troubleshootingPipeline() }));
+seeded.push(await seedInPlaceJob({ title: 'Add dark mode', idea: 'Add a dark mode toggle to the settings page.' }));
 
 const before = new Map();
 for (const jobId of seeded) {

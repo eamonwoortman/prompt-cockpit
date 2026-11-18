@@ -1,4 +1,4 @@
-import { attemptCap, taskStatus } from './sequencer.js';
+import { attemptCap, gatedOut, taskStatus } from './sequencer.js';
 import { PHASE_ATTEMPT_KINDS, TASK_ATTEMPT_KINDS, artifactPaths, reviewPaths } from './results.js';
 
 const CORRUPT_TITLE = 'corrupt event log';
@@ -71,7 +71,7 @@ export function artifactKeys(job) {
   const known = Object.keys(artifactPaths(job));
   const keys = new Set();
   for (const p of job.pipeline ?? []) {
-    if (!(job.attempts ?? []).some((a) => a.phase === p.phase)) continue;
+    if (!(job.attempts ?? []).some((a) => a.phase === p.phase && !gatedOut(a))) continue;
     for (const k of [...(p.outputs ?? []), ...(p.inputs ?? [])]) if (k === 'brief' && known.includes(k)) keys.add(k);
     for (const k of p.outputs ?? []) if (known.includes(k)) keys.add(k);
   }
@@ -165,6 +165,7 @@ export function jobDetail(job, { isLive = () => false } = {}) {
       round: a.round ?? null,
       purpose: a.purpose,
       outcome: a.outcome ?? null,
+      pausedBeforeLaunch: gatedOut(a),
       live: a.outcome == null && a.sessionId != null && isLive(a.sessionId) === true,
       sessionId: a.sessionId ?? null,
     })),
