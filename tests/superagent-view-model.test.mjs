@@ -227,3 +227,17 @@ test('a phase whose only attempt the in-place gate ended lists no artifacts', ()
   const ranSpec = m2([start('a1', 'spec'), { type: 'attempt-ended', attemptId: 'a1', outcome: 'failed', reason: 'no-result' }]);
   assert.deepEqual(artifactKeys(ranSpec), ['spec']);
 });
+
+test('a gated review or per-task attempt lists no artifact of its own', () => {
+  const gated = (attemptId) => ({ type: 'attempt-ended', attemptId, outcome: 'failed', reason: 'folder-changed' });
+  const job = m2([
+    ...toPlanReview(),
+    start('r1', 'plan-review', { purpose: 'review', round: 1 }), gated('r1'),
+    start('i1', 'implement', { task: 'T1', purpose: 'implement' }), gated('i1'),
+    start('t1', 'implement', { task: 'T1', purpose: 'task-review', round: 1 }), gated('t1'),
+  ]);
+  const keys = artifactKeys(job);
+  assert.ok(!keys.includes('review:plan-review:1'), keys.join(','));
+  assert.ok(!keys.includes('report:T1'), keys.join(','));
+  assert.ok(!keys.includes('taskReview:T1:1'), keys.join(','));
+});

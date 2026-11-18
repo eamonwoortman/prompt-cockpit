@@ -70,12 +70,14 @@ export function artifactKeys(job) {
   if (isCorrupt(job)) return [];
   const known = Object.keys(artifactPaths(job));
   const keys = new Set();
+  // An attempt the in-place gate ended never launched, so it wrote nothing.
+  const launched = (job.attempts ?? []).filter((a) => !gatedOut(a));
   for (const p of job.pipeline ?? []) {
-    if (!(job.attempts ?? []).some((a) => a.phase === p.phase && !gatedOut(a))) continue;
+    if (!launched.some((a) => a.phase === p.phase)) continue;
     for (const k of [...(p.outputs ?? []), ...(p.inputs ?? [])]) if (k === 'brief' && known.includes(k)) keys.add(k);
     for (const k of p.outputs ?? []) if (known.includes(k)) keys.add(k);
   }
-  for (const a of job.attempts ?? []) {
+  for (const a of launched) {
     const key = attemptKey(a);
     if (key) keys.add(key);
   }
