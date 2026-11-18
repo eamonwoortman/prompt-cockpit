@@ -98,6 +98,35 @@ test('startGrokSession inits, creates a session, and emits system/init', async (
   assert.equal(init.session_id, 'grok-sess-1');
 });
 
+test('cockpitMcp adds the cockpit HTTP server to session/new; absent keeps []', async () => {
+  const withMcp = startFake({ cockpitMcp: { url: 'http://127.0.0.1:4317/mcp/abc', token: 'tok' } });
+  await flush();
+  await flush();
+  const created = withMcp.fake.requests.find((r) => r.method === 'session/new');
+  assert.deepEqual(created.params.mcpServers, [
+    {
+      type: 'http',
+      name: 'cockpit',
+      url: 'http://127.0.0.1:4317/mcp/abc',
+      headers: [{ name: 'Authorization', value: 'Bearer tok' }],
+    },
+  ]);
+
+  const without = startFake();
+  await flush();
+  await flush();
+  assert.deepEqual(without.fake.requests.find((r) => r.method === 'session/new').params.mcpServers, []);
+});
+
+test('cockpitMcp is also passed on session/load (resume)', async () => {
+  const { fake } = startFake({ resume: 'old-sess', cockpitMcp: { url: 'http://x/mcp/1', token: 't' } });
+  await flush();
+  await flush();
+  const loaded = fake.requests.find((r) => r.method === 'session/load');
+  assert.equal(loaded.params.mcpServers[0].name, 'cockpit');
+  assert.equal(loaded.params.mcpServers[0].headers[0].value, 'Bearer t');
+});
+
 test('pushInput echoes the user turn and sends session/prompt', async () => {
   const { session, messages, fake } = startFake();
   await flush();

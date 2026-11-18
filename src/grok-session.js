@@ -51,6 +51,21 @@ export async function rewindGrokSession({
   }
 }
 
+// ACP session/new + session/load `mcpServers` entry for the cockpit HTTP MCP
+// endpoint. Additive: Grok merges it with the user's own configured servers.
+// ACP's McpServerHttp has no per-tool timeout field, so none is set.
+export function cockpitMcpServers(cockpitMcp) {
+  if (!cockpitMcp) return [];
+  return [
+    {
+      type: 'http',
+      name: 'cockpit',
+      url: cockpitMcp.url,
+      headers: [{ name: 'Authorization', value: `Bearer ${cockpitMcp.token}` }],
+    },
+  ];
+}
+
 function unsupported(name) {
   return async () => {
     throw new Error(`${name} is not supported on grok sessions yet`);
@@ -87,6 +102,7 @@ export function startGrokSession({
   connectImpl = spawnGrokAgent,
   grokExtensionsImpl,
   rewindExistingImpl = rewindGrokSession,
+  cockpitMcp,
 }) {
   const grokExtensions = grokExtensionsImpl || createGrokExtensions({ cwd });
   let currentMode = permissionMode || 'default';
@@ -181,11 +197,11 @@ export function startGrokSession({
       });
 
       if (resume) {
-        const loaded = await client.request('session/load', { sessionId: resume, cwd, mcpServers: [] });
+        const loaded = await client.request('session/load', { sessionId: resume, cwd, mcpServers: cockpitMcpServers(cockpitMcp) });
         sessionId = resume;
         applyModelCatalog(loaded);
       } else {
-        const created = await client.request('session/new', { cwd, mcpServers: [] });
+        const created = await client.request('session/new', { cwd, mcpServers: cockpitMcpServers(cockpitMcp) });
         sessionId = created && created.sessionId ? created.sessionId : sessionId;
         applyModelCatalog(created);
       }
