@@ -147,6 +147,25 @@ test('costForUsage prices the current Codex model catalog', () => {
     cache_creation_input_tokens: 1_000_000,
   }).cost, 2 + 10 + 0.1 + 2.5);
   assert.equal(costForUsage('gpt-6.1', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 2);
+  // gpt-6.2: sol keeps the 6.1 rates; astra is 8/40 with a 0.40 cached rate.
+  assert.equal(costForUsage('gpt-6.2-sol', {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+    cache_creation_input_tokens: 1_000_000,
+  }).cost, 2 + 10 + 0.1 + 2.5);
+  assert.equal(costForUsage('gpt-6.2-astra', {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+    cache_creation_input_tokens: 1_000_000,
+  }).cost, 8 + 40 + 0.4 + 10);
+});
+
+test('internal Codex slugs with no published price stay unpriced instead of guessed', () => {
+  for (const model of ['gpt-reserve', 'codex-auto-review']) {
+    assert.equal(costForUsage(model, { input_tokens: 10, output_tokens: 5 }).cost, null);
+  }
 });
 
 test('costForUsage returns real tokens with cost: null for an unpriced model, rather than guessing a price or dropping the tokens', () => {

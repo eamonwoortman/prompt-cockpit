@@ -1,5 +1,5 @@
 {
-  "_comment": "USD per MILLION tokens. Short-context rates (< 200k prompt tokens) from https://docs.x.ai/developers/pricing (checked 2026-10-15). At 200k+ prompt tokens a call bills at 2x (threshold 199999 because the check is strictly greater-than), modeled via each entry's long_context block. Grok has no 5m/1h cache-write tiers: cache creation is billed as regular input, so cache_write_* matches input. Re-check the pricing page if these look stale.",
+  "_comment": "USD per MILLION tokens. Short-context rates (< 200k prompt tokens) from https://docs.x.ai/developers/pricing (checked 2026-11-18). At 200k+ prompt tokens a call bills at 2x (threshold 199999 because the check is strictly greater-than), modeled via each entry's long_context block. Grok has no 5m/1h cache-write tiers: cache creation is billed as regular input, so cache_write_* matches input. Re-check the pricing page if these look stale.",
   "_rate_shape": {
     "input": "cost per 1M uncached input tokens",
     "output": "cost per 1M output tokens",

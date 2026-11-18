@@ -1,5 +1,5 @@
 {
-  "_comment": "USD per MILLION tokens. Verified 2026-09-22 against https://platform.claude.com/docs/en/about-claude/pricing. Re-check that page if these ever look stale; the parser re-reads this file every run.",
+  "_comment": "USD per MILLION tokens. Verified 2026-11-18 against https://platform.claude.com/docs/en/about-claude/pricing. Re-check that page if these ever look stale; the parser re-reads this file every run.",
   "_rate_shape": {
     "long_context": "optional per-model object: when a single call's prompt (input + cache write + cache read tokens) exceeds `threshold`, its rates replace the base ones for that call",
     "input": "cost per 1M standard input tokens",

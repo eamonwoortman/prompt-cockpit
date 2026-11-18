@@ -8,6 +8,8 @@
     "cache_read": "cost per 1M cached input tokens"
   },
   "models": {
+    "gpt-6.2-sol": {"input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 2.5, "cache_read": 0.1, "confidence": "developers.openai.com/api/docs/models/gpt-6.2-sol and /pricing 2026-11-18 - standard short context (<=272K); cache write 2.5 is the 30m rate (12h is 5)"},
+    "gpt-6.2-astra": {"input": 8, "output": 40, "cache_write_5m": 10, "cache_write_1h": 10, "cache_read": 0.4, "confidence": "developers.openai.com/api/docs/models/gpt-6.2-astra and /pricing 2026-11-18 - standard short context (<=272K); cache write 10 is the 30m rate (12h is 20)"},
     "gpt-6-astra": {"input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 12.5, "cache_read": 1, "confidence": "developers.openai.com/api/docs/models/gpt-6-astra 2026-09-22 - standard short context"},
     "gpt-6.1-sol": {"input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 2.5, "cache_read": 0.1, "confidence": "developers.openai.com/api/docs/models/gpt-6.1-sol 2026-10-01 - standard short context; cached input is 5% of uncached (0.10), unlike gpt-6-sol's 0.20"},
     "gpt-6.1": {"input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 2.5, "cache_read": 0.1, "confidence": "alias for gpt-6.1-sol - developers.openai.com/api/docs/pricing 2026-10-01"},
