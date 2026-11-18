@@ -451,7 +451,10 @@ export function initSuperagentView() {
     const jobId = selectedId;
     const label = () => (stopsPending.has(jobId) ? 'Stopping…' : 'Stop job');
     const stop = button(label(), 'btn-danger', async () => {
-      if (!confirm('Stop this job? Its live worker is closed and the job cannot be resumed. Its worktree and branch are kept.')) return;
+      const kept = detail?.status === 'provisioning'
+        ? 'Its half-made worktree is removed; finished worktrees and branches are kept.'
+        : 'Its worktree and branch are kept.';
+      if (!confirm(`Stop this job? Its live worker is closed and the job cannot be resumed. ${kept}`)) return;
       stopsPending.add(jobId);
       stop.disabled = true;
       stop.textContent = label();
