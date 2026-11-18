@@ -14,7 +14,8 @@ const { createSuperagentStore } = await import('../src/superagent/store.js');
 const { createSuperagentConfig } = await import('../src/superagent/config.js');
 const { createSuperagent } = await import('../src/superagent/index.js');
 const { workflowsDir } = await import('../src/superagent/workflows.js');
-const { checkInPlace, normaliseTop } = await import('../src/superagent/inplace.js');
+const { addLedgerExclude, checkInPlace, normaliseTop } = await import('../src/superagent/inplace.js');
+const { defaultGit } = await import('../src/superagent/worktree.js');
 
 const quiet = () => {};
 const gitIn = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -27,7 +28,7 @@ const tryGit = (cwd, ...args) => {
 };
 const norm = (p) => realpathSync.native(path.resolve(p)).toLowerCase();
 
-async function harness() {
+async function harness({ git, platform = process.platform, worktreesRoot: worktreesOverride } = {}) {
   registry._reset();
   const root = await tempDir('sa-inplace-');
   const repo = path.join(root, 'repo');
@@ -35,7 +36,7 @@ async function harness() {
   const configFile = path.join(root, 'config.json');
   await fs.writeFile(configFile, '{}');
   const jobsRoot = path.join(root, 'jobs');
-  const worktreesRoot = path.join(root, 'worktrees');
+  const worktreesRoot = worktreesOverride ?? path.join(root, 'worktrees');
   let n = 0;
   const logs = [];
 
@@ -55,12 +56,13 @@ async function harness() {
       clearIntervalImpl: () => {},
       stopTickDeadlineMs: 20,
       logImpl: (line) => logs.push(line),
-      platform: process.platform,
+      platform,
+      ...(git && { git }),
       workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     return {
-      root, repo, baseSha, jobsRoot, worktreesRoot, store, sa, events, logs,
+      root, repo, baseSha, jobsRoot, worktreesRoot, store, sa, events, logs, factory,
       nextSlug: () => `add-hello-${String(n + 1).padStart(8, '0')}`,
       async restart() {
         registry._reset();
@@ -210,6 +212,7 @@ test('a finished in-place job releases its reservation', async () => {
     const job = await create(h, { inPlace: [h.repo] });
     await assert.rejects(create(h, { inPlace: [h.repo] }), { code: 'ERR_FOLDER_IN_USE' });
     assert.equal((await h.sa.stopJob(job.jobId)).state, 'stopped');
+    gitIn(h.repo, 'switch', '-q', '-');
     const again = await create(h, { inPlace: [h.repo] });
     assert.equal(again.state, 'running');
     await h.sa.stop();
@@ -369,5 +372,163 @@ test('a job whose top level git cannot find keeps its folder reserved and is log
     const job = await create(fresh, { primaryRepo: plain, inPlace: [plain] });
     assert.equal(job.state, 'running');
     await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+const currentBranch = (folder) => gitIn(folder, 'symbolic-ref', '--short', 'HEAD');
+const excludeFile = (folder) => path.resolve(folder, gitIn(folder, 'rev-parse', '--git-path', 'info/exclude'));
+
+function gitIgnoreFilesUnder(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { recursive: true }).filter((rel) => path.basename(String(rel)) === '.gitignore');
+}
+
+test('a clean folder is switched in place', async () => {
+  try {
+    const h = await harness();
+    const rootIgnore = readFileSync(path.join(h.repo, '.gitignore'), 'utf8');
+    const job = await create(h, { inPlace: [h.repo] });
+    assert.equal(job.state, 'running');
+    const [repo] = job.repos;
+    assert.equal(norm(repo.worktree), norm(h.repo));
+    assert.equal(repo.worktree, repo.toplevel);
+    assert.equal(repo.baseSha, h.baseSha);
+    assert.equal(repo.settingsCopy, 'in-place');
+    const created = h.events(job.jobId).find((e) => e.type === 'worktree-created');
+    assert.equal(created.inPlace, true);
+    assert.equal(created.settingsCopy, 'in-place');
+
+    assert.equal(gitIn(h.repo, 'rev-parse', 'HEAD'), h.baseSha);
+    assert.equal(currentBranch(h.repo), job.branch);
+    assert.match(job.branch, /^superagent\/add-hello-/);
+    assert.equal(existsSync(h.worktreesRoot), false);
+
+    const ledger = path.join(h.repo, '.superpowers', 'superagent', job.jobId);
+    assert.ok(existsSync(ledger));
+    assert.deepEqual(gitIgnoreFilesUnder(path.join(h.repo, '.superpowers')), []);
+    assert.equal(readFileSync(path.join(h.repo, '.gitignore'), 'utf8'), rootIgnore);
+    await fs.writeFile(path.join(ledger, 'note.txt'), 'ledger\n');
+    assert.equal(gitIn(h.repo, 'status', '--porcelain', '--untracked-files=all'), '');
+    assert.ok(readFileSync(excludeFile(h.repo), 'utf8').endsWith(`\n/.superpowers/superagent/${job.jobId}/\n`));
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('an exclude file without a final newline keeps its last line', async () => {
+  const root = await tempDir('sa-inplace-exclude-');
+  const repo = path.join(root, 'repo');
+  await initRepo(repo);
+  const file = excludeFile(repo);
+  await fs.writeFile(file, '# mine\n*.log');
+  await addLedgerExclude({ folder: repo, jobId: 'j1' });
+  assert.equal(readFileSync(file, 'utf8'), '# mine\n*.log\n/.superpowers/superagent/j1/\n');
+  await addLedgerExclude({ folder: repo, jobId: 'j1' });
+  assert.equal(readFileSync(file, 'utf8'), '# mine\n*.log\n/.superpowers/superagent/j1/\n');
+
+  await fs.rm(path.dirname(file), { recursive: true, force: true });
+  await addLedgerExclude({ folder: repo, jobId: 'j2' });
+  assert.equal(readFileSync(file, 'utf8'), '/.superpowers/superagent/j2/\n');
+});
+
+test('the exclude rule of a linked worktree lands in the shared exclude file', async () => {
+  const root = await tempDir('sa-inplace-linked-');
+  const repo = path.join(root, 'repo');
+  await initRepo(repo);
+  const linked = path.join(root, 'linked');
+  gitIn(repo, 'worktree', 'add', '-q', '-b', 'mine', linked);
+  await addLedgerExclude({ folder: linked, jobId: 'j1' });
+  assert.equal(norm(excludeFile(linked)), norm(path.join(repo, '.git', 'info', 'exclude')));
+  assert.ok(readFileSync(excludeFile(linked), 'utf8').endsWith('/.superpowers/superagent/j1/\n'));
+  assert.equal(tryGit(linked, 'check-ignore', '-q', '.superpowers/superagent/j1/probe'), '');
+});
+
+test('a nested negation makes provisioning fail before any launch', async () => {
+  try {
+    const h = await harness();
+    await fs.mkdir(path.join(h.repo, '.superpowers', 'superagent'), { recursive: true });
+    await fs.writeFile(path.join(h.repo, '.superpowers', 'superagent', '.gitignore'), '!*\n');
+    gitIn(h.repo, 'add', '.superpowers/superagent/.gitignore');
+    gitIn(h.repo, 'commit', '-q', '-m', 'track a negation');
+    const job = await create(h, { inPlace: [h.repo] });
+    assert.equal(job.state, 'failed');
+    assert.match(job.detail.error, /not ignored/);
+    assert.equal(currentBranch(h.repo), job.branch);
+    assert.equal(h.events(job.jobId).some((e) => e.type === 'worktree-created'), false);
+    await h.sa.tick();
+    assert.equal(h.factory.calls.length, 0);
+    assert.equal(registry.list().length, 0);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('the folder changed between checks and switch', async () => {
+  try {
+    const calls = [];
+    let committed = false;
+    // show-ref is the last admission check; the commit lands before provisioning.
+    const git = async (args, opts) => {
+      calls.push(args);
+      const res = await defaultGit(args, opts);
+      if (!committed && args[0] === 'show-ref') {
+        committed = true;
+        gitIn(opts.cwd, 'commit', '-q', '--allow-empty', '-m', 'meanwhile');
+      }
+      return res;
+    };
+    const h = await harness({ git });
+    const branchBefore = currentBranch(h.repo);
+    const job = await create(h, { inPlace: [h.repo] });
+    assert.ok(committed);
+    assert.equal(job.state, 'failed');
+    assert.match(job.detail.error, /changed since the job was created/);
+    assert.equal(calls.some((args) => args[0] === 'switch'), false);
+    assert.equal(tryGit(h.repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${job.branch}`), null);
+    assert.equal(currentBranch(h.repo), branchBefore);
+    assert.equal(existsSync(path.join(h.repo, '.superpowers')), false);
+    assert.equal(h.factory.calls.length, 0);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('orphan listing skips in-place repos', async () => {
+  try {
+    const listed = [];
+    const git = (args, opts) => {
+      if (args[0] === 'worktree' && args[1] === 'list') listed.push(norm(opts.cwd));
+      return defaultGit(args, opts);
+    };
+    const h = await harness({ git });
+    const lib = path.join(h.root, 'lib');
+    await initRepo(lib);
+    gitIn(lib, 'worktree', 'add', '-q', '-b', 'superagent/stray-lib', path.join(h.root, 'stray-lib'));
+    gitIn(h.repo, 'worktree', 'add', '-q', '-b', 'superagent/stray-repo', path.join(h.root, 'stray-repo'));
+    const job = await create(h, { additionalRepos: [lib], inPlace: [h.repo] });
+    assert.equal(job.state, 'running');
+    const orphans = await h.sa.orphanWorktrees();
+    assert.deepEqual(listed, [norm(lib)]);
+    assert.deepEqual(orphans.map((o) => o.branch), ['superagent/stray-lib']);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('the path-length check measures from the in-place folder', async () => {
+  try {
+    const probe = await harness();
+    const longRoot = path.join(probe.root, 'x'.repeat(200), 'worktrees');
+    const h = await harness({ platform: 'win32', worktreesRoot: longRoot });
+    await assert.rejects(create(h), { code: 'ERR_PATH_TOO_LONG' });
+    const job = await create(h, { inPlace: [h.repo] });
+    assert.equal(job.state, 'running');
+    assert.match(job.slug, /^add-hello-/);
+
+    const deep = path.join(h.root, 'y'.repeat(220));
+    await assert.rejects(create(h, { primaryRepo: deep, inPlace: [deep] }), (err) => {
+      assert.equal(err.code, 'ERR_PATH_TOO_LONG');
+      assert.ok(err.length > 259);
+      assert.match(err.message, /shorter path/);
+      assert.doesNotMatch(err.message, /COCKPIT_HOME/);
+      return true;
+    });
+    await h.sa.stop();
   } finally { registry._reset(); }
 });

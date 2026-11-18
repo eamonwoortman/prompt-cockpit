@@ -32,7 +32,7 @@ import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateMilestoneFixture } from './config.js';
-import { checkInPlace, normaliseTop } from './inplace.js';
+import { checkInPlace, normaliseTop, provisionInPlace } from './inplace.js';
 import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
@@ -646,8 +646,7 @@ export function createSuperagent({
 
   // Built with the runner's own attemptDir, so the bound cannot drift from the
   // directories it actually creates.
-  function longestAttemptPath(pipeline, { jobId, slug }) {
-    const primaryWorktree = path.join(path.resolve(worktreesRoot), slug, 'primary');
+  function longestAttemptPath(pipeline, { jobId, primaryWorktree }) {
     const attemptId = 'f'.repeat(ATTEMPT_ID_LENGTH);
     let longest = '';
     for (const p of pipeline) {
@@ -660,10 +659,24 @@ export function createSuperagent({
   }
 
   // Decision 14: on win32 the slug's title part is cut to whatever still fits;
-  // only a root too long for SLUG_BASE_MIN characters is refused.
-  function fitSlug(pipeline, { title, jobId }) {
+  // only a root too long for SLUG_BASE_MIN characters is refused. An in-place
+  // primary keeps its attempts in the folder itself, where the slug plays no
+  // part; the folder (its top level or deeper) bounds the path from above.
+  function fitSlug(pipeline, { title, jobId, inPlaceFolder }) {
     if (platform !== 'win32') return slugify(title, jobId);
-    const bare = longestAttemptPath(pipeline, { jobId, slug: `-${String(jobId).slice(0, 8)}` }).length;
+    if (inPlaceFolder) {
+      const length = longestAttemptPath(pipeline, { jobId, primaryWorktree: path.resolve(inPlaceFolder) }).length;
+      if (length > WIN32_PATH_LIMIT) {
+        throw fail(
+          'ERR_PATH_TOO_LONG',
+          `superagent: attempt paths for this job would reach ${length} characters, over the ${WIN32_PATH_LIMIT}-character Windows limit. Use a folder with a shorter path than ${path.resolve(inPlaceFolder)}.`,
+          { length, limit: WIN32_PATH_LIMIT },
+        );
+      }
+      return slugify(title, jobId);
+    }
+    const primaryWorktree = path.join(path.resolve(worktreesRoot), `-${String(jobId).slice(0, 8)}`, 'primary');
+    const bare = longestAttemptPath(pipeline, { jobId, primaryWorktree }).length;
     const maxBase = Math.min(SLUG_BASE_MAX, WIN32_PATH_LIMIT - bare);
     if (maxBase < SLUG_BASE_MIN) {
       const length = bare + SLUG_BASE_MIN;
@@ -697,9 +710,11 @@ export function createSuperagent({
   async function provision(job) {
     try {
       for (const repo of job.repos) {
-        const worktree = path.join(worktreesRoot, job.slug, repo.id);
-        const made = await createWorktree({ git, origin: repo.origin, worktree, branch: job.branch, copyLocalClaudeSettings: job.copyLocalClaudeSettings });
-        await store.append(job.jobId, { type: 'worktree-created', repo: repo.id, worktree: made.worktree, branch: made.branch, baseSha: made.baseSha, settingsCopy: made.settingsCopy });
+        const inPlace = repo.inPlace === true;
+        const made = inPlace
+          ? await provisionInPlace({ git, folder: repo.toplevel, branch: job.branch, jobId: job.jobId, expectedHead: repo.admittedHead })
+          : await createWorktree({ git, origin: repo.origin, worktree: path.join(worktreesRoot, job.slug, repo.id), branch: job.branch, copyLocalClaudeSettings: job.copyLocalClaudeSettings });
+        await store.append(job.jobId, { type: 'worktree-created', repo: repo.id, worktree: made.worktree, branch: made.branch, baseSha: made.baseSha, settingsCopy: made.settingsCopy, ...(inPlace && { inPlace: true }) });
       }
       await store.append(job.jobId, { type: 'job-provisioned' });
     } catch (err) {
@@ -729,10 +744,10 @@ export function createSuperagent({
     const { pipeline, models, recorded } = await resolvePipeline(resolved, { fixture, workflow }, origin);
     if (mode === 'manual' && pipeline.some((p) => p.kind === 'brainstorm')) throw fail('ERR_MODE_UNSUPPORTED', 'superagent: manual mode is not built yet');
     const jobId = idImpl();
-    const slug = fitSlug(pipeline, { title, jobId });
-    const branch = BRANCH_PREFIX + slug;
     const folders = repoIds(origin, [...resolved.additionalRepos, ...additionalRepos].map((p) => path.resolve(p)));
     const inPlaceSet = inPlaceOrigins(inPlace, folders);
+    const slug = fitSlug(pipeline, { title, jobId, inPlaceFolder: inPlaceSet.has(origin) ? origin : null });
+    const branch = BRANCH_PREFIX + slug;
     const marked = folders.map((repo) => ({ ...repo, inPlace: inPlaceSet.has(repo.origin) }));
     reserve(jobId, marked.map((repo) => ({ key: normaliseTop(repo.origin, platform), folder: repo.origin, inPlace: repo.inPlace })));
     try {
@@ -865,7 +880,7 @@ export function createSuperagent({
 
   async function orphanWorktrees() {
     const jobs = [...known].map((jobId) => store.get(jobId)).filter(Boolean);
-    const repos = [...new Set(jobs.flatMap((j) => j.repos.map((r) => r.origin)))];
+    const repos = [...new Set(jobs.flatMap((j) => j.repos.filter((r) => !r.inPlace).map((r) => r.origin)))];
     const knownBranches = new Set(jobs.map((j) => j.branch));
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
