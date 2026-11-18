@@ -584,3 +584,74 @@ test('regenerateHandshakeSecret revokes trust for existing rows but not for rows
   const after = registry.createSession({ cwd: '/tmp/proj', name: 'After', startSessionImpl: fakeStartSession() });
   assert.equal(registry.toSummary(after).handshakeTrusted, true, 'a row created after rotation gets the NEW secret automatically');
 });
+
+// Model-initiated delegation (ask_session tool): the origin's own model calls
+// peers.ask(), which blocks until the target's turn resolves.
+test('peers.ask resolves with the target final answer and frames the task as a peer agent question, not an operator message', async () => {
+  registry._reset();
+  const originImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'Origin', startSessionImpl: originImpl });
+  const targetImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'Target', startSessionImpl: targetImpl });
+
+  const pending = originImpl.lastOpts.peers.ask('Target', 'what do you think of X?');
+  assert.match(targetImpl.lastInput, /^\[Prompt Cockpit\] Question from sibling session "Origin"/);
+  assert.match(targetImpl.lastInput, /not an instruction typed by the operator/);
+
+  targetImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'X looks fine' }] } });
+  targetImpl.emitMessage({ type: 'result', subtype: 'success', result: 'X looks fine' });
+  assert.deepEqual(await pending, { ok: true, text: 'X looks fine' });
+  assert.equal(originImpl.lastInput, undefined, 'no relayed-reply turn may be pushed into the origin');
+});
+
+test('peers.ask reports a failure result instead of hanging when the target queue is closed', async () => {
+  registry._reset();
+  const originImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'Origin', startSessionImpl: originImpl });
+  const targetImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'Target', startSessionImpl: targetImpl });
+  targetImpl.closed = true;
+
+  const reply = await originImpl.lastOpts.peers.ask('Target', 'hi');
+  assert.equal(reply.ok, false);
+  assert.match(reply.text, /no longer available/);
+});
+
+test('peers.ask refuses a target that is itself waiting on an ask, so two sessions cannot deadlock each other', async () => {
+  registry._reset();
+  const aImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
+  const bImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
+
+  const aAsksB = aImpl.lastOpts.peers.ask('B', 'q'); // A is now blocked on B
+  await assert.rejects(() => bImpl.lastOpts.peers.ask('A', 'q'), /itself waiting on another session/);
+  void aAsksB;
+});
+
+test('peers.listPeers lists other named trusted sessions only', () => {
+  registry._reset();
+  const aImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
+  registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: fakeStartSession() });
+  registry.createSession({ cwd: '/tmp/proj', startSessionImpl: fakeStartSession() }); // unnamed
+  const untrusted = registry.createSession({ cwd: '/tmp/proj', name: 'Untrusted', startSessionImpl: fakeStartSession() });
+  registry.setSessionHandshake(untrusted.id, 'nope');
+
+  assert.deepEqual(aImpl.lastOpts.peers.listPeers().map((p) => p.name), ['B']);
+});
+
+test('hideBuiltinPeerTools reaches the provider start call and survives a session reset', () => {
+  registry._reset();
+  const impl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp/proj', name: 'A', hideBuiltinPeerTools: true, startSessionImpl: impl });
+  assert.equal(impl.lastOpts.hideBuiltinPeerTools, true);
+
+  const resetImpl = fakeStartSession();
+  registry.resetSession(row.id, { startSessionImpl: resetImpl });
+  assert.equal(resetImpl.lastOpts.hideBuiltinPeerTools, true, 'a reset must keep the operator\'s choice');
+
+  const plain = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: plain });
+  assert.equal(plain.lastOpts.hideBuiltinPeerTools, false);
+});

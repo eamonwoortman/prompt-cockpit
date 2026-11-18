@@ -355,6 +355,21 @@ forever. It also checks the compose box's most interesting failure mode
 per the plan's Verification section - sending a second message while the
 first turn is still running queues it rather than dropping or interleaving it.
 
+`ask-session.manual.mjs` is likewise manual-only (~2 live Haiku sessions, a few
+cents). It checks that a session's own model calls the `ask_session` tool
+(`src/cockpit-tools.js`) when told to consult a sibling session, and relays the
+answer. The tool's plumbing (peer listing, answer-as-tool-result, deadlock
+guard) is unit-tested in `delegation.test.mjs`; only the model actually choosing
+the tool needs a real session.
+
+Codex reaches the same tools through the cockpit's own MCP endpoint
+(`src/cockpit-mcp.js`, `src/routes/mcp.js`): `mcp-endpoint.test.mjs` covers the
+JSON-RPC handling, the per-session bearer auth and the thread config, and
+`codex-session.test.mjs` covers the MCP tool-call approval prompt.
+`ask-session-codex.manual.mjs` (a live Codex thread plus a live Haiku session
+and the server in-process, a few cents) is the end-to-end check; run it with
+`ASKER_MODE=default` to also exercise the approval prompt.
+
 ## Model-aware thinking controls
 
 `src/thinking-rules.js` (shared verbatim with the browser) decides, per

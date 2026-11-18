@@ -672,3 +672,16 @@ test('an elicitation_complete system message clears the matching pending auth an
   assert.deepEqual(session.getMcpAuthPending(), []);
   assert.deepEqual(mcpAuthResolved, ['github']);
 });
+
+test('hideBuiltinPeerTools disallows the CLI ListAgents/SendMessage; off leaves them alone; peers add the cockpit MCP server', () => {
+  const off = startFakeSession().getOptions();
+  assert.equal(off.disallowedTools, undefined);
+  assert.equal(off.mcpServers, undefined);
+
+  const on = startFakeSession({
+    hideBuiltinPeerTools: true,
+    peers: { listPeers: () => [], ask: async () => ({ ok: true, text: '' }) },
+  }).getOptions();
+  assert.deepEqual(on.disallowedTools, ['ListAgents', 'SendMessage']);
+  assert.deepEqual(Object.keys(on.mcpServers), ['cockpit']);
+});

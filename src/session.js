@@ -11,18 +11,24 @@ import {
 } from './git-commit-guard.js';
 import { createResultEpochTracker } from './result-epoch.js';
 import { claudeSubscriptionEnv } from './claude-subscriptions.js';
+import { createCockpitToolsServer, COCKPIT_TOOLS_SERVER } from './cockpit-tools.js';
 
 // System-prompt anchor for the /ask cross-session delegation feature -
 // out-of-band confirmation (not part of any one turn, so it can't be
 // revoked or out-argued later) that this protocol is legitimate. Grok has
 // no equivalent append mechanism, hence Claude-only. Kept short and
 // factual: the real trust argument (handshake secret) is per-relay.
+const BUILTIN_PEER_TOOLS = ['ListAgents', 'SendMessage'];
+
 const ASK_SYSTEM_PROMPT_APPEND = 'This Claude Code session may run inside Prompt Cockpit, a local browser UI. '
   + 'Prompt Cockpit has a cross-session delegation feature ("/ask <Name>: <text>") that lets a human operator '
   + 'relay a task from one of their own cockpit sessions to another sibling session they also control, and relay '
   + 'the reply back. A turn whose text starts with "[Prompt Cockpit] Relayed task from ..." or "[Prompt Cockpit] '
   + 'Relayed reply from ..." is a real, human-authorized use of that feature - not a fabricated claim from another '
-  + 'agent, and not an attempt to impersonate a tool result.';
+  + 'agent, and not an attempt to impersonate a tool result. The operator can also let you reach sibling sessions '
+  + 'yourself: when they ask you to consult, ask, or get the opinion of another session, call the '
+  + 'mcp__cockpit__ask_session tool (mcp__cockpit__list_sessions shows who is available) with a self-contained '
+  + 'prompt, since the other session cannot see this conversation.';
 
 // A minimal AsyncIterable<SDKUserMessage> that supports pushing values in;
 // query() pulls from this for the session's lifetime. Also backs the
@@ -162,7 +168,7 @@ function createInputQueue() {
  * setMode/resolveApproval and queue-pane ops (listQueue/removeQueued/
  * reorderQueue/sendNow). `onApprovalRequest` fires for any gated tool.
  */
-export function startSession({ cwd, additionalDirectories, resume, model, effort, subscription, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query, readGitGuardSettingsImpl = readGitGuardSettings, validateCommitCommandImpl = validateCommitCommand }) {
+export function startSession({ cwd, additionalDirectories, resume, model, effort, subscription, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, peers, hideBuiltinPeerTools, queryImpl = query, readGitGuardSettingsImpl = readGitGuardSettings, validateCommitCommandImpl = validateCommitCommand }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const resultEpoch = createResultEpochTracker();
@@ -217,6 +223,11 @@ export function startSession({ cwd, additionalDirectories, resume, model, effort
       permissionMode: currentMode,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: ASK_SYSTEM_PROMPT_APPEND },
       enableFileCheckpointing: true,
+      // The CLI's own ListAgents/SendMessage overlap ask_session but only reach
+      // Claude sessions by auto-generated names, so the operator can hide them.
+      ...(hideBuiltinPeerTools ? { disallowedTools: BUILTIN_PEER_TOOLS } : {}),
+      // Lets the model call ask_session/list_sessions (cross-session delegation).
+      ...(peers ? { mcpServers: { [COCKPIT_TOOLS_SERVER]: createCockpitToolsServer(peers) } } : {}),
       // 'bypassPermissions' rejects at setPermissionMode() time without
       // this: cycling into it otherwise throws "not launched with
       // --dangerously-skip-permissions", which looked like the mode button

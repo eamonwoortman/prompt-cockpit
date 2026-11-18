@@ -17,6 +17,8 @@ import { registerSessionRoutes, seedSessionDefaults } from './routes/sessions.js
 import { registerHistoryRoutes } from './routes/history.js';
 import { registerSystemRoutes } from './routes/system.js';
 import { registerSessionActionRoutes } from './routes/session-actions.js';
+import { registerMcpRoutes } from './routes/mcp.js';
+import { setCockpitBaseUrl } from './cockpit-endpoint.js';
 import { serveStatic } from './static-files.js';
 import { checkOperatorToken, getOperatorToken } from './operator-auth.js';
 import { BodyTooLargeError, MAX_BODY_BYTES } from './http-utils.js';
@@ -30,6 +32,7 @@ const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 const router = createRouter();
 registerSessionRoutes(router);
 registerHistoryRoutes(router);
+registerMcpRoutes(router);
 registerSystemRoutes(router);
 registerSessionActionRoutes(router);
 
@@ -251,6 +254,7 @@ if (isMain) {
   });
 
   server.listen(PORT, HOST, () => {
+    setCockpitBaseUrl(`http://${HOST}:${PORT}`);
     const op = getOperatorToken();
     const url = `http://${HOST}:${PORT}/?op=${op}`;
     console.log(`prompt-cockpit listening on ${url}`);

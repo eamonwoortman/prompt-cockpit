@@ -456,6 +456,7 @@ const ACTIONS = {
         permissionMode: row.mode,
         provider: row.provider,
         subscription: row.subscription,
+        hideBuiltinPeerTools: row.hideBuiltinPeerTools,
         history: forkedHistory,
         chainedFrom: row.chainedFrom, // a fork of a chained session keeps its list of already-used accounts
       });

@@ -56,6 +56,24 @@ function rememberBounded(set, value, maxSize) {
   while (set.size > maxSize) set.delete(set.values().next().value);
 }
 
+// Per-thread config override adding the cockpit's own MCP server (cockpit-mcp.js),
+// so this thread's model can call ask_session. The tool blocks for a whole turn
+// of the other session, so the call timeout is lifted well past Codex's 60s default.
+export function cockpitMcpThreadConfig(cockpitMcp) {
+  if (!cockpitMcp) return {};
+  return {
+    config: {
+      mcp_servers: {
+        cockpit: {
+          url: cockpitMcp.url,
+          http_headers: { Authorization: `Bearer ${cockpitMcp.token}` },
+          tool_timeout_sec: 3600,
+        },
+      },
+    },
+  };
+}
+
 export function startCodexSession({
   cwd,
   resume,
@@ -71,6 +89,7 @@ export function startCodexSession({
   onMcpAuthRequest,
   onMcpAuthResolved,
   onQueueChange,
+  cockpitMcp,
   manager = getCodexAppServerManager(),
 }) {
   let threadId = resume || null;
@@ -164,7 +183,9 @@ export function startCodexSession({
     const pending = pendingApprovals.get(key);
     if (!pending) return false;
     pendingApprovals.delete(key);
-    const result = pending.kind === 'permissions'
+    const result = pending.kind === 'mcpToolCall'
+      ? { action: 'cancel' }
+      : pending.kind === 'permissions'
       ? { permissions: [], scope: 'turn' }
       : pending.kind === 'userInput'
         ? { answers: {} }
@@ -250,6 +271,7 @@ export function startCodexSession({
   const unsubscribeRequests = manager.onServerRequest(async (method, params, requestId) => {
     if (closed || !threadId || !requestBelongsToThread(params, threadId)) return { handled: false };
     if (method === 'mcpServer/elicitation/request') {
+      if (params._meta?.codex_approval_kind === 'mcp_tool_call') return mcpToolCallApproval(params, requestId);
       if (params.mode !== 'url' || !params.url || !params.serverName) {
         // Form-mode elicitation needs a dynamic schema editor that the
         // settings UI does not provide. Decline it explicitly so the MCP
@@ -430,8 +452,8 @@ export function startCodexSession({
     try {
       await manager.ready();
       const result = resume
-        ? await manager.request('thread/resume', { threadId: resume, cwd, model: currentModel || undefined })
-        : await manager.request('thread/start', { cwd, model: currentModel || undefined });
+        ? await manager.request('thread/resume', { threadId: resume, cwd, model: currentModel || undefined, ...cockpitMcpThreadConfig(cockpitMcp) })
+        : await manager.request('thread/start', { cwd, model: currentModel || undefined, ...cockpitMcpThreadConfig(cockpitMcp) });
       threadId = result?.thread?.id || threadId;
       if (!threadId) throw new Error('Codex app-server did not return a thread id');
       manager.retainThread(threadId);
@@ -579,7 +601,9 @@ export function startCodexSession({
     closed = true;
     extensions.dispose();
     for (const pending of pendingApprovals.values()) {
-      const result = pending.kind === 'permissions'
+      const result = pending.kind === 'mcpToolCall'
+        ? { action: 'cancel' }
+        : pending.kind === 'permissions'
         ? { permissions: [], scope: 'turn' }
         : pending.kind === 'userInput'
           ? { answers: {} }
@@ -616,12 +640,41 @@ export function startCodexSession({
     onStateChange('closed');
   }
 
+  // Codex asks before running an MCP tool (including the cockpit's own
+  // ask_session) as a form-mode elicitation tagged codex_approval_kind. Modes
+  // that auto-approve or auto-deny tools answer it the same way they answer
+  // permission requests; otherwise it becomes an ordinary Allow/Deny prompt.
+  function mcpToolCallApproval(params, requestId) {
+    if (currentMode === 'bypassPermissions' || currentMode === 'dontAsk' || currentMode === 'auto') {
+      return { handled: true, result: { action: 'accept' } };
+    }
+    if (currentMode === 'plan') return { handled: true, result: { action: 'decline' } };
+    const tool = /tool "([^"]+)"/.exec(params.message || '')?.[1] || 'tool';
+    const toolName = `mcp__${params.serverName}__${tool}`;
+    return new Promise((resolve) => {
+      const id = String(requestId);
+      pendingApprovals.set(id, { resolve, kind: 'mcpToolCall', toolName });
+      onApprovalRequest?.({
+        requestId: id,
+        toolName,
+        displayName: `${params.serverName}: ${tool}`,
+        input: params._meta.tool_params || {},
+        title: params.message || null,
+      });
+    });
+  }
+
   function resolveApproval(requestId, decision) {
     const pending = pendingApprovals.get(String(requestId));
     if (!pending) return false;
     pendingApprovals.delete(String(requestId));
     const allow = decision?.behavior === 'allow';
-    const result = pending.kind === 'permissions'
+    const result = pending.kind === 'mcpToolCall'
+      ? {
+          action: allow ? 'accept' : 'decline',
+          ...(allow && decision?.alwaysAllow ? { _meta: { persist: 'session' } } : {}),
+        }
+      : pending.kind === 'permissions'
       ? {
           permissions: allow ? pending.permissions : [],
           scope: allow && decision?.alwaysAllow ? 'session' : 'turn',

@@ -127,7 +127,7 @@ export function registerSessionRoutes(router) {
     }
     let row;
     try {
-      row = registry.createSession({ cwd, resume: body.resume, name, model, provider: provider.id, subscription: account?.id, effort, history });
+      row = registry.createSession({ cwd, resume: body.resume, name, model, provider: provider.id, subscription: account?.id, effort, history, hideBuiltinPeerTools: body.hideBuiltinPeerTools !== false });
     } catch (err) {
       if (err.code === 'ERR_NAME_TAKEN') return respondJson(res, 409, { error: err.message });
       if (err.code === 'ERR_INVALID_SUBSCRIPTION') return respondJson(res, 400, { error: err.message });

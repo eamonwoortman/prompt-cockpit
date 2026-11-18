@@ -666,3 +666,71 @@ test('a passive session ignores another session\'s tool items on the shared thre
   first.handle.close();
   second.handle.close();
 });
+
+const mcpToolApproval = (extra = {}) => ({
+  threadId: 'thread-new', turnId: 'turn-1', serverName: 'cockpit', mode: 'form',
+  message: 'Allow the cockpit MCP server to run tool "ask_session"?',
+  requestedSchema: { type: 'object', properties: {} },
+  _meta: { codex_approval_kind: 'mcp_tool_call', persist: ['session', 'always'], tool_params: { session: 'Oracle', prompt: 'hi' } },
+  ...extra,
+});
+
+test('Codex MCP tool-call approval surfaces as an Allow/Deny prompt and answers accept or decline', async () => {
+  const manager = createManager();
+  const approvals = [];
+  const { handle } = startOptions(manager, { onApprovalRequest: (request) => approvals.push(request) });
+  await waitFor(() => manager.calls.length > 0, 'thread start');
+
+  const allowed = manager.requestFromServer('mcpServer/elicitation/request', mcpToolApproval(), 71);
+  await waitFor(() => approvals.length === 1, 'mcp approval');
+  assert.equal(approvals[0].toolName, 'mcp__cockpit__ask_session');
+  assert.deepEqual(approvals[0].input, { session: 'Oracle', prompt: 'hi' });
+  assert.equal(handle.resolveApproval(approvals[0].requestId, { behavior: 'allow' }), true);
+  assert.deepEqual(await allowed, { handled: true, result: { action: 'accept' } });
+
+  const denied = manager.requestFromServer('mcpServer/elicitation/request', mcpToolApproval(), 72);
+  await waitFor(() => approvals.length === 2, 'second mcp approval');
+  handle.resolveApproval(approvals[1].requestId, { behavior: 'deny' });
+  assert.deepEqual(await denied, { handled: true, result: { action: 'decline' } });
+
+  const always = manager.requestFromServer('mcpServer/elicitation/request', mcpToolApproval(), 73);
+  await waitFor(() => approvals.length === 3, 'third mcp approval');
+  handle.resolveApproval(approvals[2].requestId, { behavior: 'allow', alwaysAllow: true });
+  assert.deepEqual(await always, { handled: true, result: { action: 'accept', _meta: { persist: 'session' } } });
+
+  const pending = manager.requestFromServer('mcpServer/elicitation/request', mcpToolApproval(), 74);
+  await waitFor(() => approvals.length === 4, 'fourth mcp approval');
+  handle.close();
+  assert.deepEqual(await pending, { handled: true, result: { action: 'cancel' } }, 'closing the session must not leave Codex waiting');
+});
+
+test('Codex MCP tool-call approval is decided by permission mode without prompting', async () => {
+  for (const [permissionMode, action] of [['bypassPermissions', 'accept'], ['auto', 'accept'], ['plan', 'decline']]) {
+    const manager = createManager();
+    const approvals = [];
+    const { handle } = startOptions(manager, { permissionMode, onApprovalRequest: (request) => approvals.push(request) });
+    await waitFor(() => manager.calls.length > 0, 'thread start');
+    const response = await manager.requestFromServer('mcpServer/elicitation/request', mcpToolApproval(), 75);
+    assert.deepEqual(response, { handled: true, result: { action } }, permissionMode);
+    assert.equal(approvals.length, 0, `${permissionMode} must not prompt`);
+    handle.close();
+  }
+});
+
+test('Codex thread/start and thread/resume carry the cockpit MCP server config only when an endpoint is given', async () => {
+  const cockpitMcp = { url: 'http://127.0.0.1:4317/mcp/abc', token: 'tok' };
+  for (const resume of [undefined, 'thread-existing']) {
+    const manager = createManager();
+    const { handle } = startOptions(manager, { resume, cockpitMcp });
+    await waitFor(() => manager.calls.length > 0, 'thread start');
+    const params = manager.calls[0][1];
+    assert.equal(params.config.mcp_servers.cockpit.url, cockpitMcp.url);
+    assert.equal(params.config.mcp_servers.cockpit.http_headers.Authorization, 'Bearer tok');
+    handle.close();
+  }
+  const plain = createManager();
+  const { handle } = startOptions(plain);
+  await waitFor(() => plain.calls.length > 0, 'thread start');
+  assert.equal('config' in plain.calls[0][1], false);
+  handle.close();
+});

@@ -71,6 +71,7 @@ export async function chainSession(row, target, deps = {}) {
     provider: targetId,
     subscription: subscription || undefined,
     permissionMode: mode,
+    hideBuiltinPeerTools: row.hideBuiltinPeerTools,
     // The temp folder holding the transcript, readable without a prompt.
     additionalDirectories: readDir ? [readDir] : undefined,
     // Every account used so far, so no hop can ever return to one.

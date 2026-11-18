@@ -15,6 +15,7 @@ import { accountUsageCache } from './account-usage-cache.js';
 import { nextTargets, ownTarget, normalizeChainOptions, looksLikeRateLimit, isRateLimitFailure } from './chain-policy.js';
 import { appendChainLog } from './chain-log.js';
 import * as presence from './presence.js';
+import { getCockpitBaseUrl } from './cockpit-endpoint.js';
 const sessions = new Map();
 
 // Cross-session delegation (handshake trust + `/ask`) lives in delegation.js,
@@ -29,7 +30,7 @@ export const setSessionHandshake = delegation.setSessionHandshake;
 export const isSessionTrusted = delegation.isSessionTrusted;
 export const delegateTask = delegation.delegateTask;
 
-export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, rateLimitAction, chainList, chainOptions, chainedFrom, additionalDirectories, startSessionImpl }) {
+export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, rateLimitAction, chainList, chainOptions, chainedFrom, additionalDirectories, hideBuiltinPeerTools, startSessionImpl }) {
   // Authoritative uniqueness check for delegation names - this function has
   // no `await` before it and none until sessions.set() below, closing the
   // TOCTOU window server.js's own pre-check has (that check runs after
@@ -75,6 +76,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // the CURRENT canonical value at creation, so a locally-spawned row is
     // trusted for delegation from the moment it exists.
     handshakeSecret: delegation.getHandshakeSecret(),
+    hideBuiltinPeerTools: Boolean(hideBuiltinPeerTools), // carried by reset/fork/chain so a new row keeps the choice
     // `enableFileCheckpointing` can't be turned on retroactively, so it
     // only covers this session's history if the cockpit started it fresh.
     // Any resumed session has no snapshots for earlier turns, so file
@@ -187,6 +189,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
   sessions.set(id, row);
 
   row.handle = startSessionImpl({ additionalDirectories,
+    hideBuiltinPeerTools: row.hideBuiltinPeerTools,
     cwd,
     subscription: row.subscription,
     resume,
@@ -200,6 +203,10 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // transcript) targets the wrong message. `history` here is already the
     // full fetched transcript (server.js), not the display-budget tail.
     turnIndexOffset: history ? countRealUserTurns(history) : 0,
+    // Cross-session delegation for the session's own model: Claude takes
+    // `peers` in-process, Codex connects to the cockpit's HTTP MCP endpoint.
+    peers: peersFor(id),
+    cockpitMcp: getCockpitBaseUrl() ? { url: `${getCockpitBaseUrl()}/mcp/${id}`, token: row.token } : undefined,
     onMessage: (msg) => handleMessage(id, msg),
     onStateChange: (state) => setState(id, state),
     onError: (err) => handleError(id, err),
@@ -252,6 +259,7 @@ export function resetSession(id, { startSessionImpl } = {}) {
     chainOptions: row.chainOptions,
     chainedFrom: row.chainedFrom,
     permissionMode: row.mode,
+    hideBuiltinPeerTools: row.hideBuiltinPeerTools,
     startSessionImpl,
   });
 }
@@ -273,6 +281,11 @@ function canonCwd(cwd) {
     resolved = cwd;
   }
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+// What a session's own model may do across sessions (cockpit-tools.js).
+export function peersFor(id) {
+  return { listPeers: () => delegation.listPeers(id), ask: (targetName, text) => delegation.askFromTool(id, targetName, text) };
 }
 
 export function findByName(cwd, name) {
