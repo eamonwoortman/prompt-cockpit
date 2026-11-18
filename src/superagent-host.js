@@ -13,6 +13,7 @@ import { createOwnerLock } from './superagent/owner-lock.js';
 import { createSuperagentConfig, defaultSuperagentRoot } from './superagent/config.js';
 import { createSuperagentStore } from './superagent/store.js';
 import { createSuperagent } from './superagent/index.js';
+import { workflowsDir } from './superagent/workflows.js';
 import { createRouter, readUserApiKeyHelper } from './superagent/router.js';
 import { superagentNotifications } from './superagent/notifications.js';
 
@@ -45,7 +46,12 @@ export function createSuperagentHost({
   };
   configFactory ??= () => createSuperagentConfig({ filePath: path.join(root, 'config.json') });
   storeFactory ??= () => createSuperagentStore({ rootDir: path.join(root, 'jobs'), logImpl });
-  superagentFactory ??= (deps) => createSuperagent({ ...deps, worktreesRoot: path.join(root, 'worktrees'), logImpl });
+  superagentFactory ??= (deps) => createSuperagent({
+    ...deps,
+    worktreesRoot: path.join(root, 'worktrees'),
+    workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
+    logImpl,
+  });
   routerFactory ??= async () => {
     if (await readUserApiKeyHelper()) return createRouter({ cwd: path.join(root, 'router') });
     logImpl('superagent router off: no apiKeyHelper in ~/.claude/settings.json');

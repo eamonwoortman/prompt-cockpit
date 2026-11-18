@@ -524,3 +524,32 @@ test('wireSuperagent logs an init failure rather than throwing', async () => {
   await wireSuperagent({ shutdown, host, logImpl: (m) => logged.push(String(m)) });
   assert.match(logged.join('\n'), /init blew up/);
 });
+
+test('the default supervisor reads global workflows from the host root', async () => {
+  const realRegistry = await import('../src/session-registry.js');
+  const root = await tempDir('sa-host-root-');
+  const feature = JSON.parse(await fs.readFile(new URL('../workflows/feature.json', import.meta.url), 'utf8'));
+  const file = path.join(root, 'workflows', 'host-global.json');
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify({ ...feature, id: 'host-global', name: 'Host global' }));
+  const calls = [];
+  const host = createSuperagentHost({
+    registry: realRegistry,
+    port: 4317,
+    root,
+    lockFactory: () => fakeLock(calls),
+    routerFactory: async () => null,
+    logImpl: () => {},
+  });
+  try {
+    await host.init();
+    assert.equal(host.status().state, 'ready', host.status().error);
+    const { workflows } = await host.admit((sa) => sa.listWorkflows(null));
+    const entry = workflows.find((w) => w.id === 'host-global');
+    assert.deepEqual([entry?.source, entry?.file, entry?.valid], ['global', file, true]);
+  } finally {
+    await host.stop();
+    await host.afterClose();
+    realRegistry._reset();
+  }
+});
