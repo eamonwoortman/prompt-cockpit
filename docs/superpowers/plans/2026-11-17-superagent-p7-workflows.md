@@ -289,3 +289,28 @@ Folds in the Codex review of revision 1 (`.superpowers/sdd/codex-p7-plan-review.
 5. **At most one test phase; adjacency only with a per-task phase** (Medium 5). Task 1.
 6. **Default selection by scope** (Medium 6): project workflow > project pipeline > defaults workflow > defaults pipeline > feature. Tasks 1, 3.
 7. **A real pre-Plan-7 replay test** and all three hard-coded `test-routed` references replaced (Medium 7). Task 2.
+
+## Execution amendments
+
+Rulings made while executing, from the SDD ledger; where one differs from the text above, the ruling wins.
+
+- Base is `5bb42eb`, not `f433d19`: the plan commit sits on top of it and is docs only.
+- Task 1 implements and tests both reserved report namespaces (`reviews/` and `tasks/`), since Global Constraints list both and the test list named one.
+- The role-name pattern lives in `workflows.js` and `prompts.js` imports it, to avoid an import cycle; `resolvePromptPath` stays the only lookup implementation.
+- Task 2 runs all six listed test files (the plan's "five" was a miscount).
+- Task 7 may change `sequencer.js` for the `consumes()` exclusion (the plan required the behaviour).
+- The route `inPlace` is an array of folder paths and the workflows response carries `defaultNote`, so the form can show why a default fell back.
+- A workflow `prompt` naming a missing file makes the entry invalid rather than falling back to the built-in, so a broken override stays visible; a declared prompt is always recorded in `job-created`, so a vanished one gives `prompt-missing`.
+- The runner gives the phase kind to `denyMessageFor` only when the attempt's role is the phase's own role, so a stand-in inside a brainstorm keeps the unattended message.
+- `artifactPaths` throws on a job without `artifacts` instead of returning undefined; legacy jobs are normalised in `deriveJob`.
+- A non-fixture `createJob` with invalid config models refuses with `ERR_INVALID_WORKFLOW` (the models feed the workflow's validation).
+- Reviewer-found prompt gap raised to Important: `fix-reviewer.md` no longer allows a temporary git worktree, since troubleshooting targets in-place folders of huge repos.
+- Until Task 6 an admitted in-place job still provisioned as a worktree (transient on the branch).
+- `toplevel` is recorded in `job-created` for every repo, not only in-place ones; the start-up rebuild keys on it and resolves the top level through git for pre-Plan-7 jobs. In-place-ness keys on `inPlace`.
+- The Windows path-length guard measures from the folder as given, which is only ever conservative.
+- A worktree job whose origin is on a `superagent/*` branch is refused with `ERR_FOLDER_ON_JOB_BRANCH` too, so a new job never starts from another job's branch (the spec table listed only the in-place case).
+- The tasks.json read is gated like a launch: a folder switched away pauses as `folder-changed` instead of ending `tasks-invalid`.
+- Gated attempts are excluded in `attemptsFor` (caps, repeated-error, back-off, attempt numbers), not only in `consumes()`, and `artifactKeys` ignores them too.
+- A git read failure or missing folder at the gate pauses (`could not check this folder: ...`) rather than failing the launch.
+- Only the first brief-consuming `author` phase carries the brief-heading check, matching the spec.
+- Engine roles (`verifier`, `stand-in`, `router`) are not settable from a workflow file; they stay in config.
