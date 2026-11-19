@@ -15,7 +15,7 @@ import { artifactWriterEnded, jobSummary, jobDetail } from '../superagent/view-m
 import { readArtifact, snapshotDirFor } from '../superagent/artifacts.js';
 import { defaultSuperagentRoot } from '../superagent/config.js';
 import { gatedOut } from '../superagent/sequencer.js';
-import { buildSnapshot, grantedDirectories, renderRetrospectivePrompt, resolvePlugins } from '../superagent/retrospective.js';
+import { buildSnapshot, foldersWithin, grantedDirectories, renderRetrospectivePrompt, resolvePlugins } from '../superagent/retrospective.js';
 
 const TITLE_WORDS = 8;
 // The folder holding cockpit's package.json.
@@ -141,6 +141,7 @@ function retrospectiveRoute({ host, registry, readArtifactImpl, options }) {
     path.dirname(superagentRoot),
     path.join(os.homedir(), '.prompt-cockpit'),
   ];
+  const worktreesRoot = path.join(superagentRoot, 'worktrees');
 
   async function prepare(supervisor, jobId, selector) {
     const job = supervisor.getJob(jobId);
@@ -159,10 +160,15 @@ function retrospectiveRoute({ host, registry, readArtifactImpl, options }) {
 
   async function createSession({ job, phase, task, attempts, spend, snapshot }) {
     const folders = (job.repos ?? []).map((r) => r.worktree).filter(Boolean);
-    const plugins = await resolvePluginsImpl(snapshot.plugins, { pluginsRoot: path.join(claudeHome, 'plugins'), searchRoots: cloneSearchRoots([cockpitRoot, ...folders]) });
+    const plugins = await resolvePluginsImpl(snapshot.plugins, {
+      pluginsRoot: path.join(claudeHome, 'plugins'),
+      searchRoots: cloneSearchRoots([cockpitRoot, ...folders]),
+      exclude: [...forbiddenRoots, worktreesRoot],
+    });
+    // Only a job's own worktree is exempt from the forbidden roots (Ruling 19).
     const { granted, dropped } = await grantedDirectories(
       [snapshot.dir, ...folders, ...plugins.flatMap((p) => p.clones)],
-      { forbiddenRoots, allow: [snapshot.dir, ...folders] },
+      { forbiddenRoots, allow: [snapshot.dir, ...(await foldersWithin(folders, worktreesRoot))] },
     );
     const template = await fs.readFile(path.join(cockpitRoot, 'prompts', 'superagent', 'retrospective.md'), 'utf8');
     const prompt = renderRetrospectivePrompt({ template, job, attempts, snapshot, plugins, cockpitRoot, spend, cards: snapshot.cards, dropped });

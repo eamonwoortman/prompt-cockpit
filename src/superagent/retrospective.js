@@ -16,11 +16,15 @@ export const EVIDENCE_LINE = 'The transcripts, job cards, results, artifacts and
 export const GIT_TIMEOUT_MS = 10_000;
 export const DROPPED_OUTSIDE = 'outside the allowed folders';
 export const DROPPED_MISSING = 'does not exist';
+export const DROPPED_CONTAINS = 'contains a protected folder';
+export const RESOLVE_DEADLINE_MS = 5_000;
+export const CLONE_SEARCH_MAX_DIRS = 2_000;
 const CLONE_SEARCH_DEPTH = 3;
 const CARD_MARKER = '# Superagent job card';
 const RECORD_FILES = ['events.jsonl', 'state.json'];
 const ATTEMPT_FILES = ['result.json', 'handoff.md'];
 const NO_CLONE = 'dev clone not found: ask the operator where it is (or whether to clone it) before editing';
+const CUT_SHORT = 'The search for dev clones was cut short (it hit its time or folder limit), so a plugin listed without a clone may still have one.';
 
 const fold = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
 
@@ -105,9 +109,11 @@ function marketplaceUrl(entry) {
 // Git repos up to CLONE_SEARCH_DEPTH below each root. Directory links and
 // junctions are never followed (readdir reports them as links, not
 // directories); a directory reached again with more depth left is walked again.
-async function findRepos(roots, { fsImpl, exclude }) {
+// Stops, with cutShort, at the deadline or after maxDirs directory reads.
+async function findRepos(roots, { fsImpl, exclude, outOfTime, maxDirs }) {
   const repos = new Map();
   const budget = new Map();
+  let reads = 0;
   for (const root of roots) {
     const real = await realpathOrNull(root, fsImpl).catch(() => null);
     if (!real) continue;
@@ -118,6 +124,8 @@ async function findRepos(roots, { fsImpl, exclude }) {
       if ((budget.get(key) ?? -1) >= left) continue;
       budget.set(key, left);
       if (exclude.some((r) => within(r, dir))) continue;
+      if (outOfTime() || reads >= maxDirs) return { repos: [...repos.values()], cutShort: true };
+      reads += 1;
       let entries;
       try {
         entries = await fsImpl.readdir(dir, { withFileTypes: true });
@@ -131,19 +139,23 @@ async function findRepos(roots, { fsImpl, exclude }) {
       }
     }
   }
-  return [...repos.values()];
+  return { repos: [...repos.values()], cutShort: false };
 }
 
-async function originOf(git, dir) {
+async function originOf(git, dir, timeoutMs) {
   try {
-    const res = await git(['remote', 'get-url', 'origin'], { cwd: dir, signal: AbortSignal.timeout(GIT_TIMEOUT_MS) });
+    const res = await git(['remote', 'get-url', 'origin'], { cwd: dir, signal: AbortSignal.timeout(timeoutMs) });
     return res?.code === 0 ? normaliseRemote(res.stdout) : null;
   } catch {
     return null;
   }
 }
 
-export async function resolvePlugins(names, { pluginsRoot, searchRoots = [], git = defaultGit, fsImpl = fs }) {
+// One deadline covers the whole resolution, walk and git calls alike; when it
+// or the directory cap cuts the search short, every entry says so.
+export async function resolvePlugins(names, { pluginsRoot, searchRoots = [], exclude = [], git = defaultGit, fsImpl = fs, deadlineMs = RESOLVE_DEADLINE_MS, maxDirs = CLONE_SEARCH_MAX_DIRS, now = Date.now }) {
+  const deadline = now() + deadlineMs;
+  const outOfTime = () => now() >= deadline;
   const installed = (await readJsonOr(fsImpl, path.join(pluginsRoot, 'installed_plugins.json'), {}))?.plugins ?? {};
   const known = (await readJsonOr(fsImpl, path.join(pluginsRoot, 'known_marketplaces.json'), {})) ?? {};
   const entries = [];
@@ -160,16 +172,37 @@ export async function resolvePlugins(names, { pluginsRoot, searchRoots = [], git
   const wanted = entries.map((e) => normaliseRemote(e.sourceUrl));
   if (!wanted.some(Boolean)) return entries;
 
-  const readOnly = ['cache', 'marketplaces'].map((name) => path.join(pluginsRoot, name));
-  const exclude = await Promise.all(readOnly.map(async (p) => (await realpathOrNull(p, fsImpl).catch(() => null)) ?? path.resolve(p)));
-  for (const dir of await findRepos(searchRoots, { fsImpl, exclude })) {
-    const origin = await originOf(git, dir);
-    if (!origin) continue;
+  const skipped = [...['cache', 'marketplaces'].map((name) => path.join(pluginsRoot, name)), ...exclude];
+  const excluded = await Promise.all(skipped.map(async (p) => (await realpathOrNull(p, fsImpl).catch(() => null)) ?? path.resolve(p)));
+  const walk = await findRepos(searchRoots, { fsImpl, exclude: excluded, outOfTime, maxDirs });
+  let cutShort = walk.cutShort;
+  for (const dir of walk.repos) {
+    if (outOfTime()) {
+      cutShort = true;
+      break;
+    }
+    const origin = await originOf(git, dir, Math.max(1, Math.min(GIT_TIMEOUT_MS, deadline - now())));
+    if (!origin) {
+      if (outOfTime()) cutShort = true;
+      continue;
+    }
     entries.forEach((e, i) => {
       if (wanted[i] === origin) e.clones.push(dir);
     });
   }
+  if (cutShort) for (const e of entries) e.searchCutShort = true;
   return entries;
+}
+
+// The folders that resolve inside root (root itself included).
+export async function foldersWithin(paths, root) {
+  const base = await canonicalRoot(root);
+  const inside = [];
+  for (const p of paths) {
+    const real = await realpathOrNull(p);
+    if (real && within(base, real)) inside.push(p);
+  }
+  return inside;
 }
 
 function messageText(message) {
@@ -340,6 +373,7 @@ export async function grantedDirectories(paths, { forbiddenRoots = [], allow = [
     seen.add(key);
     if (real === null) dropped.push({ path: p, reason: DROPPED_MISSING });
     else if (forbidden.some((r) => within(r, real)) && !allowed.some((r) => within(r, real))) dropped.push({ path: p, reason: DROPPED_OUTSIDE });
+    else if (forbidden.some((r) => within(real, r))) dropped.push({ path: p, reason: DROPPED_CONTAINS });
     else granted.push(real);
   }
   return { granted, dropped };
@@ -400,6 +434,7 @@ function pluginSection(plugins) {
     '',
   ];
   if (plugins.length === 0) lines.push('The selected attempts used no plugin skills or agents.');
+  if (plugins.some((p) => p.searchCutShort)) lines.push(CUT_SHORT, '');
   for (const p of plugins) {
     lines.push(`- ${inline(p.plugin)}${p.marketplace ? ` (marketplace ${inline(p.marketplace)})` : ''}`);
     lines.push(`  - installed (read-only): ${p.installPath ? inline(p.installPath) : 'not installed'}`);

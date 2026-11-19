@@ -548,7 +548,7 @@ function fakeRegistry({ taken = [], sendError = null } = {}) {
 // A worktree job (its primary worktree lives under the superagent root, Ruling
 // 13) with a second, in-place folder, one plugin with a dev clone and a copy
 // under plugins/cache, and transcripts for every attempt except a3.
-async function retroWorld(t, { registry = fakeRegistry(), defaults = null, seedDefaults, refusal = null } = {}) {
+async function retroWorld(t, { registry = fakeRegistry(), defaults = null, seedDefaults, refusal = null, extraFolders = () => [] } = {}) {
   const base = await fs.realpath(await tempDir('sa-retro-route-'));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   const home = path.join(base, 'home');
@@ -561,7 +561,8 @@ async function retroWorld(t, { registry = fakeRegistry(), defaults = null, seedD
   const inPlace = path.join(base, 'src', 'lib');
   const clone = path.join(base, 'clones', 'tool-plugin');
   const cached = path.join(claudeHome, 'plugins', 'cache', 'market', 'tool-plugin');
-  for (const dir of [worktree, inPlace, clone, cached]) await fs.mkdir(dir, { recursive: true });
+  const extra = extraFolders({ base, home, superagentRoot, claudeHome });
+  for (const dir of [worktree, inPlace, clone, cached, ...extra]) await fs.mkdir(dir, { recursive: true });
   const jobDir = path.join(superagentRoot, 'jobs', 'job-1');
   await fs.mkdir(jobDir, { recursive: true });
   await fs.writeFile(path.join(jobDir, 'events.jsonl'), '{}\n');
@@ -588,7 +589,11 @@ async function retroWorld(t, { registry = fakeRegistry(), defaults = null, seedD
     limits: defaultConfig().limits,
     attempts,
     tasks: [{ id: 't1', title: 'One' }, { id: 't2', title: 'Two' }],
-    repos: [{ id: 'app', origin: path.join(base, 'origin'), worktree }, { id: 'lib', origin: inPlace, worktree: inPlace, inPlace: true }],
+    repos: [
+      { id: 'app', origin: path.join(base, 'origin'), worktree },
+      { id: 'lib', origin: inPlace, worktree: inPlace, inPlace: true },
+      ...extra.map((dir, i) => ({ id: `extra-${i}`, origin: dir, worktree: dir, inPlace: true })),
+    ],
   });
   const found = { a1: await transcript('a1'), a2: await transcript('a2'), a4: await transcript('a4') };
   const transcriptCalls = [];
@@ -646,6 +651,10 @@ test('retrospective creates one session in the cockpit root with additionalDirec
     assert.ok(roots.includes(path.dirname(path.dirname(dir))), `grandparent of ${dir}`);
   }
   assert.equal(w.resolveCalls[0].opts.pluginsRoot, path.join(w.base, 'home', '.claude', 'plugins'));
+  const { exclude } = w.resolveCalls[0].opts;
+  for (const dir of [path.join(w.superagentRoot, 'worktrees'), path.join(w.base, 'home', '.claude', 'projects'), path.join(w.base, 'home', '.claude', 'plugins', 'cache')]) {
+    assert.ok(exclude.includes(dir), `the clone search skips ${dir}`);
+  }
 
   assert.equal(w.registry.sent.length, 1);
   const { id, text } = w.registry.sent[0];
@@ -654,6 +663,25 @@ test('retrospective creates one session in the cockpit root with additionalDirec
   for (const needle of [snapshotDir, w.cockpitRoot, w.clone, '"attemptId": "a1"']) assert.ok(text.includes(needle), needle);
   assert.ok(text.includes(`${w.cached}\`: outside the allowed folders`), 'the cached copy is reported, not granted');
   assert.deepEqual(await fs.readdir(path.join(snapshotDir, 'transcripts')), ['a1']);
+});
+
+test("retrospective grants only worktree job folders inside cockpit's home, and drops an in-place folder inside a protected root or containing one", async (t) => {
+  let inside;
+  let containing;
+  const w = await retroWorld(t, {
+    extraFolders: ({ base, superagentRoot }) => {
+      inside = path.join(path.dirname(superagentRoot), 'scratch', 'lib');
+      containing = path.join(base, 'home');
+      return [inside, containing];
+    },
+  });
+  const res = await w.post({ attemptId: 'a1' });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const snapshotDir = path.join(w.superagentRoot, 'retros', 'retro-1');
+  assert.deepEqual(w.registry.created[0].sdkOptions, { additionalDirectories: [snapshotDir, w.worktree, w.inPlace, w.clone] });
+  const { text } = w.registry.sent[0];
+  assert.ok(text.includes(`${inside}\`: outside the allowed folders`), 'the in-place folder inside ~/.prompt-cockpit is reported');
+  assert.ok(text.includes(`${containing}\`: contains a protected folder`), 'the folder containing protected roots is reported');
 });
 
 test('retrospective passes no model', async (t) => {

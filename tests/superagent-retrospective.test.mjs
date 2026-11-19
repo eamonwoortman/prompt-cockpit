@@ -171,6 +171,53 @@ test('resolvePlugins does not follow directory links while walking', async (t) =
   assert.deepEqual(entry.clones, []);
 });
 
+test('resolvePlugins stops at its deadline and marks the entries cut short', async (t) => {
+  const { base, pluginsRoot, git, calls, repo } = await pluginWorld(t);
+  const ws = path.join(base, 'ws');
+  for (const name of ['a', 'b', 'c']) await repo(path.join(ws, name), REMOTE_HTTPS);
+  let clock = 0;
+  const slowGit = async (...args) => {
+    clock += 1000;
+    return git(...args);
+  };
+  const [entry] = await resolvePlugins(['fall-guys-dev'], { pluginsRoot, searchRoots: [ws], git: slowGit, now: () => clock, deadlineMs: 1500 });
+  assert.equal(calls.length, 2, 'no git call starts after the deadline');
+  assert.equal(entry.clones.length, 2);
+  assert.equal(entry.searchCutShort, true);
+
+  clock = 0;
+  const [none] = await resolvePlugins(['fall-guys-dev'], { pluginsRoot, searchRoots: [ws], git: slowGit, now: () => clock, deadlineMs: 0 });
+  assert.deepEqual(none.clones, []);
+  assert.equal(none.searchCutShort, true);
+});
+
+test('resolvePlugins stops walking at its directory cap and marks the entries cut short', async (t) => {
+  const { base, pluginsRoot, git, calls, repo } = await pluginWorld(t);
+  const ws = path.join(base, 'ws');
+  await repo(path.join(ws, 'x', 'y', 'fall-guys-dev'), REMOTE_HTTPS);
+  const [entry] = await resolvePlugins(['fall-guys-dev'], { pluginsRoot, searchRoots: [ws], git, maxDirs: 2 });
+  assert.deepEqual(entry.clones, []);
+  assert.equal(entry.searchCutShort, true);
+  assert.equal(calls.length, 0);
+
+  const [full] = await resolvePlugins(['fall-guys-dev'], { pluginsRoot, searchRoots: [ws], git, maxDirs: 10 });
+  assert.equal(full.clones.length, 1);
+  assert.ok(!('searchCutShort' in full));
+});
+
+test('resolvePlugins never walks an excluded root such as the superagent worktrees root', async (t) => {
+  const { base, pluginsRoot, git, calls, repo } = await pluginWorld(t);
+  const ws = path.join(base, 'ws');
+  const worktrees = path.join(ws, 'superagent', 'worktrees');
+  await repo(path.join(worktrees, 'job-1', 'app'), REMOTE_HTTPS);
+  const clone = await repo(path.join(ws, 'dev', 'fall-guys-dev'), REMOTE_HTTPS);
+  const [entry] = await resolvePlugins(['fall-guys-dev'], { pluginsRoot, searchRoots: [ws, path.join(worktrees, 'job-1')], git, exclude: [worktrees] });
+  assert.deepEqual(entry.clones, [clone]);
+  assert.ok(!('searchCutShort' in entry));
+  const real = await fs.realpath(worktrees);
+  assert.ok(calls.every((c) => !c.cwd.toLowerCase().startsWith(real.toLowerCase())), 'no git call inside the worktrees root');
+});
+
 const stamp = (events) => events.map((e, i) => ({ seq: i + 1, at: 1000 + i, ...e }));
 const card = (jobId, attemptId) => `# Superagent job card\n\n\`\`\`json\n${JSON.stringify({ jobId, attemptId, phaseId: 'spec' }, null, 2)}\n\`\`\`\n`;
 const jsonl = (rows) => `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`;
@@ -356,6 +403,17 @@ test('grantedDirectories drops a forbidden root itself, keeps a similar-prefix s
   assert.deepEqual(elsewhere, { granted: [], dropped: [{ path: jobs, reason: 'outside the allowed folders' }] });
 });
 
+test('grantedDirectories drops a folder that contains a forbidden root', async (t) => {
+  const { base, home, repo, opts } = await grantWorld(t);
+  const result = await grantedDirectories([home, path.join(home, '.claude'), base, repo], opts);
+  assert.deepEqual(result.granted, [await fs.realpath(repo)]);
+  assert.deepEqual(result.dropped, [
+    { path: home, reason: 'contains a protected folder' },
+    { path: path.join(home, '.claude'), reason: 'contains a protected folder' },
+    { path: base, reason: 'contains a protected folder' },
+  ]);
+});
+
 test('grantedDirectories drops a missing path with its reason', async (t) => {
   const { base, repo, opts } = await grantWorld(t);
   const missing = path.join(base, 'work', 'gone');
@@ -439,6 +497,14 @@ test('renderRetrospectivePrompt fences worker text so it cannot close the fence 
   const close = text.indexOf('\n````', at);
   assert.ok(close > at, 'and closes after it');
   assert.ok(!text.slice(open + 5, close).includes('\n````'), 'nothing inside closes it');
+});
+
+test('renderRetrospectivePrompt says the dev-clone search was cut short and keeps the ask-the-operator line', () => {
+  const plugins = [{ plugin: 'tools-plugin', marketplace: 'mkt', installPath: null, sourceUrl: 'https://example.com/o/mkt.git', clones: [], searchCutShort: true }];
+  const text = renderRetrospectivePrompt(renderArgs({ plugins }));
+  assert.match(text, /search for dev clones was cut short/);
+  assert.ok(text.includes('dev clone not found: ask the operator where it is (or whether to clone it) before editing'));
+  assert.doesNotMatch(renderRetrospectivePrompt(renderArgs()), /cut short/);
 });
 
 test('renderRetrospectivePrompt accepts plain dropped paths and reports spend as not available', () => {
