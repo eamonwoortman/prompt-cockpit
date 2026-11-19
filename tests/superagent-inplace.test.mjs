@@ -123,8 +123,6 @@ test('each in-place check refuses and leaves the folder unchanged', async () => 
       ['ERR_FOLDER_BUSY_GIT', async (dir) => { await initRepo(dir); gitIn(dir, 'checkout', '-q', '--detach'); }],
       ['ERR_FOLDER_BUSY_GIT', async (dir) => { await initRepo(dir); await conflictingMerge(dir); }],
       ['ERR_FOLDER_ON_JOB_BRANCH', async (dir) => { await initRepo(dir); gitIn(dir, 'switch', '-q', '-c', 'superagent/x'); }],
-      ['ERR_FOLDER_DIRTY', async (dir) => { await initRepo(dir); await fs.writeFile(path.join(dir, 'untracked.txt'), 'mine\n'); }],
-      ['ERR_FOLDER_DIRTY', async (dir) => { await initRepo(dir); await fs.writeFile(path.join(dir, 'README.md'), '# edited\n'); }],
       ['ERR_BRANCH_EXISTS', async (dir) => { await initRepo(dir); gitIn(dir, 'branch', `superagent/${h.nextSlug()}`); }],
     ];
     for (const [i, [code, setup]] of cases.entries()) {
@@ -143,7 +141,7 @@ test('each in-place check refuses and leaves the folder unchanged', async () => 
   } finally { registry._reset(); }
 });
 
-test('checkInPlace ignores ignored files and lists at most 10 dirty paths', async () => {
+test('checkInPlace ignores ignored files and reports pending changes, keeping at most 200 paths', async () => {
   const root = await tempDir('sa-inplace-direct-');
   const repo = path.join(root, 'repo');
   const head = await initRepo(repo);
@@ -152,14 +150,36 @@ test('checkInPlace ignores ignored files and lists at most 10 dirty paths', asyn
   const ok = await checkInPlace({ folder: repo, branch: 'superagent/x-1' });
   assert.equal(ok.head, head);
   assert.equal(normaliseTop(ok.toplevel, 'win32'), normaliseTop(gitIn(repo, 'rev-parse', '--show-toplevel'), 'win32'));
+  assert.deepEqual(ok.pending, { paths: [], total: 0 });
 
-  for (let i = 0; i < 12; i++) await fs.writeFile(path.join(repo, `f${String(i).padStart(2, '0')}.txt`), 'x');
-  await assert.rejects(checkInPlace({ folder: repo, branch: 'superagent/x-1' }), (err) => {
-    assert.equal(err.code, 'ERR_FOLDER_DIRTY');
-    assert.match(err.message, /f09\.txt and 2 more$/);
-    assert.doesNotMatch(err.message, /f10\.txt/);
-    return true;
-  });
+  await fs.writeFile(path.join(repo, 'README.md'), '# edited\n');
+  await fs.writeFile(path.join(repo, 'untracked.txt'), 'mine\n');
+  assert.deepEqual((await checkInPlace({ folder: repo, branch: 'superagent/x-1' })).pending, { paths: ['README.md', 'untracked.txt'], total: 2 });
+
+  await fs.mkdir(path.join(repo, 'many'));
+  for (let i = 0; i < 205; i++) await fs.writeFile(path.join(repo, 'many', `f${String(i).padStart(3, '0')}.txt`), 'x');
+  const { pending } = await checkInPlace({ folder: repo, branch: 'superagent/x-1' });
+  assert.equal(pending.total, 207);
+  assert.equal(pending.paths.length, 200);
+});
+
+test('a folder with pending changes is switched in place and keeps them', async () => {
+  try {
+    const h = await harness();
+    await fs.writeFile(path.join(h.repo, 'README.md'), '# mine, not committed\n');
+    await fs.writeFile(path.join(h.repo, 'notes.txt'), 'untracked\n');
+    const before = gitIn(h.repo, 'status', '--porcelain', '--untracked-files=all');
+    const job = await create(h, { inPlace: [h.repo] });
+    assert.equal(job.state, 'running');
+    assert.equal(gitIn(h.repo, 'symbolic-ref', '--short', 'HEAD'), job.branch);
+    assert.equal(gitIn(h.repo, 'rev-parse', 'HEAD'), h.baseSha);
+    assert.equal(gitIn(h.repo, 'status', '--porcelain', '--untracked-files=all'), before);
+    assert.equal(readFileSync(path.join(h.repo, 'README.md'), 'utf8'), '# mine, not committed\n');
+    const pendingChanges = { paths: ['README.md', 'notes.txt'], total: 2 };
+    assert.deepEqual(h.events(job.jobId)[0].repos[0].pendingChanges, pendingChanges);
+    assert.deepEqual(job.repos[0].pendingChanges, pendingChanges);
+    await h.sa.stop();
+  } finally { registry._reset(); }
 });
 
 test('normaliseTop folds case on win32 only', () => {
@@ -225,10 +245,10 @@ test('a finished in-place job releases its reservation', async () => {
 test('a refused createJob releases its reservation at once', async () => {
   try {
     const h = await harness();
-    const scratch = path.join(h.repo, 'scratch.txt');
-    await fs.writeFile(scratch, 'mine\n');
-    await assert.rejects(create(h, { inPlace: [h.repo] }), { code: 'ERR_FOLDER_DIRTY' });
-    await fs.rm(scratch);
+    const own = gitIn(h.repo, 'symbolic-ref', '--short', 'HEAD');
+    gitIn(h.repo, 'checkout', '-q', '--detach');
+    await assert.rejects(create(h, { inPlace: [h.repo] }), { code: 'ERR_FOLDER_BUSY_GIT' });
+    gitIn(h.repo, 'switch', '-q', own);
     const job = await create(h, { inPlace: [h.repo] });
     assert.equal(job.state, 'running');
     await h.sa.stop();

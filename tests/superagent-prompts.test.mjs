@@ -584,6 +584,19 @@ test('an in-place repo is marked inPlace on the card and the contract forbids tr
   }
 });
 
+test('an in-place repo with pending changes carries them on the card and the contract protects them', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const pendingChanges = { paths: ['README.md', 'notes.txt'], total: 2 };
+  const repos = job.repos.map((r) => ({ ...r, inPlace: true, pendingChanges }));
+  const { system, card } = await buildWorkerPrompt({ role: 'implementer', job: { ...job, repos }, phase, attempt, projectDir: emptyDir });
+  assert.deepEqual(parseCard(card).repos, [{ id: 'primary', worktree: job.repos[0].worktree, branch: job.branch, inPlace: true, pendingChanges }]);
+  const worktreeJob = { ...job, repos: job.repos.map((r) => ({ ...r, pendingChanges })) };
+  assert.equal('pendingChanges' in parseCard((await buildWorkerPrompt({ role: 'implementer', job: worktreeJob, phase, attempt, projectDir: emptyDir })).card).repos[0], false);
+  for (const needle of ['`pendingChanges`', 'by explicit path', '`git add -A`', '`git commit -a`', 'never stage, commit, edit, revert or delete them']) {
+    assert.ok(system.includes(needle), `contract: missing ${needle}`);
+  }
+});
+
 test('no role prompt implies a tree-wide cleanup of the worktree', async () => {
   const files = (await fs.readdir(templatesDir())).filter((f) => f.endsWith('.md'));
   for (const f of files) {

@@ -57,6 +57,7 @@ export function deriveJob(events) {
       inPlace: r.inPlace === true,
       toplevel: r.toplevel ?? null,
       admittedHead: r.admittedHead ?? null,
+      pendingChanges: r.pendingChanges ? structuredClone(r.pendingChanges) : null,
       worktree: null,
       baseSha: null,
       settingsCopy: null,

@@ -875,6 +875,7 @@ export function createSuperagent({
       ...repo,
       toplevel: path.resolve(checked[i].toplevel),
       ...(inPlace && { inPlace: true, admittedHead: checked[i].head }),
+      ...(inPlace && checked[i].pending.total > 0 && { pendingChanges: checked[i].pending }),
     }));
     const createdDate = localDate(now());
     const created = {

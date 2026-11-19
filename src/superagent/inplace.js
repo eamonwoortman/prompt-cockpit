@@ -3,7 +3,8 @@
 // checkInPlace is read-only: every command only reads, and status runs with
 // --no-optional-locks so it never refreshes the user's index. A folder that
 // fails is refused before job-created with nothing switched, created or
-// written in it.
+// written in it. Uncommitted and untracked changes do not fail it: they are
+// returned as `pending` so the job can tell its workers they are the user's.
 //
 // provisionInPlace is the only code that changes the user's checkout: one
 // `git switch -c` at the admitted HEAD, then the job's ledger directory and
@@ -20,7 +21,7 @@ import { BRANCH_PREFIX, defaultGit, repoToplevel } from './worktree.js';
 const JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/;
 
 const BUSY_MARKERS = ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG'];
-const DIRTY_PATHS_SHOWN = 10;
+const PENDING_PATHS_KEPT = 200;
 
 function fail(code, message) {
   return Object.assign(new Error(message), { code });
@@ -81,18 +82,14 @@ export async function checkInPlace({ git = defaultGit, folder, branch }) {
   if (onBranch === null) throw fail('ERR_FOLDER_BUSY_GIT', `superagent: ${folder} has a detached HEAD; switch it to a branch first`);
 
   const status = await git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'], { cwd: folder });
-  const changed = status.stdout.split(/\r?\n/).filter(Boolean).map((line) => line.slice(3));
-  if (status.code !== 0 && changed.length === 0) {
+  if (status.code !== 0) {
     throw fail('ERR_FOLDER_DIRTY', `superagent: could not read the git status of ${folder}: ${status.stderr.trim()}`);
   }
-  if (changed.length > 0) {
-    const more = changed.length > DIRTY_PATHS_SHOWN ? ` and ${changed.length - DIRTY_PATHS_SHOWN} more` : '';
-    throw fail('ERR_FOLDER_DIRTY', `superagent: ${folder} has uncommitted or untracked changes: ${changed.slice(0, DIRTY_PATHS_SHOWN).join(', ')}${more}`);
-  }
+  const changed = status.stdout.split(/\r?\n/).filter(Boolean).map((line) => line.slice(3));
 
   const ref = await git(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: folder });
   if (ref.code === 0) throw fail('ERR_BRANCH_EXISTS', `superagent: branch ${branch} already exists`);
-  return { toplevel, head: head.stdout.trim() };
+  return { toplevel, head: head.stdout.trim(), pending: { paths: changed.slice(0, PENDING_PATHS_KEPT), total: changed.length } };
 }
 
 function ledgerDirRel(jobId) {

@@ -410,7 +410,7 @@ test('a legacy job derives the old artifacts and test flag', () => {
   });
   assert.deepEqual(artifactPaths(job), job.artifacts);
   assert.deepEqual(job.pipeline.filter((p) => p.test === true).map((p) => p.phase), ['test']);
-  assert.deepEqual(job.repos.map(({ inPlace, toplevel, admittedHead }) => ({ inPlace, toplevel, admittedHead })), [{ inPlace: false, toplevel: null, admittedHead: null }]);
+  assert.deepEqual(job.repos.map(({ inPlace, toplevel, admittedHead, pendingChanges }) => ({ inPlace, toplevel, admittedHead, pendingChanges })), [{ inPlace: false, toplevel: null, admittedHead: null, pendingChanges: null }]);
 
   const toLegacyTest = [ev.tasksLoaded([taskCreated('t1')]), ...['spec', 'spec-review', 'plan', 'plan-review', 'implement'].map((phase) => ev.phaseCompleted(phase, 1))];
   assert.equal(legacy(...toLegacyTest).phaseId, 'test');
@@ -429,7 +429,8 @@ test('a workflow job keeps its recorded artifacts and phases', () => {
   const workflow = { id: 'troubleshoot', name: 'Troubleshooting', source: 'built-in', file: '/cockpit/workflows/troubleshoot.json' };
   const artifacts = { diagnosis: 'd.md', tasks: 't.json', testReport: 'r.md' };
   const prompts = { investigator: '/cockpit/workflows/investigator.md', fixer: null };
-  const repos = [{ id: 'primary', origin: '/repo', inPlace: true, toplevel: '/repo', admittedHead: 'abc123' }];
+  const pendingChanges = { paths: ['notes.txt'], total: 1 };
+  const repos = [{ id: 'primary', origin: '/repo', inPlace: true, toplevel: '/repo', admittedHead: 'abc123', pendingChanges }];
   const created = jobCreated({ pipeline, workflow, artifacts, prompts, repos });
   const wf = (...more) => deriveJob(stamp([created, { type: 'job-provisioned' }, ...more]));
   const job = wf();
@@ -437,7 +438,9 @@ test('a workflow job keeps its recorded artifacts and phases', () => {
   assert.deepEqual(job.prompts, prompts);
   assert.deepEqual(artifactPaths(job), artifacts);
   assert.deepEqual(job.pipeline, pipeline, 'a workflow job is not normalised: the phase named test gains no flag');
-  assert.deepEqual(job.repos.map(({ inPlace, toplevel, admittedHead }) => ({ inPlace, toplevel, admittedHead })), [{ inPlace: true, toplevel: '/repo', admittedHead: 'abc123' }]);
+  assert.deepEqual(job.repos.map(({ inPlace, toplevel, admittedHead, pendingChanges }) => ({ inPlace, toplevel, admittedHead, pendingChanges })), [{ inPlace: true, toplevel: '/repo', admittedHead: 'abc123', pendingChanges }]);
+  job.repos[0].pendingChanges.paths.push('changed.txt');
+  assert.deepEqual(created.repos[0].pendingChanges.paths, ['notes.txt'], 'the derived job does not alias pendingChanges');
   job.artifacts.diagnosis = 'changed.md';
   job.workflow.id = 'changed';
   assert.deepEqual([created.artifacts.diagnosis, created.workflow.id], ['d.md', 'troubleshoot'], 'the derived job does not alias job-created');

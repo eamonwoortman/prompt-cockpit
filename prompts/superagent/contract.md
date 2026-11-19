@@ -37,6 +37,8 @@ Note that review, response, verify and report files are outputs and must be comm
 
 A repo marked `inPlace` on the card is the user's own checkout, not a disposable worktree: it may hold ignored files and caches the user needs. There, never run `git clean`, `reset --hard`, `stash`, or `checkout -- .`/`restore` over the tree, never switch branches and never create worktrees. Revert your own probe edits file by file.
 
+The user may have their own uncommitted and untracked changes there. Stage only files you changed yourself, by explicit path: never `git add -A`, `git add .`, `git add -u` or `git commit -a`. `pendingChanges` on such a repo lists the paths that were already changed when the job started (`paths`, at most 200 of `total`): they belong to the user, so never stage, commit, edit, revert or delete them, and in recovery never mistake them for an earlier attempt's leftovers. When `total` exceeds the listed paths, treat any changed path you cannot trace to this job's commits or attempts the same way. If your task needs a change to one of those files, publish `blocked` and ask instead.
+
 ## Purposes
 
 If the job card has a `purpose`, it says which kind of attempt this is and which result fields it needs:

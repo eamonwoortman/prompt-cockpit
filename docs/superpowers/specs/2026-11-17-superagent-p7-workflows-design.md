@@ -216,12 +216,14 @@ Run inside `createJob`'s existing folder preflight (Plan 6, `ERR_DUPLICATE_REPO`
 |---|---|
 | Not a git repo / no commits (existing checks) | `ERR_NOT_GIT_REPO` / `ERR_NO_COMMITS` |
 | HEAD is detached, or a rebase, merge, cherry-pick or bisect is in progress | `ERR_FOLDER_BUSY_GIT` |
-| `git status --porcelain` (untracked included, ignored excluded) is not empty; the error lists up to 10 paths | `ERR_FOLDER_DIRTY` |
+| ~~`git status --porcelain` (untracked included, ignored excluded) is not empty; the error lists up to 10 paths~~ `git status` cannot be read (amended 2026-11-18, see below) | `ERR_FOLDER_DIRTY` |
 | Another job that is not finished (any state other than done, stopped, failed) uses the same repo top level, in place **or as the origin of a worktree** | `ERR_FOLDER_IN_USE` |
 | The folder's current branch is a `superagent/*` branch (left there by an earlier in-place job) | `ERR_FOLDER_ON_JOB_BRANCH` ("switch this folder back to your own branch first") |
 | `superagent/<slug>` already exists (existing check) | `ERR_BRANCH_EXISTS` |
 
-Untracked files count as dirty because workers stage and commit, and the user's untracked files would end up in the job's commits. **[Author's call]** Comparisons of top levels use the same normalisation as `ERR_DUPLICATE_REPO`.
+Untracked files count as dirty because workers stage and commit, and the user's untracked files would end up in the job's commits. **[Author's call]**
+
+**Amendment (2026-11-18, user decision).** A folder with uncommitted or untracked changes is no longer refused. `checkInPlace` returns them as `pending`, `job-created` records them on the in-place repo as `pendingChanges: { paths, total }` (at most 200 paths kept), the worker card carries them, and `contract.md` tells workers to stage only their own files by explicit path (never `add -A`/`add .`/`add -u`/`commit -a`), never stage, commit, edit, revert or delete a pending path, not to mistake them for an earlier attempt's leftovers in recovery, and to publish `blocked` if the task needs one of those files changed. Like the other in-place rules this is prompt-only. The pre-switch recheck no longer requires a clean status. Comparisons of top levels use the same normalisation as `ERR_DUPLICATE_REPO`.
 
 **Base commit.** Both a worktree and an in-place branch start from the folder's current HEAD (`worktree.js:72, 89`). So a new job must never start from another job's branch without the user choosing it: an in-place folder still on `superagent/*` is refused (above), and a **worktree** job whose origin is the top level of a repo that an unfinished in-place job is using is refused with `ERR_FOLDER_IN_USE` too, since that origin's HEAD is the running job's branch. Two worktree jobs on one origin keep coexisting as today. **[Author's call]**
 
