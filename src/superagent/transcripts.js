@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { listAllSessionFiles } from '../session-launcher.js';
-import { costForUsage } from '../usage.js';
+import { costForUsage, pricedModelId } from '../usage.js';
 import { primaryRepo } from './results.js';
 
 const CARD_MARKER = '# Superagent job card';
@@ -75,8 +75,10 @@ export function summarizeUsage(rows, { truncated = false } = {}) {
     conflicts,
   };
   for (const { model, usage } of kept) {
-    const key = model ?? 'unknown';
     const tokens = num(usage?.input_tokens) + num(usage?.output_tokens) + num(usage?.cache_read_input_tokens) + cacheWrite(usage ?? {});
+    // Zero-token rows (the SDK's "<synthetic>" markers) add nothing but a $0 row, as in global-stats.js.
+    if (tokens === 0) continue;
+    const key = pricedModelId(model) ?? model ?? 'unknown';
     out.inputTokens += num(usage?.input_tokens);
     out.outputTokens += num(usage?.output_tokens);
     out.cacheReadTokens += num(usage?.cache_read_input_tokens);

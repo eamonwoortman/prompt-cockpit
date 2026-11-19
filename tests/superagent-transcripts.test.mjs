@@ -162,6 +162,22 @@ test('summarizeUsage reports an unpriced model as incomplete with tokens but no 
   assert.equal(s.byModel['mystery-model'].tokens, 38);
 });
 
+test('summarizeUsage keys a model priced through the anthropic. fallback by the bare id, so both spellings share one row', () => {
+  const s = summarizeUsage([row('m1', `anthropic.${OPUS}`, USAGE), row('m2', OPUS, USAGE), row('m3', 'anthropic.mystery-model', USAGE)], { truncated: false });
+  assert.deepEqual(Object.keys(s.byModel).sort(), ['anthropic.mystery-model', OPUS]);
+  assert.equal(s.byModel[OPUS].tokens, 76);
+  assert.ok(s.byModel[OPUS].costUsd > 0);
+  assert.deepEqual(s.unpricedModels, ['anthropic.mystery-model']);
+});
+
+test('summarizeUsage leaves out zero-usage <synthetic> rows', () => {
+  const zero = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const s = summarizeUsage([row('m1', OPUS, USAGE), row('m2', '<synthetic>', zero)], { truncated: false });
+  assert.deepEqual(Object.keys(s.byModel), [OPUS]);
+  assert.deepEqual(s.unpricedModels, []);
+  assert.equal(s.complete, true);
+});
+
 test('summarizeUsage marks a truncated input incomplete', () => {
   assert.equal(summarizeUsage([row('m', OPUS, USAGE)], { truncated: true }).complete, false);
 });

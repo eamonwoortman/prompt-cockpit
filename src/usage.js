@@ -26,11 +26,16 @@ function exactRates(model) {
   return null;
 }
 
-function ratesFor(model) {
-  const exact = exactRates(model);
-  if (exact) return exact;
-  if (typeof model === 'string' && model.startsWith(PROVIDER_PREFIX)) return exactRates(model.slice(PROVIDER_PREFIX.length));
+// The id whose pricing entry ratesFor uses, or null for an unpriced model.
+export function pricedModelId(model) {
+  if (exactRates(model)) return model;
+  if (typeof model === 'string' && model.startsWith(PROVIDER_PREFIX) && exactRates(model.slice(PROVIDER_PREFIX.length))) return model.slice(PROVIDER_PREFIX.length);
   return null;
+}
+
+function ratesFor(model) {
+  const id = pricedModelId(model);
+  return id ? exactRates(id) : null;
 }
 
 // usage: a BetaMessage.usage object off the live SDK stream (assistant
