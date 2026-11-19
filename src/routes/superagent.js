@@ -4,8 +4,8 @@
 // the host (src/superagent-host.js), never by a route holding the supervisor.
 import { respondJson, readJsonBody } from '../http-utils.js';
 import { isValidCwd } from '../session-launcher.js';
-import { jobSummary, jobDetail } from '../superagent/view-model.js';
-import { readArtifact } from '../superagent/artifacts.js';
+import { artifactWriterEnded, jobSummary, jobDetail } from '../superagent/view-model.js';
+import { readArtifact, snapshotDirFor } from '../superagent/artifacts.js';
 
 const TITLE_WORDS = 8;
 
@@ -21,6 +21,7 @@ function statusFor(err) {
   if (err?.code === 'ERR_SUPERAGENT_UNAVAILABLE') return err.status;
   if (err?.code === 'ERR_UNKNOWN_JOB' || err?.code === 'ERR_ARTIFACT_MISSING') return 404;
   if (err?.code === 'ERR_INVALID_STATE' || err?.code === 'ERR_FOLDER_IN_USE') return 409;
+  if (err?.code === 'ERR_ARTIFACT_GONE') return 410;
   if (BAD_REQUEST.has(err?.code)) return 400;
   return 500;
 }
@@ -142,7 +143,9 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
 
   router.get('/api/superagent/jobs/:id/artifacts/:key', async (req, res, url, { id, key }) => {
     try {
-      return respondJson(res, 200, await readArtifactImpl(await readJob(host, id), key));
+      const job = await readJob(host, id);
+      const snapshotDir = host.read((supervisor) => snapshotDirFor(supervisor.jobDir(id)));
+      return respondJson(res, 200, await readArtifactImpl(job, key, { snapshotDir, ended: artifactWriterEnded(job, key) }));
     } catch (err) {
       return respondError(res, err);
     }

@@ -249,7 +249,7 @@ test('artifact route maps reader errors', async (t) => {
     if (failures[key]) throw Object.assign(new Error(`artifact ${key}`), { code: failures[key] });
     return { key, path: 'docs/spec.md', text: '# Spec', truncated: false };
   };
-  const supervisor = { getJob: (id) => (id === 'job-1' ? job() : undefined) };
+  const supervisor = { getJob: (id) => (id === 'job-1' ? job() : undefined), jobDir: (id) => path.join('/jobs', id) };
   const api = await serve(t, { host: fakeHost({ supervisor }), readArtifactImpl });
 
   const ok = await api('/api/superagent/jobs/job-1/artifacts/spec');
@@ -268,6 +268,36 @@ test('artifact route maps reader errors', async (t) => {
   assert.equal(noJob.status, 404);
   assert.equal(noJob.body.code, 'ERR_UNKNOWN_JOB');
   assert.equal(reads.length, 4);
+});
+
+test('GET artifact answers 410 ERR_ARTIFACT_GONE, and passes the snapshot folder and whether the writer ended', async (t) => {
+  const pipeline = [{ phase: 'spec', kind: 'author', role: 'writer', inputs: ['idea'], outputs: ['spec', 'plan'] }];
+  const attempts = [{ attemptId: 'a1', phase: 'spec', task: null, purpose: 'author', outcome: 'done', reason: null }];
+  const artifacts = { spec: 'docs/spec.md', plan: 'docs/plan.md' };
+  const calls = [];
+  const readArtifactImpl = async (j, key, options) => {
+    calls.push([key, options]);
+    if (key === 'plan') throw Object.assign(new Error('deleted from the workspace, no snapshot'), { code: 'ERR_ARTIFACT_GONE' });
+    return { key, path: 'docs/spec.md', text: '# Spec', truncated: false, source: 'snapshot' };
+  };
+  const supervisor = { getJob: () => job({ pipeline, attempts, artifacts }), jobDir: (id) => path.join('/jobs', id) };
+  const api = await serve(t, { host: fakeHost({ supervisor }), readArtifactImpl });
+
+  const ok = await api('/api/superagent/jobs/job-1/artifacts/spec');
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.source, 'snapshot');
+  const gone = await api('/api/superagent/jobs/job-1/artifacts/plan');
+  assert.equal(gone.status, 410);
+  assert.equal(gone.body.code, 'ERR_ARTIFACT_GONE');
+  assert.deepEqual(calls, [
+    ['spec', { snapshotDir: path.join('/jobs', 'job-1', 'artifacts'), ended: true }],
+    ['plan', { snapshotDir: path.join('/jobs', 'job-1', 'artifacts'), ended: true }],
+  ]);
+
+  calls.length = 0;
+  attempts[0].outcome = null;
+  await api('/api/superagent/jobs/job-1/artifacts/spec');
+  assert.equal(calls[0][1].ended, false, 'a running writer has not ended');
 });
 
 test('notifications merge both sources', async (t) => {

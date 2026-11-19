@@ -41,11 +41,13 @@
 //
 // Accounting (spec C): after each tick every known job is handed to the
 // accounting queue (accounting.js), never awaited; stop() gives it the same
-// absolute deadline as the in-flight tick.
+// absolute deadline as the in-flight tick. The queue also snapshots each
+// attempt's artifacts into <jobDir>/artifacts (artifacts.js).
 import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createAccounting } from './accounting.js';
+import { artifactStates as readArtifactStates, snapshotDirFor } from './artifacts.js';
 import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateMilestoneFixture } from './config.js';
 import { checkGate, checkInPlace, folderChangedEvent, normaliseTop, provisionInPlace, refuseJobBranch } from './inplace.js';
 import { hasTemplate } from './prompts.js';
@@ -1047,6 +1049,12 @@ export function createSuperagent({
     return accounting.transcriptFor(job, attempt);
   }
 
+  // Stat only: where each of the job's artifacts can be read from right now.
+  async function artifactStates(jobId) {
+    if (corrupt.has(jobId)) return new Map();
+    return readArtifactStates(jobForRead(jobId), { snapshotDir: snapshotDirFor(store.jobDir(jobId)) });
+  }
+
   function getJob(jobId) {
     const bad = corrupt.get(jobId);
     return bad ? structuredClone(bad) : store.get(jobId);
@@ -1059,5 +1067,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, retryJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, jobDir: store.jobDir };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, retryJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
 }

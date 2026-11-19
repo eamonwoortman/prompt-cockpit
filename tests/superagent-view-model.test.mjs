@@ -4,7 +4,7 @@ import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import { artifactPaths, reviewPaths } from '../src/superagent/results.js';
 import { deriveJob } from '../src/superagent/store.js';
 import { superagentNotifications } from '../src/superagent/notifications.js';
-import { artifactKeys, artifactPath, jobDetail, jobSummary } from '../src/superagent/view-model.js';
+import { artifactKeys, artifactPath, artifactWriterEnded, artifactWriters, jobDetail, jobSummary } from '../src/superagent/view-model.js';
 import { jobCreated, provisionedEvents } from './superagent-helpers.mjs';
 
 const stamp = (events) => events.map((e, i) => ({ seq: i + 1, at: 1000 + i, ...e }));
@@ -252,4 +252,89 @@ test('only a stuck entry is retryable, and a retried-away attempt is marked', ()
   const retried = m2([start('a1', 'spec'), failed, needsYou('stuck', { phase: 'spec', task: null, why: 'attempt-cap' }),
     { type: 'job-retried', needsYouSeq: stuck.needsYouSeq, phase: 'spec', task: null, fromAttemptId: 'a1', handoff: null, note: null }, start('a2', 'spec')]);
   assert.deepEqual(jobDetail(retried, notLive).attempts.map((a) => [a.attemptId, a.retried]), [['a1', true], ['a2', false]]);
+});
+
+const troubleshooting = () => {
+  const pipeline = [
+    { phase: 'investigate', kind: 'author', role: 'investigator', inputs: ['idea'], outputs: ['diagnosis', 'tasks'] },
+    { phase: 'diagnosis-review', kind: 'review', role: 'diagnosis-reviewer', author: 'investigator', target: 'diagnosis', inputs: ['tasks'], maxRounds: 3 },
+    { phase: 'fix', kind: 'per-task', role: 'fixer', taskReview: 'fix-reviewer', inputs: ['diagnosis', 'tasks'] },
+    { phase: 'verify', kind: 'author', role: 'verifier-tester', inputs: ['diagnosis', 'tasks'], outputs: ['testReport'], test: true },
+    { phase: 'accept', kind: 'human', inputs: ['testReport'] },
+  ];
+  const artifacts = { diagnosis: 'docs/jobs/x/diagnosis.md', tasks: 'docs/jobs/x/tasks.json', testReport: 'docs/jobs/x/test-report.md' };
+  const workflow = { id: 'troubleshooting', name: 'Troubleshooting', source: 'built-in', file: '/w/troubleshooting.json' };
+  return { pipeline, artifacts, workflow };
+};
+const ended = (attemptId, outcome = 'done', reason = null) => ({ type: 'attempt-ended', attemptId, outcome, reason });
+
+test('artifactWriters attributes a revised diagnosis to the review fix round', () => {
+  const job = deriveJob(stamp([
+    ...provisionedEvents(troubleshooting()),
+    start('i1', 'investigate'), ended('i1'), phaseDone('investigate'),
+    start('r1', 'diagnosis-review', { purpose: 'review', round: 1 }), ended('r1'),
+    start('f1', 'diagnosis-review', { purpose: 'fix', round: 1 }), ended('f1'),
+    start('r2', 'diagnosis-review', { purpose: 'review', round: 2 }),
+  ]));
+  const writers = artifactWriters(job);
+  assert.deepEqual(writers.get('diagnosis'), { attemptId: 'f1', phase: 'diagnosis-review', task: null });
+  assert.deepEqual(writers.get('tasks'), { attemptId: 'f1', phase: 'diagnosis-review', task: null });
+  assert.deepEqual(writers.get('review:diagnosis-review:1'), { attemptId: 'r1', phase: 'diagnosis-review', task: null });
+  assert.deepEqual(writers.get('response:diagnosis-review:1'), { attemptId: 'f1', phase: 'diagnosis-review', task: null });
+  assert.deepEqual(writers.get('review:diagnosis-review:2'), { attemptId: 'r2', phase: 'diagnosis-review', task: null });
+  assert.equal(artifactWriterEnded(job, 'diagnosis'), true);
+  assert.equal(artifactWriterEnded(job, 'review:diagnosis-review:2'), false, 'r2 is still running');
+  assert.equal(artifactWriterEnded(job, 'testReport'), false, 'nothing wrote it');
+});
+
+test('artifactWriters covers per-task attempts and the test phase', () => {
+  const job = deriveJob(stamp([
+    ...provisionedEvents(troubleshooting()),
+    start('i1', 'investigate'), ended('i1'), phaseDone('investigate'), phaseDone('diagnosis-review'),
+    start('x1', 'fix', { task: 'T1', purpose: 'implement' }), ended('x1'),
+    start('x2', 'fix', { task: 'T1', purpose: 'task-review', round: 1 }), ended('x2'),
+    start('x3', 'fix', { task: 'T1', purpose: 'fix', round: 1 }), ended('x3'),
+    start('v1', 'verify', { purpose: 'test' }),
+  ]));
+  const writers = artifactWriters(job);
+  assert.equal(writers.get('report:T1').attemptId, 'x3');
+  assert.deepEqual(writers.get('taskReview:T1:1'), { attemptId: 'x2', phase: 'fix', task: 'T1' });
+  assert.equal(writers.get('testReport').attemptId, 'v1');
+  assert.equal(writers.get('diagnosis').attemptId, 'i1', 'a per-task fix does not revise the diagnosis');
+});
+
+test('a gated attempt writes nothing', () => {
+  const gated = (attemptId) => ended(attemptId, 'failed', 'folder-changed');
+  const job = deriveJob(stamp([
+    ...provisionedEvents(troubleshooting()),
+    start('i1', 'investigate'), ended('i1'), phaseDone('investigate'),
+    start('r1', 'diagnosis-review', { purpose: 'review', round: 1 }), ended('r1'),
+    start('f1', 'diagnosis-review', { purpose: 'fix', round: 1 }), gated('f1'),
+  ]));
+  const writers = artifactWriters(job);
+  assert.equal(writers.get('diagnosis').attemptId, 'i1');
+  assert.equal(writers.has('response:diagnosis-review:1'), false);
+  assert.ok(![...writers.values()].some((w) => w.attemptId === 'f1'));
+});
+
+test('the legacy brief is attributed to the brainstorm phase', () => {
+  const brainstorming = (brainstormOutputs) => [
+    { phase: 'brainstorm', kind: 'brainstorm', role: 'brainstormer', inputs: ['idea'], ...brainstormOutputs },
+    { phase: 'spec', kind: 'author', role: 'spec-writer', inputs: ['brief'], outputs: ['spec'] },
+    { phase: 'accept', kind: 'human', inputs: ['spec'] },
+  ];
+  const events = [
+    start('b1', 'brainstorm', { purpose: 'ask' }), ended('b1'),
+    start('b2', 'brainstorm', { role: 'stand-in', purpose: 'answer' }), ended('b2'),
+    start('b3', 'brainstorm', { purpose: 'ask' }), ended('b3'),
+    start('b4', 'brainstorm', { role: 'stand-in', purpose: 'answer' }), ended('b4'),
+    phaseDone('brainstorm'), start('s1', 'spec'),
+  ];
+  for (const outputs of [{ outputs: ['brief'] }, {}]) {
+    const job = deriveJob(stamp([...provisionedEvents({ pipeline: brainstorming(outputs) }), ...events]));
+    assert.equal(job.workflow, null);
+    assert.ok(artifactKeys(job).includes('brief'));
+    assert.deepEqual(artifactWriters(job).get('brief'), { attemptId: 'b3', phase: 'brainstorm', task: null }, JSON.stringify(outputs));
+    assert.equal(artifactWriters(job).get('spec').attemptId, 's1');
+  }
 });

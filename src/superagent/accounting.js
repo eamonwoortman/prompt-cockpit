@@ -3,8 +3,8 @@
 // job directory. The supervisor owns it, so only the owner.lock holder writes.
 // The heartbeat only enqueues (every known job, finished ones included, so past
 // jobs are backfilled); items run one at a time, each racing itemBudgetMs, and
-// a failed item is logged and retried on a later heartbeat. Items carry a kind
-// ('usage' here) so other kinds of work can share the queue.
+// a failed item is logged and retried on a later heartbeat. Items carry a kind:
+// 'usage' or 'snapshot'.
 //
 // Provisional -> final: an ended attempt is written provisional with its
 // fingerprint and refreshed whenever the fingerprint changes. It becomes final
@@ -16,6 +16,14 @@
 // A gated attempt (sequencer's gatedOut) never launched a session and has no
 // transcript, so it is not accounted.
 //
+// Snapshots (spec C2, R2-2): an attempt with an outcome, not gated and whose
+// session is no longer live copies the artifacts it is the latest writer of
+// (view-model's artifactWriters) into <jobDir>/artifacts, transcript or not.
+// Progress is kept per key in usage.json's snapshots; a failed key is retried
+// on a later heartbeat and done is final for that writer. A key whose recorded
+// writer is newer than the item's view of the job is skipped, so a late retry
+// never overwrites a newer snapshot.
+//
 // Cancellation (R2-1): every item gets an AbortSignal and every write goes
 // through publish(), which does nothing once that signal is aborted or the
 // queue is stopped. A timed-out item is aborted, not abandoned: it may keep
@@ -24,7 +32,9 @@
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { readJson, updateJson } from '../json-store.js';
+import { ARTIFACT_MAX_BYTES, snapshotArtifact, snapshotDirFor } from './artifacts.js';
 import { gatedOut } from './sequencer.js';
+import { artifactWriters } from './view-model.js';
 
 export const USAGE_FILE = 'usage.json';
 const FINISHED_STATES = new Set(['done', 'stopped', 'failed']);
@@ -74,6 +84,8 @@ export function createAccounting({
   itemBudgetMs = 10_000,
   finalMissingAfter = 3,
   statImpl = stat,
+  snapshotImpl = snapshotArtifact,
+  maxArtifactBytes = ARTIFACT_MAX_BYTES,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
 }) {
@@ -81,6 +93,8 @@ export function createAccounting({
   // Item keys pending or running, so a heartbeat never queues an attempt twice.
   const queued = new Set();
   const finals = new Set();
+  // Attempt keys whose snapshot keys are all done (or taken over by a newer writer).
+  const snapshotted = new Set();
   const misses = new Map();
   // attempt key -> { found, at }, shared by the queue and usageForJob.
   const lookups = new Map();
@@ -118,18 +132,21 @@ export function createAccounting({
   }
 
   // updateJson may wait on the path lock, so the gate is checked again inside.
-  function writeAttempts(signal, jobId, mutate) {
+  function writeSection(signal, jobId, section, mutate) {
     return publish(signal, (check) => updateJson(usageFile(jobId), (doc) => {
       check();
-      if (!doc.attempts || typeof doc.attempts !== 'object') doc.attempts = {};
-      mutate(doc.attempts);
+      if (!doc[section] || typeof doc[section] !== 'object') doc[section] = {};
+      mutate(doc[section]);
     }, { fallback: emptyUsage }));
   }
 
-  async function readAttempts(jobId) {
+  async function readSection(jobId, section) {
     const doc = await readJson(usageFile(jobId), null);
-    return doc?.attempts && typeof doc.attempts === 'object' ? doc.attempts : {};
+    return doc?.[section] && typeof doc[section] === 'object' ? doc[section] : {};
   }
+
+  const writeAttempts = (signal, jobId, mutate) => writeSection(signal, jobId, 'attempts', mutate);
+  const readAttempts = (jobId) => readSection(jobId, 'attempts');
 
   async function verifyCached(entry, ids) {
     if (typeof entry?.file !== 'string') return false;
@@ -183,7 +200,49 @@ export function createAccounting({
     if (wrote && settled) finals.add(key);
   }
 
-  const handlers = { usage: runUsage };
+  function ownKeys(writers, attempt) {
+    return [...writers].filter(([, w]) => w.attemptId === attempt.attemptId).map(([k]) => k);
+  }
+
+  function writersOf(job) {
+    try {
+      return artifactWriters(job);
+    } catch (err) {
+      log(`could not list the artifact writers of job ${job.jobId}`, err);
+      return new Map();
+    }
+  }
+
+  async function runSnapshot({ key, job, attempt }, signal) {
+    const progress = await readSection(job.jobId, 'snapshots');
+    const order = new Map(job.attempts.map((a, i) => [a.attemptId, i]));
+    const mine = order.get(attempt.attemptId);
+    const snapshotDir = snapshotDirFor(store.jobDir(job.jobId));
+    const results = {};
+    let settled = true;
+    for (const k of ownKeys(artifactWriters(job), attempt)) {
+      const prev = progress[k];
+      if (prev?.attemptId === attempt.attemptId && prev.state === 'done') continue;
+      if (prev && prev.attemptId !== attempt.attemptId && !(order.get(prev.attemptId) < mine)) continue;
+      let state = 'done';
+      try {
+        const wrote = await publish(signal, (check) => snapshotImpl(job, k, { snapshotDir, maxBytes: maxArtifactBytes, beforeWrite: check }));
+        if (!wrote) return;
+      } catch (err) {
+        state = 'failed';
+        settled = false;
+        log(`could not snapshot artifact ${k} of attempt ${attempt.attemptId} of job ${job.jobId}, retrying on a later heartbeat`, err);
+      }
+      results[k] = { attemptId: attempt.attemptId, state, at: now() };
+    }
+    if (Object.keys(results).length > 0) {
+      const wrote = await writeSection(signal, job.jobId, 'snapshots', (snapshots) => Object.assign(snapshots, results));
+      if (!wrote) return;
+    }
+    if (settled) snapshotted.add(key);
+  }
+
+  const handlers = { usage: runUsage, snapshot: runSnapshot };
 
   async function runNext(item) {
     const controller = new AbortController();
@@ -222,16 +281,22 @@ export function createAccounting({
     })();
   }
 
+  function push(kind, key, job, attempt) {
+    const itemKey = `${kind}:${key}`;
+    if (queued.has(itemKey)) return;
+    queued.add(itemKey);
+    pending.push({ kind, itemKey, key, job, attempt });
+  }
+
   function enqueue(jobs) {
     if (stopped) return;
     for (const job of jobs ?? []) {
+      const writers = job ? writersOf(job) : new Map();
       for (const attempt of job?.attempts ?? []) {
         if (!attempt.outcome || gatedOut(attempt)) continue;
         const key = attemptKey(job.jobId, attempt.attemptId);
-        const itemKey = `usage:${key}`;
-        if (finals.has(key) || queued.has(itemKey)) continue;
-        queued.add(itemKey);
-        pending.push({ kind: 'usage', itemKey, key, job, attempt });
+        if (!finals.has(key)) push('usage', key, job, attempt);
+        if (!snapshotted.has(key) && !isLive(attempt.sessionId) && ownKeys(writers, attempt).length > 0) push('snapshot', key, job, attempt);
       }
     }
     pump();

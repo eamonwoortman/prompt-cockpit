@@ -84,6 +84,49 @@ export function artifactKeys(job) {
   return [...keys];
 }
 
+const AUTHORING_PURPOSES = new Set(['author', 'ask', 'test']);
+
+// The keys an attempt writes (results.js requiredOutputs): its phase outputs
+// when authoring, else its own review/response/report/verify file, plus, for a
+// review phase's fix round, the reviewed author's outputs it revises
+// (reviseOutputs).
+function keysWritten(job, a, known) {
+  if (a.purpose === 'answer') return [];
+  const phase = (job.pipeline ?? []).find((p) => p.phase === a.phase);
+  if (AUTHORING_PURPOSES.has(a.purpose)) return (phase?.outputs ?? []).filter((k) => known.has(k));
+  const keys = [attemptKey(a)].filter(Boolean);
+  if (a.purpose === 'fix' && a.task == null && phase?.target) {
+    const author = job.pipeline.find((p) => p.kind === 'author' && (p.outputs ?? []).includes(phase.target));
+    keys.push(...(author?.outputs ?? []).filter((k) => known.has(k)));
+  }
+  return keys;
+}
+
+// key -> the latest launched (not gated) attempt that writes it.
+export function artifactWriters(job) {
+  const writers = new Map();
+  if (isCorrupt(job) || !job.pipeline) return writers;
+  const known = new Set(Object.keys(artifactPaths(job)));
+  const launched = (job.attempts ?? []).filter((a) => !gatedOut(a));
+  const writer = (a) => ({ attemptId: a.attemptId, phase: a.phase, task: a.task ?? null });
+  for (const a of launched) for (const key of keysWritten(job, a, known)) writers.set(key, writer(a));
+  // artifactKeys also lists a brief that only a later phase reads.
+  if (!writers.has('brief') && artifactKeys(job).includes('brief')) {
+    const brainstorms = new Set(job.pipeline.filter((p) => p.kind === 'brainstorm').map((p) => p.phase));
+    const latest = launched.findLast((a) => brainstorms.has(a.phase) && a.purpose !== 'answer');
+    if (latest) writers.set('brief', writer(latest));
+  }
+  return writers;
+}
+
+export function writerEnded(job, writer) {
+  return Boolean(writer && (job.attempts ?? []).find((a) => a.attemptId === writer.attemptId)?.outcome);
+}
+
+export function artifactWriterEnded(job, key) {
+  return writerEnded(job, artifactWriters(job).get(key));
+}
+
 const ROUND = /^[1-9]\d{0,5}$/;
 
 export function artifactPath(job, key) {

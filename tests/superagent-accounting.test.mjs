@@ -3,9 +3,13 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { tempDir, deferred, T0 } from './superagent-helpers.mjs';
-import { createSuperagentStore } from '../src/superagent/store.js';
+import { tempDir, deferred, ev, missingTranscripts, provisionedEvents, T0 } from './superagent-helpers.mjs';
+import { createSuperagentStore, deriveJob } from '../src/superagent/store.js';
 import { createAccounting, USAGE_FILE } from '../src/superagent/accounting.js';
+import { snapshotArtifact } from '../src/superagent/artifacts.js';
+import { MILESTONE_1_PIPELINE, MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
+import { primaryRepo } from '../src/superagent/results.js';
+import { artifactPath } from '../src/superagent/view-model.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const settle = async () => {
@@ -340,4 +344,165 @@ test('stop uses the caller\'s absolute deadline', async () => {
   await again.stop({ deadline: clock.t + 60 });
   const elapsed = Date.now() - t0;
   assert.ok(elapsed >= 50 && elapsed < 1000, `waited ${elapsed} ms for a deadline 60 ms past the injected clock`);
+});
+
+// Snapshot items (R2-2): a derived milestone-2 job over a temp worktree.
+const started = (attemptId, phase, over = {}) => ({ type: 'attempt-started', attemptId, phase, role: 'r', model: 'm', n: 1, purpose: 'author', ...over });
+const ended = (attemptId, outcome = 'done', reason = null) => ({ type: 'attempt-ended', attemptId, outcome, reason });
+
+async function snapshotSetup(over = {}) {
+  const h = await setup({ transcripts: missingTranscripts(), ...over });
+  const worktree = path.join(h.root, 'worktree');
+  await fs.mkdir(worktree);
+  const derive = (events, created = {}) => {
+    const all = [...provisionedEvents({ pipeline: MILESTONE_2_PIPELINE, ...created }), ...events];
+    const j = deriveJob(all.map((e, i) => ({ seq: i + 1, at: T0 + i, ...e })));
+    primaryRepo(j).worktree = worktree;
+    return j;
+  };
+  const write = async (key, text, j) => {
+    const file = path.join(worktree, artifactPath(j, key));
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, text);
+  };
+  const snapshot = (key, jobId = 'j1') => {
+    try {
+      return readFileSync(path.join(h.store.jobDir(jobId), 'artifacts', encodeURIComponent(key)), 'utf8');
+    } catch {
+      return undefined;
+    }
+  };
+  const progress = (jobId = 'j1') => (existsSync(h.usageFile(jobId)) ? h.doc(jobId).snapshots ?? {} : {});
+  return { ...h, worktree, derive, write, snapshot, progress };
+}
+
+test('a snapshot item copies the keys its attempt is the latest writer of', async () => {
+  const h = await snapshotSetup();
+  const j = h.derive([
+    started('s1', 'spec'), ended('s1'), ev.phaseCompleted('spec', 1),
+    started('r1', 'spec-review', { purpose: 'review', round: 1 }), ended('r1'),
+    started('f1', 'spec-review', { purpose: 'fix', round: 1 }), ended('f1'),
+  ]);
+  await h.write('spec', 'revised spec', j);
+  await h.write('review:spec-review:1', 'findings', j);
+  await h.write('response:spec-review:1', 'response', j);
+  const attempts = { s1: { state: 'final', unknown: 'missing', scannedAt: 1 } };
+  await fs.mkdir(path.dirname(h.usageFile()), { recursive: true });
+  await fs.writeFile(h.usageFile(), JSON.stringify({ format: 1, attempts, other: 'kept' }));
+  await h.run([j]);
+  assert.equal(h.snapshot('spec'), 'revised spec');
+  assert.equal(h.snapshot('review:spec-review:1'), 'findings');
+  assert.equal(h.snapshot('response:spec-review:1'), 'response');
+  const p = h.progress();
+  assert.deepEqual(Object.fromEntries(Object.entries(p).map(([k, v]) => [k, [v.attemptId, v.state]])), {
+    spec: ['f1', 'done'],
+    'review:spec-review:1': ['r1', 'done'],
+    'response:spec-review:1': ['f1', 'done'],
+  });
+  assert.equal(typeof p.spec.at, 'number');
+  assert.equal(h.doc().format, 1);
+  assert.deepEqual(h.doc().attempts, attempts, 'snapshot progress leaves the usage entries alone');
+  assert.equal(h.doc().other, 'kept');
+});
+
+test('a finished legacy job with readable artifacts and no transcript gets its snapshots', async () => {
+  const h = await snapshotSetup();
+  const j = h.derive([started('s1', 'spec'), ended('s1'), { type: 'job-stopped' }], { pipeline: MILESTONE_1_PIPELINE });
+  assert.equal(j.workflow, null);
+  assert.equal(j.attempts[0].sessionId, null);
+  await h.write('spec', 'the spec', j);
+  await h.run([j]);
+  assert.equal(h.snapshot('spec'), 'the spec');
+  assert.equal(h.progress().spec.state, 'done');
+});
+
+test('a live attempt is snapshotted once its session ends, and a gated one never', async () => {
+  const h = await snapshotSetup();
+  const j = h.derive([
+    started('s1', 'spec'), { type: 'attempt-session', attemptId: 's1', sessionId: 'sess-1' }, ended('s1'), ev.phaseCompleted('spec', 1),
+    started('r1', 'spec-review', { purpose: 'review', round: 1 }), ended('r1', 'failed', 'folder-changed'),
+  ]);
+  await h.write('spec', 'the spec', j);
+  await h.write('review:spec-review:1', 'stale', j);
+  h.live.add('sess-1');
+  await h.run([j]);
+  assert.equal(h.snapshot('spec'), undefined, 'still live');
+  h.live.delete('sess-1');
+  await h.run([j]);
+  assert.equal(h.snapshot('spec'), 'the spec');
+  assert.equal(h.snapshot('review:spec-review:1'), undefined);
+  assert.equal(h.progress()['review:spec-review:1'], undefined);
+});
+
+test('a failed copy is retried and later succeeds', async () => {
+  let calls = 0;
+  const snapshotImpl = async (...args) => {
+    calls += 1;
+    if (calls === 1) throw new Error('disk full');
+    return snapshotArtifact(...args);
+  };
+  const h = await snapshotSetup({ snapshotImpl });
+  const j = h.derive([started('s1', 'spec'), ended('s1')]);
+  await h.write('spec', 'the spec', j);
+  await h.run([j]);
+  assert.equal(h.progress().spec.state, 'failed');
+  assert.equal(h.progress().spec.attemptId, 's1');
+  assert.ok(h.logs.some((l) => l.includes('spec') && l.includes('disk full')), h.logs.join('\n'));
+  await h.run([j]);
+  assert.equal(h.progress().spec.state, 'done');
+  assert.equal(h.snapshot('spec'), 'the spec');
+  await h.run([j]);
+  await h.run([j], h.build());
+  assert.equal(calls, 2, 'done is final for that writer');
+});
+
+test('two writers of the same key: the later one wins even when the earlier one\'s copy is retried last', async () => {
+  const copied = [];
+  let failFirst = true;
+  const snapshotImpl = async (j, key, opts) => {
+    copied.push(j.attempts.at(-1).attemptId);
+    if (failFirst) {
+      failFirst = false;
+      throw new Error('locked');
+    }
+    return snapshotArtifact(j, key, opts);
+  };
+  const h = await snapshotSetup({ snapshotImpl });
+  const first = h.derive([started('a1', 'spec'), ended('a1')]);
+  await h.write('spec', 'v1', first);
+  await h.run([first]);
+  assert.deepEqual(h.progress().spec, { ...h.progress().spec, attemptId: 'a1', state: 'failed' });
+
+  const second = h.derive([started('a1', 'spec'), ended('a1'), started('a2', 'spec'), ended('a2')]);
+  await h.write('spec', 'v2', second);
+  await h.run([second]);
+  assert.equal(h.progress().spec.attemptId, 'a2');
+  assert.equal(h.snapshot('spec'), 'v2');
+
+  await h.run([first]);
+  assert.deepEqual(copied, ['a1', 'a2'], 'the stale retry of a1 copies nothing');
+  assert.equal(h.progress().spec.attemptId, 'a2');
+  assert.equal(h.progress().spec.state, 'done');
+});
+
+test('a snapshot write after stop or past its time budget is refused', async () => {
+  for (const how of ['stop', 'budget']) {
+    const gate = deferred();
+    const snapshotImpl = async (j, key, opts) => {
+      await gate.promise;
+      return snapshotArtifact(j, key, opts);
+    };
+    const h = await snapshotSetup({ snapshotImpl, itemBudgetMs: how === 'budget' ? 20 : 10_000 });
+    const j = h.derive([started('s1', 'spec'), ended('s1')]);
+    await h.write('spec', 'the spec', j);
+    h.acc.enqueue([j]);
+    await settle();
+    if (how === 'stop') await h.acc.stop({ deadline: Date.now() });
+    else await h.acc.idle();
+    gate.resolve();
+    await sleep(30);
+    await settle();
+    assert.equal(h.snapshot('spec'), undefined, how);
+    assert.deepEqual(h.progress(), {}, how);
+  }
 });

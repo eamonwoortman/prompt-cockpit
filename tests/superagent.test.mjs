@@ -274,6 +274,30 @@ test('accounting keeps an attempt provisional while its worker row is live, and 
   } finally { registry._reset(); }
 });
 
+test('the supervisor snapshots an ended attempt\'s artifacts and reports their states', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h);
+    await h.sa.tick();
+    const attempt = h.store.get(job.jobId).attempts.at(-1);
+    await publishSpec(job, attempt);
+    const impl = h.factory.impls.get(attempt.sessionId);
+    impl.emitMessage({ type: 'result', subtype: 'success' });
+    impl.emitState('idle');
+    await h.sa.tick();
+    assert.equal(h.sa.getJob(job.jobId).state, 'needs-you');
+    const snapshot = path.join(h.sa.jobDir(job.jobId), 'artifacts', 'spec');
+    await h.sa.tick();
+    await until(() => existsSync(snapshot), 'the spec snapshot');
+    assert.equal(readFileSync(snapshot, 'utf8'), '# Hello design\n');
+    assert.deepEqual(Object.fromEntries(await h.sa.artifactStates(job.jobId)), { spec: 'workspace' });
+    await fs.rm(path.join(job.repos[0].worktree, artifactPaths(job).spec));
+    assert.deepEqual(Object.fromEntries(await h.sa.artifactStates(job.jobId)), { spec: 'snapshot' });
+    await assert.rejects(h.sa.artifactStates('no-such-job'), { code: 'ERR_UNKNOWN_JOB' });
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('stop drains the accounting queue within stopTickDeadlineMs', async () => {
   try {
     const called = { done: false };
