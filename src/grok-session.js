@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { spawnGrokAgent, killGrokProcess } from './grok-acp.js';
 import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction } from './grok-messages.js';
 import { createGrokExtensions } from './grok-extensions.js';
-import { commandHasGitPush, evaluateGitGuardCommand, shellCommandFromToolInput } from './git-commit-guard.js';
+import { commandHasGitPush, evaluateGitGuardCommand, guardDeniedMessage, shellCommandFromToolInput } from './git-commit-guard.js';
 import { createResultEpochTracker } from './result-epoch.js';
 
 // Read at load rather than hardcoded: a "keep in sync" comment here drifted
@@ -277,6 +277,7 @@ export function startGrokSession({
         guardResult = { blocked: true, reason: `Cockpit could not read its git guard settings: ${err.message || err}` };
       }
       if (guardResult.blocked) {
+        onMessage(guardDeniedMessage(sessionId, guardResult.reason));
         const optionId = pickPermissionOption(options, false);
         return { outcome: optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' } };
       }

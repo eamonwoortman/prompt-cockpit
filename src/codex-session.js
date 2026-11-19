@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { getCodexAppServerManager } from './codex-app-server.js';
 import { codexNotificationToMessages } from './codex-messages.js';
 import { createResultEpochTracker } from './result-epoch.js';
-import { commandHasGitPush, evaluateGitGuardCommand, shellCommandFromToolInput } from './git-commit-guard.js';
+import { commandHasGitPush, evaluateGitGuardCommand, guardDeniedMessage, shellCommandFromToolInput } from './git-commit-guard.js';
 
 function unsupported(name) {
   return async () => { throw new Error(`${name} is not supported on Codex sessions yet`); };
@@ -419,6 +419,7 @@ export function startCodexSession({
           guardResult = { blocked: true, reason: `Cockpit could not read its git guard settings: ${err.message || err}` };
         }
         if (guardResult.blocked) {
+          onMessage(guardDeniedMessage(threadId, guardResult.reason));
           return {
             handled: true,
             result: legacyApproval ? { decision: 'denied' } : { decision: 'decline' },

@@ -91,6 +91,22 @@ test('title -m plus one body -m is accepted; one -m per bullet is rejected with 
   assert.match(perBullet.reason, /no blank lines between bullets.*one -m/);
 });
 
+// Codex hands the guard `powershell.exe -Command '<script>'`; the wrapper's
+// closing quote used to read as unbalanced quoting and block every commit.
+test('commit command validator looks through a PowerShell/bash -c wrapper', async () => {
+  const ps = '"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command';
+  const check = async (command) => validateCommitCommand(command, process.cwd());
+  assert.equal((await check(`${ps} 'git commit -m "assets: relocate shared content"'`)).valid, true);
+  assert.equal((await check(`${ps} "git commit -m \\"assets: relocate shared content\\""`)).valid, true);
+  assert.equal((await check(`bash -lc 'git commit -m "assets: relocate shared content"'`)).valid, true);
+  assert.equal((await check(
+    `${ps} 'git diff --cached --check\nif ($LASTEXITCODE -eq 0) { git commit -m "assets: relocate shared content" }'`,
+  )).valid, true);
+  // Still validates the inner message, not just waves wrapped commits through.
+  assert.equal((await check(`${ps} 'git commit -m "Fix the reset bug"'`)).valid, false);
+  assert.equal((await check(`${ps} 'git commit --dry-run'`)).valid, false);
+});
+
 test('commit command validator inspects a -F message file', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'prompt-cockpit-commit-'));
   const file = path.join(dir, 'message.txt');

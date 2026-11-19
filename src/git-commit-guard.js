@@ -337,7 +337,33 @@ export function validateScopedCommitMessage(message) {
   return { valid: true };
 }
 
-export async function validateCommitCommand(command, cwd) {
+// Codex runs commands as `powershell.exe -Command '<script>'` (or `bash -lc
+// '<script>'`). Left wrapped, the wrapper's closing quote lands in the text
+// after `commit` and reads as unbalanced quoting. Return the inner script.
+const SHELL_WRAPPER_RE = /^\s*(?:"[^"]*"|'[^']*'|[^\s"']+)((?:\s+-[^\s]+)*?)\s+(-c|-lc|-command|-commandwithargs|\/c|\/k)\s+([\s\S]+?)\s*$/i;
+const SHELL_NAMES = new Set(['bash', 'cmd', 'dash', 'fish', 'powershell', 'pwsh', 'sh', 'zsh']);
+
+export function unwrapShellCommand(command) {
+  let current = command;
+  for (let depth = 0; depth < 3; depth += 1) {
+    const match = typeof current === 'string' ? SHELL_WRAPPER_RE.exec(current) : null;
+    if (!match) break;
+    const exe = current.trim().match(/^(?:"([^"]*)"|'([^']*)'|(\S+))/);
+    const name = String(exe?.[1] || exe?.[2] || exe?.[3] || '').split(/[\\/]/).pop().replace(/\.exe$/i, '').toLowerCase();
+    if (!SHELL_NAMES.has(name)) break;
+    let inner = match[3];
+    const quote = inner[0];
+    if ((quote === "'" || quote === '"') && inner.length > 1 && inner.endsWith(quote)) {
+      inner = inner.slice(1, -1);
+      if (quote === '"') inner = inner.replace(/\\(["\\])/g, '$1');
+    }
+    current = inner;
+  }
+  return current;
+}
+
+export async function validateCommitCommand(rawCommand, cwd) {
+  const command = unwrapShellCommand(rawCommand);
   if (!commandHasGitCommit(command)) return { checked: false, valid: true };
   const matches = [...command.matchAll(GIT_COMMIT_GLOBAL_RE)];
   if (matches.length > 1) return { checked: true, valid: false, reason: 'multiple git commit commands must be run separately' };
@@ -390,6 +416,19 @@ export async function evaluateGitGuardCommand(command, cwd) {
   return result.checked && !result.valid
     ? { blocked: true, reason: result.reason }
     : { blocked: false };
+}
+
+// Codex and Grok decline a blocked command with a bare protocol decision that
+// carries no reason, so the agent only sees a generic rejection. This is the
+// transcript notice (the existing permission_denied shape) that says why.
+export function guardDeniedMessage(sessionId, reason) {
+  return {
+    type: 'system',
+    subtype: 'permission_denied',
+    session_id: sessionId,
+    tool_name: 'Command',
+    decision_reason: `Blocked by Cockpit's git commit guard: ${reason}.`,
+  };
 }
 
 // Pure text check, deliberately not shell-aware: doesn't matter whether the

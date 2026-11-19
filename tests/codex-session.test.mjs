@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { startCodexSession } from '../src/codex-session.js';
 
 function createManager({ deferTurnStart = false, turnStartId = 'turn-1' } = {}) {
@@ -778,4 +781,31 @@ test('Codex thread/start and thread/resume carry the cockpit MCP server config o
   await waitFor(() => plain.calls.length > 0, 'thread start');
   assert.equal('config' in plain.calls[0][1], false);
   handle.close();
+});
+
+test('a command blocked by the commit guard is declined with a visible reason', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'prompt-cockpit-guard-'));
+  const previous = process.env.COCKPIT_SETTINGS_FILE;
+  process.env.COCKPIT_SETTINGS_FILE = path.join(dir, 'settings.json');
+  await writeFile(process.env.COCKPIT_SETTINGS_FILE, JSON.stringify({
+    gitCommitGuard: { mode: 'commit', validateCommitMessage: true },
+  }));
+  const manager = createManager();
+  const { handle, messages } = startOptions(manager, { permissionMode: 'bypassPermissions' });
+  try {
+    await waitFor(() => manager.calls.length > 0, 'thread start');
+    const response = await manager.requestFromServer('item/commandExecution/requestApproval', {
+      threadId: 'thread-new', turnId: 'turn-1', command: 'git commit --dry-run',
+    });
+    assert.deepEqual(response, { handled: true, result: { decision: 'decline' } });
+    const denial = messages.find((message) => message.subtype === 'permission_denied');
+    assert.ok(denial, 'a permission_denied notice reaches the transcript');
+    assert.match(denial.decision_reason, /commit guard/i);
+    assert.match(denial.decision_reason, /final commit message is not visible/);
+  } finally {
+    handle.close();
+    if (previous === undefined) delete process.env.COCKPIT_SETTINGS_FILE;
+    else process.env.COCKPIT_SETTINGS_FILE = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
