@@ -1,6 +1,6 @@
 // Superagent supervisor: createSuperagent owns one heartbeat that reviews and
-// advances every running job, plus job creation, accept, answerQuestion and
-// stop.
+// advances every running job, plus job creation, accept, answerQuestion,
+// retryJob and stop.
 //
 // Modelled on createAutopilot (src/autopilot.js): everything injected, one
 // timer, a tick that never overlaps itself, an idempotent start/stop and a
@@ -9,7 +9,7 @@
 // src/server.js.
 //
 // Per-job serialisation: tick's job step, createJob's provisioning, stopJob,
-// accept and answerQuestion all run on one promise chain per job (withJob),
+// accept, answerQuestion and retryJob all run on one promise chain per job (withJob),
 // so a stop can never interleave with a launch. stopJob marks the job in
 // stopRequested synchronously, before it queues, so a tick step already
 // waiting on a budget check sees the stop on its recheck and launches nothing.
@@ -47,7 +47,7 @@ import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
 import { createRunner } from './runner.js';
-import { RUNNABLE_KINDS, attemptsFor, buildFixTask, nextAction } from './sequencer.js';
+import { RUNNABLE_KINDS, attemptsFor, buildFixTask, gatedOut, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
 import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
 import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, removeAbortedWorktree, repoIds, repoToplevel, slugify } from './worktree.js';
@@ -958,6 +958,36 @@ export function createSuperagent({
     });
   }
 
+  // Retry on a stuck job: the stuck scope's failed attempts stop counting and
+  // the next attempt resumes from its last one, with that attempt's
+  // handoff.md when it wrote one and the user's optional note.
+  function retryJob(jobId, { needsYouSeq, note } = {}) {
+    return withJob(jobId, async () => {
+      const job = await requireJob(jobId);
+      requireSeen(job, needsYouSeq);
+      if (job.state !== 'needs-you' || job.reason !== 'stuck') {
+        throw fail('ERR_INVALID_STATE', `superagent: job ${jobId} is ${job.state}${job.reason ? ` (${job.reason})` : ''}, not stuck`);
+      }
+      if (note != null && typeof note !== 'string') throw fail('ERR_INVALID_ANSWER', 'superagent: a retry note must be text');
+      const text = (note ?? '').trim();
+      if (text.length > ANSWER_MAX_CHARS) throw fail('ERR_INVALID_ANSWER', `superagent: a retry note must be at most ${ANSWER_MAX_CHARS} characters`);
+      const phase = job.detail?.phase ?? job.phaseId;
+      const task = job.detail?.task ?? null;
+      const last = job.attempts.findLast((a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a)) ?? null;
+      const handoffFile = last?.dir ? path.join(last.dir, 'handoff.md') : null;
+      const event = {
+        type: 'job-retried',
+        needsYouSeq: job.needsYouSeq,
+        phase,
+        task,
+        fromAttemptId: last?.attemptId ?? null,
+        handoff: handoffFile && (await fileExists(handoffFile)) ? handoffFile : null,
+        note: text || null,
+      };
+      return appendConfirmed(jobId, event, (j) => (j.retries ?? []).some((r) => r.needsYouSeq === event.needsYouSeq));
+    });
+  }
+
   function stopJob(jobId) {
     stopRequested.add(jobId);
     routing.get(jobId)?.controller.abort();
@@ -996,5 +1026,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, stopJob, listJobs, getJob, orphanWorktrees };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, retryJob, stopJob, listJobs, getJob, orphanWorktrees };
 }

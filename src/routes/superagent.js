@@ -115,10 +115,12 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
   // An answer names the needs-you it was written for (`needsYouSeq`, from the
   // detail's needsYou.seq), so text a stale view wrote for one question can
   // never reach the next one: the supervisor refuses a mismatch with 409
-  // ERR_INVALID_STATE before appending anything. Accept checks it when given.
+  // ERR_INVALID_STATE before appending anything. Accept checks it when given;
+  // retry requires it too.
   const actions = {
     answer: (supervisor, id, body) => supervisor.answerQuestion(id, body.text, { needsYouSeq: body.needsYouSeq }),
     accept: (supervisor, id, body) => supervisor.accept(id, { needsYouSeq: body.needsYouSeq }),
+    retry: (supervisor, id, body) => supervisor.retryJob(id, { needsYouSeq: body.needsYouSeq, note: body.note }),
     stop: (supervisor, id) => supervisor.stopJob(id),
   };
   for (const [name, act] of Object.entries(actions)) {
@@ -126,6 +128,9 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
       const body = await readJsonBody(req);
       if (name === 'answer' && !Number.isInteger(body.needsYouSeq)) {
         return respondJson(res, 400, { error: 'needsYouSeq is required: the needs-you this answer was written for', code: 'ERR_INVALID_ANSWER' });
+      }
+      if (name === 'retry' && !Number.isInteger(body.needsYouSeq)) {
+        return respondJson(res, 400, { error: 'needsYouSeq is required: the stuck entry this retry was made for', code: 'ERR_INVALID_REQUEST' });
       }
       try {
         return respondJson(res, 200, jobSummary(await host.admit((supervisor) => act(supervisor, id, body))));

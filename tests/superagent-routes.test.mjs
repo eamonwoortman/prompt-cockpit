@@ -181,6 +181,32 @@ test('an answer must name the needs-you it was written for; a stale one is a 409
   assert.deepEqual(calls, [4, 7, { needsYouSeq: 9 }]);
 });
 
+test('retry passes the needs-you and note through, requires the needs-you, and maps refusals', async (t) => {
+  const calls = [];
+  const supervisor = {
+    retryJob: async (jobId, opts) => {
+      calls.push(opts);
+      if (opts.needsYouSeq !== 7) throw Object.assign(new Error('not stuck'), { code: 'ERR_INVALID_STATE' });
+      if (typeof opts.note === 'string' && opts.note.length > 4000) throw Object.assign(new Error('too long'), { code: 'ERR_INVALID_ANSWER' });
+      return job({ jobId, state: 'running' });
+    },
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  for (const needsYouSeq of [undefined, null, '7', 7.5]) {
+    const res = await api('/api/superagent/jobs/job-1/retry', { method: 'POST', body: { needsYouSeq } });
+    assert.equal(res.status, 400, String(needsYouSeq));
+    assert.equal(res.body.code, 'ERR_INVALID_REQUEST');
+  }
+  assert.deepEqual(calls, []);
+  const ok = await api('/api/superagent/jobs/job-1/retry', { method: 'POST', body: { needsYouSeq: 7, note: 'from code only' } });
+  assert.deepEqual([ok.status, ok.body.status], [200, 'running']);
+  const stale = await api('/api/superagent/jobs/job-1/retry', { method: 'POST', body: { needsYouSeq: 4 } });
+  assert.deepEqual([stale.status, stale.body.code], [409, 'ERR_INVALID_STATE']);
+  const long = await api('/api/superagent/jobs/job-1/retry', { method: 'POST', body: { needsYouSeq: 7, note: 'x'.repeat(4001) } });
+  assert.deepEqual([long.status, long.body.code], [400, 'ERR_INVALID_ANSWER']);
+  assert.deepEqual(calls.slice(0, 2), [{ needsYouSeq: 7, note: 'from code only' }, { needsYouSeq: 4, note: undefined }]);
+});
+
 test('accept and stop return the job summary; an unknown job is 404', async (t) => {
   const unknown = Object.assign(new Error('superagent: no job nope'), { code: 'ERR_UNKNOWN_JOB' });
   const supervisor = {

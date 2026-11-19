@@ -347,7 +347,7 @@ export function createRunner({
     const claimed = claim(live, async () => {
       await finish(live, failed('prompt-missing', err.path));
       if (live.pendingEnd) return;
-      await store.append(live.jobId, { type: 'needs-you', reason: 'stuck', detail: { why: 'prompt-missing', path: err.path, phase: live.phase, role: live.role } });
+      await store.append(live.jobId, { type: 'needs-you', reason: 'stuck', detail: { why: 'prompt-missing', path: err.path, phase: live.phase, task: live.task ?? null, role: live.role } });
     });
     if (claimed) await claimed;
     return { error: 'launch-failed' };
@@ -462,6 +462,7 @@ export function createRunner({
         recovery: action.recovery,
         previousAttemptId: action.previousAttemptId,
         handoff: action.handoff ?? null,
+        ...(action.retryNote ? { retryNote: action.retryNote } : {}),
         dir,
         purpose: live.purpose,
         round: live.round,
@@ -490,6 +491,7 @@ export function createRunner({
           recovery: action.recovery,
           previousAttemptId: action.previousAttemptId,
           handoff: action.handoff ?? null,
+          retryNote: action.retryNote ?? null,
           dir,
           ...contextOf(live),
         },

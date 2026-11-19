@@ -21,7 +21,7 @@ import { isSafeSessionId } from '../safe-id.js';
 import { defaultConfig, defaultSuperagentRoot } from './config.js';
 import { LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
 
-export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored'];
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored', 'job-retried'];
 
 const NEWLINE = 0x0a;
 
@@ -83,6 +83,7 @@ export function deriveJob(events) {
     completions: [],
     routerDecisions: [],
     answers: [],
+    retries: [],
     lastSeq: first.seq ?? null,
   };
   const attempt = (id) => job.attempts.find((a) => a.attemptId === id);
@@ -118,9 +119,33 @@ export function deriveJob(events) {
       case 'folder-restored':
         if (job.state === 'needs-you' && job.reason === 'folder-changed') setState('running');
         break;
+      // Retry on a stuck job: the scope's failed attempts are retried away
+      // (out of its caps, repeated-error, back-off and routing) and the next
+      // attempt in the scope resumes from fromAttemptId.
+      case 'job-retried': {
+        if (job.state !== 'needs-you' || job.reason !== 'stuck') break;
+        const task = ev.task ?? null;
+        for (const a of job.attempts) {
+          if (a.phase === ev.phase && a.task === task && a.outcome === 'failed') a.retried = true;
+        }
+        job.retries.push({
+          needsYouSeq: ev.needsYouSeq ?? null,
+          phase: ev.phase,
+          task,
+          fromAttemptId: ev.fromAttemptId ?? null,
+          handoff: ev.handoff ?? null,
+          note: ev.note ?? null,
+          at: ev.at ?? null,
+          consumedBy: null,
+        });
+        setState('running');
+        break;
+      }
       case 'job-accepted': setState('done'); break;
       case 'job-stopped': setState('stopped'); break;
-      case 'attempt-started':
+      case 'attempt-started': {
+        const pending = job.retries.findLast((r) => r.phase === ev.phase && r.task === (ev.task ?? null) && r.consumedBy === null);
+        if (pending) pending.consumedBy = ev.attemptId;
         job.attempts.push({
           attemptId: ev.attemptId,
           phase: ev.phase,
@@ -153,8 +178,11 @@ export function deriveJob(events) {
           answers: null,
           escalated: null,
           tokens: null,
+          retryNote: ev.retryNote ?? null,
+          retried: false,
         });
         break;
+      }
       case 'attempt-session': {
         const a = attempt(ev.attemptId);
         if (a) a.sessionId = ev.sessionId;

@@ -211,6 +211,19 @@ test('launch records handoff on attempt-started', async () => {
     await runner.launch(job, launchAction());
     const started = (await events()).filter((e) => e.type === 'attempt-started');
     assert.equal(started.at(-1).handoff, null);
+    assert.equal('retryNote' in started.at(-1), false);
+  } finally { registry._reset(); }
+});
+
+test('launch records a Retry note on attempt-started and the attempt', async () => {
+  registry._reset();
+  try {
+    const { store, job, events } = await setup();
+    const runner = createRunner({ registry: sessionFactory(registry).registry, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    await runner.launch(job, launchAction({ retryNote: 'from code only' }));
+    const started = (await events()).filter((e) => e.type === 'attempt-started');
+    assert.equal(started.at(-1).retryNote, 'from code only');
+    assert.equal(store.get(job.jobId).attempts.at(-1).retryNote, 'from code only');
   } finally { registry._reset(); }
 });
 

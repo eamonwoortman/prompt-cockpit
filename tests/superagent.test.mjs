@@ -1202,6 +1202,44 @@ test('repeated answer, accept and stop append nothing', async () => {
   } finally { registry._reset(); }
 });
 
+test('retryJob resumes a stuck job from its last attempt, with handoff.md and the note; anything else is refused', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h);
+    const phase = job.phaseId;
+    const dir = path.join(h.root, 'attempt-a1');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'handoff.md'), 'next steps');
+    await h.store.append(job.jobId, { type: 'attempt-started', attemptId: 'a1', phase, task: null, role: 'r', model: 'm', n: 1, recovery: false, previousAttemptId: null, dir });
+    await h.store.append(job.jobId, { type: 'attempt-ended', attemptId: 'a1', outcome: 'failed', reason: 'failed', signature: 'failed|x' });
+
+    await assert.rejects(h.sa.retryJob(job.jobId, {}), { code: 'ERR_INVALID_STATE' });
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'stuck', detail: { phase, task: null, why: 'router-failed' } });
+    const seq = h.store.get(job.jobId).needsYouSeq;
+    let lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.retryJob(job.jobId, { needsYouSeq: seq - 1 }), { code: 'ERR_INVALID_STATE' });
+    await assert.rejects(h.sa.retryJob(job.jobId, { needsYouSeq: seq, note: 'x'.repeat(4001) }), { code: 'ERR_INVALID_ANSWER' });
+    await assert.rejects(h.sa.retryJob(job.jobId, { needsYouSeq: seq, note: 5 }), { code: 'ERR_INVALID_ANSWER' });
+    assert.equal(lineCount(h, job.jobId), lines);
+
+    const retried = await h.sa.retryJob(job.jobId, { needsYouSeq: seq, note: '  from code only  ' });
+    assert.equal(retried.state, 'running');
+    assert.deepEqual(retried.retries.map(({ needsYouSeq, phase: p, task, fromAttemptId, handoff, note }) => ({ needsYouSeq, p, task, fromAttemptId, handoff, note })), [
+      { needsYouSeq: seq, p: phase, task: null, fromAttemptId: 'a1', handoff: path.join(dir, 'handoff.md'), note: 'from code only' },
+    ]);
+    assert.equal(retried.attempts[0].retried, true);
+    lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.retryJob(job.jobId, { needsYouSeq: seq }), { code: 'ERR_INVALID_STATE' });
+    assert.equal(lineCount(h, job.jobId), lines);
+
+    await fs.rm(path.join(dir, 'handoff.md'));
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'stuck', detail: { phase, task: null, why: 'attempt-cap' } });
+    const again = await h.sa.retryJob(job.jobId, { note: '   ' });
+    assert.deepEqual([again.retries[1].handoff, again.retries[1].note, again.retries[1].fromAttemptId], [null, null, 'a1']);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('an answer or accept for a needs-you the job has left is refused and appends nothing', async () => {
   try {
     const h = await harness();

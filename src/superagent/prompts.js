@@ -194,6 +194,7 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
     recoveryNote: attempt.recovery ? RECOVERY_NOTE : null,
     previousAttemptDir: previous?.dir ?? null,
     handoff: attempt.handoff ?? null,
+    ...(attempt.retryNote ? { retryNote: attempt.retryNote } : {}),
     ...(READ_ONLY_ROLES.has(role) ? { resultVia: 'final-message' } : {}),
     ...(attempt.purpose ? purposeFields(job, phase, attempt) : {}),
     ...(job.tasks ? { effectiveTasks: job.tasks.map(({ id, title, repos, acceptance, verify, origin }) => ({ id, title, repos, acceptance, verify, origin })) } : {}),

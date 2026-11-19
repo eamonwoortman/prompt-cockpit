@@ -41,8 +41,17 @@ export const DEFAULT_REVIEW_ROUNDS = 3;
 // recovery or attempt number.
 export const gatedOut = (a) => a.outcome === 'failed' && a.reason === 'folder-changed';
 
+// A failed attempt a Retry on the stuck job left behind is out of its scope the
+// same way; the retry itself carries the resume point (pendingRetry).
+export const retriedAway = (a) => a.retried === true;
+
 export function attemptsFor(job, phase, task = null) {
-  return job.attempts.filter((a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a));
+  return job.attempts.filter((a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a) && !retriedAway(a));
+}
+
+// The scope's latest Retry that no attempt has started from yet.
+function pendingRetry(job, phase, task) {
+  return (job.retries ?? []).findLast((r) => r.phase === phase && r.task === task && r.consumedBy === null) ?? null;
 }
 
 export function attemptCap(limits, task) {
@@ -228,6 +237,7 @@ export function buildFixTask(job, attemptId, rawFindings) {
 
 function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null, model: modelOverride = null, handoff = null, openQuestions = null, askedIds = null }) {
   const model = job.models[role];
+  const retry = pendingRetry(job, phase.phase, task);
   return {
     type: 'launch',
     phase: phase.phase,
@@ -237,17 +247,18 @@ function launch(job, { phase, task = null, role, attempts, recovery, previousAtt
     effort: model.effort ?? null,
     maxTurns: model.maxTurns,
     n: attempts.filter((a) => CONSUMING_OUTCOMES.has(a.outcome)).length + 1,
-    recovery,
-    previousAttemptId,
+    recovery: retry ? true : recovery,
+    previousAttemptId: retry?.fromAttemptId ?? previousAttemptId,
     purpose,
     round,
     final,
     taskDef,
     reviewFindings,
     contested,
-    handoff,
+    handoff: handoff ?? retry?.handoff ?? null,
     openQuestions,
     askedIds,
+    ...(retry?.note ? { retryNote: retry.note } : {}),
   };
 }
 

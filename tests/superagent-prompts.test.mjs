@@ -177,6 +177,17 @@ test('the card carries handoff', async () => {
   assert.equal(parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir })).card).handoff, null);
 });
 
+test('the card carries the retry note only when the user gave one, and the contract explains it', async () => {
+  const { job, phase, attempt, emptyDir } = await fixture();
+  const withNote = { ...attempt, retryNote: 'Write the diagnosis from code only.' };
+  assert.equal(parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt: withNote, projectDir: emptyDir })).card).retryNote, 'Write the diagnosis from code only.');
+  for (const none of [attempt, { ...attempt, retryNote: null }]) {
+    assert.equal('retryNote' in parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt: none, projectDir: emptyDir })).card), false);
+  }
+  const contract = await fs.readFile(path.join(templatesDir(), 'contract.md'), 'utf8');
+  assert.match(contract, /`retryNote`/);
+});
+
 test('contract.md mentions handoff', async () => {
   const { job, phase, attempt, emptyDir } = await fixture();
   const { system } = await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir });

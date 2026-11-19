@@ -241,3 +241,15 @@ test('a gated review or per-task attempt lists no artifact of its own', () => {
   assert.ok(!keys.includes('report:T1'), keys.join(','));
   assert.ok(!keys.includes('taskReview:T1:1'), keys.join(','));
 });
+
+test('only a stuck entry is retryable, and a retried-away attempt is marked', () => {
+  const failed = { type: 'attempt-ended', attemptId: 'a1', outcome: 'failed', reason: 'failed' };
+  const stuck = m2([start('a1', 'spec'), failed, needsYou('stuck', { phase: 'spec', task: null, why: 'attempt-cap' })]);
+  assert.equal(jobDetail(stuck, notLive).needsYou.retryable, true);
+  for (const other of [m2([needsYou('question', { question: 'q' })]), m2([needsYou('ready-to-try')]), m2([needsYou('folder-changed', { text: 't' })])]) {
+    assert.equal(jobDetail(other, notLive).needsYou.retryable, false, other.reason);
+  }
+  const retried = m2([start('a1', 'spec'), failed, needsYou('stuck', { phase: 'spec', task: null, why: 'attempt-cap' }),
+    { type: 'job-retried', needsYouSeq: stuck.needsYouSeq, phase: 'spec', task: null, fromAttemptId: 'a1', handoff: null, note: null }, start('a2', 'spec')]);
+  assert.deepEqual(jobDetail(retried, notLive).attempts.map((a) => [a.attemptId, a.retried]), [['a1', true], ['a2', false]]);
+});

@@ -278,6 +278,8 @@ All enforced by the sequencer, all configurable:
 
 Within these limits the router may only choose *how* to retry (see "The router"); it can never extend a limit.
 
+**Retry on a stuck job (2026-11-18).** Only the user goes past a limit: Retry on a `stuck` entry appends `job-retried` for the stuck scope. That scope's failed attempts are then left out of its caps, repeated-error window, back-off and routing (as gated attempts are), and its next attempt resumes from the last one with `handoff.md` when it exists and the user's optional note as `retryNote` on the card. The limits themselves are unchanged, so the retried scope gets one fresh set of attempts.
+
 ### Permissions
 
 Default `auto` (Decision 12). **Spike outcome (revision 3):** `auto` asks through `canUseTool` for `AskUserQuestion`, so a worker would park unless the interceptor handler denies with the "unattended" message, so the worker can publish `blocked`. What the classifier does with a risky action is **inconclusive**: the model refused a force push itself, and a `curl` writing outside the cwd was silently allowed. Do not rely on `auto` to block risky Bash. The runner denies every `canUseTool` call from a worker regardless of classifier outcome, except the brainstormer, whose `AskUserQuestion` follows "Questions from unattended workers" (Plan 2 adds a test asserting this).

@@ -154,7 +154,6 @@ Plan 6 (the Superagent view) shipped without each of these; every one is a contr
 - [2026-11-17] [M] Spend so far (per job, per router) and a budget override on the New job form. No usage ledger or budget check yet (`budgetCheck` defaults to allow). Later plan: step 5.
 - [2026-11-17] [M] Answering a budget question ("extend budget"). `answerQuestion` refuses `detail.kind: 'budget'`, and the view shows such a question with Stop only. Later plan: step 5.
 - [2026-11-17] [M] Give feedback on a ready-to-try job. No triage worker. Later plan: feedback triage and sub-plans (step 6).
-- [2026-11-17] [M] Retry on a stuck job. `stuck` is terminal and there is no resume API. Later plan: feedback/resume (step 6).
 - [2026-11-17] [M] Manual mode on the New job form, and **Hand over**. `createJob` refuses `mode: 'manual'` (`ERR_MODE_UNSUPPORTED`). Later plan: manual-mode handover (rev 3 step 4, deferred by Plan 5).
 - [2026-11-17] [L] Router-written notification text (up to 40 words). Not built; Plan 6 uses code-generated text, which rev 3 already names as the fallback. Later plan: a later router plan.
 - [2026-11-17] [L] Settings modal (pipeline, model matrix, limits, budget, permission mode). Out of scope by choice; `createSuperagentConfig().save` already exists. Later plan: a later view plan.

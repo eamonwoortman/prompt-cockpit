@@ -494,6 +494,8 @@ export function initSuperagentView() {
     const parts = a.pausedBeforeLaunch
       ? [a.role, a.model, 'paused before launch (folder changed)', 'not counted']
       : [a.role, a.model, a.outcome ?? 'running', `${a.n}/${a.cap ?? '?'}`];
+    // A Retry restarts the count, so the attempts it left behind say so.
+    if (a.retried) parts.push('retried, not counted');
     if (a.round != null) parts.push(`round ${a.round}`);
     row.append(el('span', 'sa-attempt-scope', scope), el('span', 'sa-attempt-meta', parts.join(' · ')));
     if (a.live && a.sessionId) {
@@ -720,7 +722,25 @@ export function initSuperagentView() {
       box.append(el('div', 'sa-reason', needsYou.detail?.why ?? needsYou.type));
       const lines = stuckLines(needsYou.detail);
       if (lines.length) box.append(preBlock(lines.join('\n')));
-      box.appendChild(el('div', 'sa-actions')).append(stopButton(rightError));
+      const row = el('div', 'sa-actions');
+      if (needsYou.retryable) {
+        const input = el('textarea', 'sa-answer');
+        input.maxLength = ANSWER_MAX_CHARS;
+        input.rows = 3;
+        input.placeholder = 'Optional note for the next attempt';
+        input.value = answerDrafts.get(needsYou.key) ?? '';
+        input.addEventListener('input', () => answerDrafts.set(needsYou.key, input.value));
+        const retry = button('Retry', 'btn-primary', async () => {
+          retry.disabled = true;
+          if (await act('retry', rightError, { needsYouSeq: needsYou.seq, note: input.value })) answerDrafts.delete(needsYou.key);
+          else retry.disabled = false;
+        });
+        retry.title = 'Run this step again: earlier failed attempts stop counting, and the next one continues from the last attempt\'s handoff.md if it wrote one.';
+        box.append(input);
+        row.append(retry);
+      }
+      row.append(stopButton(rightError));
+      box.append(row);
     }
     return box;
   }

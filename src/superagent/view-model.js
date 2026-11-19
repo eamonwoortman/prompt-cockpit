@@ -1,4 +1,4 @@
-import { attemptCap, gatedOut, taskStatus } from './sequencer.js';
+import { attemptCap, gatedOut, retriedAway, taskStatus } from './sequencer.js';
 import { PHASE_ATTEMPT_KINDS, TASK_ATTEMPT_KINDS, artifactPaths, reviewPaths } from './results.js';
 
 const CORRUPT_TITLE = 'corrupt event log';
@@ -134,6 +134,7 @@ function needsYouView(job) {
     text,
     detail: d,
     answerable: job.reason === 'question' && d?.kind !== 'budget',
+    retryable: job.reason === 'stuck',
   };
 }
 
@@ -168,6 +169,7 @@ export function jobDetail(job, { isLive = () => false } = {}) {
       purpose: a.purpose,
       outcome: a.outcome ?? null,
       pausedBeforeLaunch: gatedOut(a),
+      retried: retriedAway(a),
       live: a.outcome == null && a.sessionId != null && isLive(a.sessionId) === true,
       sessionId: a.sessionId ?? null,
     })),

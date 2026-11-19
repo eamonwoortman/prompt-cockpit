@@ -1149,3 +1149,61 @@ test('an attempt the folder gate ended is not counted toward caps, repeated-erro
   const review = atReview(...[1, 2, 3].map(() => ({ purpose: 'review', round: 1, outcome: 'failed', reason: 'folder-changed', signature: 'folder-changed|x' })));
   assert.deepEqual(nextAction(review, ctx()), launchOf(review, 'spec-reviewer', { phase: 'spec-review', purpose: 'review', round: 1 }));
 });
+
+// Retry on a stuck job: the scope's failed attempts stop counting and the next
+// launch resumes from the stuck attempt.
+const stuckAt = (detail) => ({ type: 'needs-you', reason: 'stuck', detail: { phase: 'spec', task: null, ...detail } });
+const withRetry = (events, over = {}) => {
+  const needsYouSeq = provisionedEvents().length + events.length;
+  return build(...events, { type: 'job-retried', needsYouSeq, phase: 'spec', task: null, fromAttemptId: 'a3', handoff: '/d/handoff.md', note: 'from code only', ...over });
+};
+
+test('a Retry on a capped phase forgets its failed attempts and resumes from the stuck attempt with handoff and note', () => {
+  const capped = [...failedAt('a1', 1, T0, 's1'), ...failedAt('a2', 2, T0, 's2'), ...failedAt('a3', 3, T0, 's3'), stuckAt({ why: 'attempt-cap' })];
+  const job = withRetry(capped);
+  assert.equal(job.state, 'running');
+  assert.deepEqual(job.attempts.map((a) => a.retried), [true, true, true]);
+  assert.deepEqual(attemptsFor(job, 'spec'), []);
+  assert.deepEqual(nextAction(job, ctx({ now: T0 })), {
+    type: 'launch', phase: 'spec', task: null, role: 'spec-writer', model: 'claude-opus-5-5', effort: null, maxTurns: 60, n: 1, recovery: true, previousAttemptId: 'a3',
+    ...AUTHOR_EXTRAS, handoff: '/d/handoff.md', retryNote: 'from code only',
+  });
+
+  const retried = { type: 'job-retried', needsYouSeq: provisionedEvents().length + capped.length, phase: 'spec', task: null, fromAttemptId: 'a3', handoff: null, note: null };
+  const after = build(...capped, retried, started('a4', 1), ended('a4', 'failed', { reason: 'no-result', signature: 's4', at: T0 }));
+  assert.equal(after.retries[0].consumedBy, 'a4');
+  assert.deepEqual(nextAction(after, ctx({ now: T0 + 1 })), { type: 'wait', until: T0 + 60_000, why: 'backoff' });
+  const next = nextAction(after, ctx({ now: T0 + 60_000 }));
+  assert.deepEqual([next.n, next.previousAttemptId, next.handoff, 'retryNote' in next], [2, 'a4', null, false]);
+});
+
+test('a Retry after a repeated error or a router verdict launches without asking the router again', () => {
+  const sig = 'failed|same';
+  const repeated = withRetry([...failedAt('a1', 1, T0, sig), ...failedAt('a3', 2, T0, sig), stuckAt({ why: 'repeated-error' })], { handoff: null, note: null });
+  const a = nextAction(repeated, ctx({ now: T0, routing: true }));
+  assert.deepEqual([a.type, a.n, a.previousAttemptId, a.handoff, 'retryNote' in a], ['launch', 1, 'a3', null, false]);
+
+  const routed = [started('a3', 1), ended('a3', 'failed', { reason: 'failed', signature: 's', at: T0 }),
+    { type: 'router-decided', forAttemptId: 'a3', action: 'escalate', ok: false, error: 'timeout' }, stuckAt({ why: 'router-failed' })];
+  const b = nextAction(withRetry(routed), ctx({ now: T0, routing: true }));
+  assert.deepEqual([b.type, b.previousAttemptId, b.handoff], ['launch', 'a3', '/d/handoff.md']);
+});
+
+test('job-retried is ignored unless the job is stuck, and only forgets its own scope', () => {
+  const running = build(...failedAt('a1', 1, T0, 's1'), { type: 'job-retried', needsYouSeq: null, phase: 'spec', task: null, fromAttemptId: 'a1', handoff: null, note: null });
+  assert.deepEqual([running.state, running.attempts[0].retried, running.retries], ['running', false, []]);
+
+  const question = build(started('a1', 1), ended('a1', 'question', { question: 'Q?' }), { type: 'needs-you', reason: 'question', detail: { attemptId: 'a1', question: 'Q?' } },
+    { type: 'job-retried', needsYouSeq: provisionedEvents().length + 3, phase: 'spec', task: null, fromAttemptId: 'a1', handoff: null, note: null });
+  assert.deepEqual([question.state, question.reason], ['needs-you', 'question']);
+
+  const T1 = taskCreated('T1');
+  const T2 = taskCreated('T2');
+  const events = [...upTo('implement'), ev.tasksLoaded([T1, T2]),
+    ...[{ id: 'x1', task: 'T1' }, { id: 'x2', task: 'T2' }].flatMap(({ id, task }) => attempt({ id, phase: 'implement', task, purpose: 'implement', outcome: 'failed', reason: 'failed', signature: `s-${id}` }))];
+  const stuck = { type: 'needs-you', reason: 'stuck', detail: { phase: 'implement', task: 'T1', why: 'attempt-cap' } };
+  const seq = provisionedEvents({ pipeline: MILESTONE_2_PIPELINE }).length + events.length + 1;
+  const job = m2(...events, stuck, { type: 'job-retried', needsYouSeq: seq, phase: 'implement', task: 'T1', fromAttemptId: 'x1', handoff: null, note: null });
+  assert.equal(job.state, 'running');
+  assert.deepEqual(job.attempts.filter((x) => x.phase === 'implement').map((x) => [x.attemptId, x.retried]), [['x1', true], ['x2', false]]);
+});
