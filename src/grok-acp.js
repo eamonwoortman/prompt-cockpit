@@ -116,6 +116,19 @@ export function killGrokProcess(proc, { platform = process.platform, spawnSyncIm
   try { proc.kill(); } catch { /* already gone */ }
 }
 
+// Grok reports many real failures (an exhausted usage balance, an API 402) as
+// a bare JSON-RPC "Internal error" and puts the actual cause in error.data.
+// Keep that cause in the message so the user sees why, not just "Internal error".
+function acpErrorMessage(error) {
+  const base = error.message || '';
+  const { data } = error;
+  const detail = typeof data === 'string' ? data
+    : data && typeof data === 'object' ? (typeof data.message === 'string' ? data.message : JSON.stringify(data))
+      : '';
+  if (!detail || detail === base) return base || JSON.stringify(error);
+  return base ? `${base}: ${detail}` : detail;
+}
+
 export function createAcpClient({ writeLine, subscribeLine }) {
   let nextId = 1;
   const pending = new Map(); // id -> { resolve, reject }
@@ -135,7 +148,7 @@ export function createAcpClient({ writeLine, subscribeLine }) {
       const waiter = pending.get(msg.id);
       if (!waiter) return;
       pending.delete(msg.id);
-      if (msg.error) waiter.reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+      if (msg.error) waiter.reject(new Error(acpErrorMessage(msg.error)));
       else waiter.resolve(msg.result);
       return;
     }

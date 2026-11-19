@@ -47,6 +47,31 @@ test('request rejects on a JSON-RPC error', async () => {
   await assert.rejects(pending, /nope/);
 });
 
+test('a bare "Internal error" keeps the real cause carried in error.data', async () => {
+  const cause = 'API error (status 402 Payment Required): Grok Build usage balance exhausted';
+  for (const data of [{ message: cause }, cause]) {
+    const { client, written, incoming } = fakeTransport();
+    const pending = client.request('session/prompt', {});
+    incoming({ jsonrpc: '2.0', id: JSON.parse(written[0]).id, error: { code: -32603, message: 'Internal error', data } });
+    await assert.rejects(pending, (err) => {
+      assert.equal(err.message, `Internal error: ${cause}`);
+      return true;
+    });
+  }
+});
+
+test('an object error.data without a message is shown as JSON, and a repeated message is not doubled', async () => {
+  const run = async (error) => {
+    const { client, written, incoming } = fakeTransport();
+    const pending = client.request('session/new', {});
+    incoming({ jsonrpc: '2.0', id: JSON.parse(written[0]).id, error });
+    return pending.then(() => null, (err) => err.message);
+  };
+  assert.equal(await run({ message: 'Internal error', data: { status: 402 } }), 'Internal error: {"status":402}');
+  assert.equal(await run({ message: 'nope', data: 'nope' }), 'nope');
+  assert.equal(await run({ message: 'nope' }), 'nope');
+});
+
 test('incoming request is answered by onRequest', async () => {
   const { client, written, incoming } = fakeTransport();
   client.onRequest('session/request_permission', async () => ({ outcome: { outcome: 'cancelled' } }));
