@@ -1480,3 +1480,25 @@ test('a crash (onStateChange(\'error\') then onError) still broadcasts cockpit:e
   assert.match(errorBroadcasts[0].error, /CLI crashed/);
   assert.equal(registry.get(row.id), undefined, 'the row is still reaped once handleError has finished with it');
 });
+
+test('a crash broadcasts readable text without a stack trace, and explains an exhausted balance', () => {
+  registry._reset();
+  const impl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+  ws.sent.length = 0;
+
+  const origError = console.error;
+  console.error = () => {}; // handleError logs the stack for the operator
+  try {
+    impl.emitError(new Error('Internal error: API error (status 402 Payment Required): Grok Build usage balance exhausted'));
+  } finally {
+    console.error = origError;
+  }
+
+  const [broadcast] = ws.sent.filter((m) => m.type === 'cockpit:error');
+  assert.match(broadcast.error, /usage balance is exhausted/i);
+  assert.match(broadcast.error, /Grok Build usage balance exhausted/);
+  assert.ok(!/\n\s+at /.test(broadcast.error), 'no stack frames reach the browser');
+});

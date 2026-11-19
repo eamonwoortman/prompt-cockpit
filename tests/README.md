@@ -379,6 +379,13 @@ JSON-RPC handling, the per-session bearer auth and the thread config, and
 and the server in-process, a few cents) is the end-to-end check; run it with
 `ASKER_MODE=default` to also exercise the approval prompt.
 
+Session-ending errors: `session-error.test.mjs` covers the classifier (an
+exhausted balance or HTTP 402 reads as a plain explanation quoting the provider,
+anything else shows its message and never the stack), `session-registry.test.mjs`
+covers that the browser broadcast carries no stack frames, and `grok-acp.test.mjs`
+covers keeping the cause from a JSON-RPC `error.data`. Hand-verified only: how the
+text renders in the transcript's error block.
+
 The ask deadlock guard is covered in `delegation.test.mjs` (it refuses only a
 real wait cycle: a mutual wait names the asker, a three-session loop names the
 chain, and an ask to a target blocked on a third session queues instead; an

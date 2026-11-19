@@ -13,6 +13,7 @@ import { getProvider, parseProvider } from './provider-registry.js';
 import { createDelegation } from './delegation.js';
 import { accountUsageCache } from './account-usage-cache.js';
 import { nextTargets, ownTarget, normalizeChainOptions, looksLikeRateLimit, isRateLimitFailure } from './chain-policy.js';
+import { describeSessionError } from './session-error.js';
 import { appendChainLog } from './chain-log.js';
 import * as presence from './presence.js';
 import { getCockpitBaseUrl } from './cockpit-endpoint.js';
@@ -1471,7 +1472,10 @@ function handleError(id, err) {
   // read as stale rather than match a slot, and pendingTurnsCount would
   // otherwise never return to 0.
   row.handle?.turns?.abandonAll();
-  broadcast(id, { type: 'cockpit:error', error: String((err && err.stack) || err) });
+  // Readable text for the browser; the stack stays in the server log.
+  const described = describeSessionError(err);
+  console.error(`[cockpit] session ${id} ended with an error:\n${described.detail}`);
+  broadcast(id, { type: 'cockpit:error', error: described.text });
   // The only reap for an errored row - setState deliberately skips 'error'
   // so this cleanup runs first against a still-live row.
   sessions.delete(id);
