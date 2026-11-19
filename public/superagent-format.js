@@ -29,7 +29,7 @@ export function linkChip(href, label) {
   a.rel = 'noopener noreferrer';
   a.title = href;
   const auto = parts.label ? `${parts.host} · ${parts.label}` : parts.host;
-  a.textContent = label || auto || href;
+  a.textContent = (label && label !== href ? label : auto) || href;
   return a;
 }
 

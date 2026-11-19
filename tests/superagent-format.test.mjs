@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
+const { renderMarkdown } = await import('../public/markdown.js');
 const { linkChipLabel, linkChip, formatUsd, formatTokens, formatDuration, stageColorIndex } =
   await import('../public/superagent-format.js');
 
@@ -51,4 +52,10 @@ test('formatDuration', () => {
 test('stageColorIndex wraps at 8', () => {
   assert.equal(stageColorIndex(0), 0);
   assert.equal(stageColorIndex(9), 1);
+});
+
+test('a bare URL autolinked through linkChip shows host and id, not the URL', () => {
+  const out = renderMarkdown('see https://www.github.com/a/b/pull/12.', { autolink: true, renderLink: linkChip }).toHTML();
+  assert.ok(out.includes('>github.com · 12</a>'));
+  assert.ok(!out.includes('>https://'));
 });

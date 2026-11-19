@@ -151,7 +151,7 @@ function appendLink(out, href, label, options) {
     return;
   }
   const web = /^https?:/i.test(href);
-  if (web && !isWebUrl(href)) {
+  if (web && (options.renderLink || options.autolink) && !isWebUrl(href)) {
     out.append(document.createTextNode(label));
     return;
   }

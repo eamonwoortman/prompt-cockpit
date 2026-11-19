@@ -314,3 +314,10 @@ test('a malformed URL renders as text', () => {
   assert.equal(renderMarkdown('see http://[bad', { autolink: true, renderLink }).toHTML(), '<p>see http://[bad</p>');
   assert.equal(calls.length, 0);
 });
+
+test('default options keep a malformed http link as an anchor', () => {
+  assert.equal(
+    html('[x](http://)'),
+    '<p><a href="http://" target="_blank" rel="noopener noreferrer">x</a></p>',
+  );
+});
