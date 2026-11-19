@@ -179,9 +179,13 @@ function costOf(a) {
   return moneySpan('sa-attempt-cost', money, unknownWhy(a));
 }
 
-export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () => {}, stopButton = () => null }) {
+export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () => {}, onRetrospective = () => {}, stopButton = () => null }) {
   const expanded = new Set();
+  // jobId -> selector key -> { status: 'starting' | 'error' | 'pending', error?, name? },
+  // set by the view, so a poll's re-render keeps "Starting…" and the Open link.
+  const retroStates = new Map();
   let shownJobId = null;
+  let shownDetail = null;
 
   function stageClassFor(detail) {
     const index = new Map(detail.phases.map((p, i) => [p.phase, i]));
@@ -317,7 +321,29 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
     return button;
   }
 
-  function attemptCard(a) {
+  // `selector` is { attemptId } or { phase, task? }; the view starts or
+  // reopens the retrospective and reports back through setRetroState.
+  function retroControl(jobId, selector, label, title) {
+    const state = retroStates.get(jobId)?.get(JSON.stringify(selector)) ?? null;
+    const wrap = el('span', 'sa-retro');
+    let control;
+    if (state?.status === 'pending') {
+      control = el('button', 'btn btn-ghost sa-retro-open', 'Retrospective started: Open');
+      control.title = `Open ${state.name ?? 'the retrospective'} in a new tab`;
+    } else {
+      const starting = state?.status === 'starting';
+      control = el('button', 'btn btn-ghost sa-retro-btn', starting ? 'Starting…' : label);
+      control.title = title;
+      control.disabled = starting;
+    }
+    control.type = 'button';
+    control.addEventListener('click', () => onRetrospective(selector));
+    wrap.append(control);
+    if (state?.status === 'error') wrap.append(el('span', 'sa-retro-error', state.error));
+    return wrap;
+  }
+
+  function attemptCard(a, jobId) {
     const item = el('li', 'sa-attempt-card');
     item.dataset.attemptId = a.attemptId;
     if (a.live) item.classList.add('live');
@@ -345,6 +371,8 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
     const cost = costOf(a);
     if (cost) line.append(cost);
     line.append(inspectButton(a));
+    // A gated attempt never ran, so there is nothing to look back on.
+    if (!a.pausedBeforeLaunch) line.append(retroControl(jobId, { attemptId: a.attemptId }, 'Retro', 'Start a retrospective session on this attempt'));
     const result = resultOf(a);
     if (result) item.append(resultEl(a, result));
     return item;
@@ -375,8 +403,10 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
         facts.append(' · ');
         facts.append(moneySpan('sa-stage-money', spent, 'Part of this stage has no known spend.'));
       }
+      const selector = g.task === null ? { phase: g.phase } : { phase: g.phase, task: g.task };
+      head.append(retroControl(detail.jobId, selector, 'Retrospective', "Start a retrospective session on this stage's attempts"));
       const list = group.appendChild(el('ol', 'sa-attempt-list'));
-      for (const a of g.attempts) list.append(attemptCard(a));
+      for (const a of g.attempts) list.append(attemptCard(a, detail.jobId));
     }
     return box;
   }
@@ -439,7 +469,17 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
     root.replaceChildren(...build(detail));
     for (const [node, top] of saved) if (node.scrollTop !== top) node.scrollTop = top;
     shownJobId = detail.jobId;
+    shownDetail = detail;
   }
 
-  return { render };
+  // `jobId` is the job the click was on: the answer can arrive after the
+  // operator selected another one.
+  function setRetroState(selectorKey, state, jobId = shownJobId) {
+    if (!retroStates.has(jobId)) retroStates.set(jobId, new Map());
+    if (state) retroStates.get(jobId).set(selectorKey, state);
+    else retroStates.get(jobId).delete(selectorKey);
+    if (shownDetail && jobId === shownJobId) render(shownDetail);
+  }
+
+  return { render, setRetroState };
 }

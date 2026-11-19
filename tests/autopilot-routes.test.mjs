@@ -171,6 +171,15 @@ test('importing the server leaves the superagent host off and the superagent fol
   await assert.rejects(stat(path.join(home, '.prompt-cockpit', 'superagent')), { code: 'ENOENT' });
 });
 
+test('the retrospective route needs the operator token', async () => {
+  const route = '/api/superagent/jobs/x/retrospective';
+  const init = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ attemptId: 'a1' }) };
+  assert.equal((await fetch(`${ORIGIN}${route}`, init)).status, 401);
+  const withToken = await api(route, init);
+  assert.equal(withToken.status, 503, 'past the operator gate, the host (off here) answers');
+  await assert.rejects(stat(path.join(home, '.prompt-cockpit', 'superagent')), { code: 'ENOENT' });
+});
+
 test('a null entry in autopilots.json survives list/create/update/toggle/logs/delete over HTTP', async () => {
   // Mirrors autopilot-store.test.mjs's null-entry coverage, but through the
   // route layer: proves routes/autopilot.js's delegation to the store

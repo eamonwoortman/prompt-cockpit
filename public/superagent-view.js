@@ -16,6 +16,7 @@ import { initDirBrowser } from '/dir-browser.js';
 import { initNotificationsPanel, requestBrowserNotifications, SUPERAGENT_TAB, SUPERAGENT_SELECT_MESSAGE } from '/notifications-panel.js';
 import { initHistoryPane } from '/history-pane.js';
 import { ARTIFACT_STATE, artifactErrorText, createJobPane, renderArtifactBody, renderRouterLog } from '/superagent-job-pane.js';
+import { createHandoff } from '/superagent-handoff.js';
 import { statusLabel } from '/superagent-format.js';
 
 const POLL_MS = 5_000;
@@ -425,8 +426,34 @@ export function initSuperagentView() {
     root: paneRoot,
     onOpenArtifact: (key) => openArtifact(detail.jobId, key),
     onInspect: (attempt) => inspect(attempt),
+    onRetrospective: (selector) => retrospective(selector),
     stopButton: () => stopButton(middleError),
   });
+
+  // One handoff per job, kept across polls and job switches, so a
+  // retrospective whose tab did not open is reopened, never created twice.
+  const handoffs = new Map();
+  function handoffFor(jobId) {
+    if (!handoffs.has(jobId)) {
+      handoffs.set(jobId, createHandoff({
+        openWindow: (url) => window.open(url, '_blank'),
+        postJson: (selector) => postJson(`/api/superagent/jobs/${encodeURIComponent(jobId)}/retrospective`, selector),
+      }));
+    }
+    return handoffs.get(jobId);
+  }
+
+  // Runs inside the click: start() opens the handoff page before it POSTs.
+  function retrospective(selector) {
+    const jobId = detail.jobId;
+    const key = JSON.stringify(selector);
+    const pending = handoffFor(jobId).start(selector);
+    jobPane.setRetroState(key, { status: 'starting' }, jobId);
+    pending.then(
+      ({ status, session }) => jobPane.setRetroState(key, status === 'opened' ? null : { status: 'pending', name: session.name }, jobId),
+      (err) => jobPane.setRetroState(key, { status: 'error', error: errorText(err) }, jobId),
+    );
+  }
 
   function showError(target, err) {
     target.textContent = err ? errorText(err) : '';

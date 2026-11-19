@@ -263,6 +263,11 @@ body.view-superagent #superagentView {
 .sa-attempt-cost { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sa-attempt-cost.unknown { font-weight: 400; }
 .sa-attempt-inspect { padding: 2px 8px; }
+.sa-retro { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.sa-retro .btn { padding: 2px 8px; }
+.sa-retro-open { color: var(--accent); }
+.sa-retro-error { color: var(--error); font-size: 12px; }
+.sa-stage-head > .sa-retro { float: right; margin-left: 8px; }
 .sa-attempt-result { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; cursor: pointer; border-radius: 4px; }
 .sa-attempt-result::before { content: '\25B8'; flex: none; color: var(--muted); }
 .sa-attempt-result.expanded::before { content: '\25BE'; }

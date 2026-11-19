@@ -74,7 +74,7 @@ registerSessionRoutes(router, { isSupervisorOwned, isWatchOnly });
 registerHistoryRoutes(router);
 registerSystemRoutes(router);
 registerAutopilotRoutes(router, { store: autopilotStore, log: autopilotLog, supervisor: autopilot, registry });
-registerSuperagentRoutes(router, { host: superagentHost, registry });
+registerSuperagentRoutes(router, { host: superagentHost, registry, retrospective: { seedDefaults: seedSessionDefaults } });
 registerNotificationRoutes(router, { autopilot, host: superagentHost });
 registerSessionActionRoutes(router, { isWatchOnly });
 

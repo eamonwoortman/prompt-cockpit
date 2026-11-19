@@ -508,3 +508,88 @@ test('the router log is one card per decision: action badge, scope, model, cost,
   assert.ok(cards[2].textContent.includes('error: timeout <b>x</b>'));
   assert.equal(renderRouterLog({ decisions: [] }).querySelectorAll('.sa-placeholder').length, 1);
 });
+
+const stageRetro = (group) => group.querySelector('.sa-stage-head').querySelector('.sa-retro-btn');
+const attemptRetro = (root, id) => cardFor(root, id).querySelector('.sa-retro-btn');
+
+test('stage headers and attempt rows carry Retrospective, calling onRetrospective with their selector', () => {
+  const asked = [];
+  const { root, pane } = mount({ onRetrospective: (selector) => asked.push(selector) });
+  pane.render(detail({
+    attempts: [
+      attempt({ attemptId: 'i1' }),
+      attempt({ attemptId: 'f1', phase: 'fix', task: 'T1', role: 'fixer' }),
+      attempt({ attemptId: 'g1', n: null, outcome: 'stopped', pausedBeforeLaunch: true }),
+    ],
+  }));
+  const groups = root.querySelectorAll('.sa-stage-group');
+  assert.equal(stageRetro(groups[0]).textContent, 'Retrospective');
+  stageRetro(groups[0]).click();
+  stageRetro(groups[1]).click();
+  attemptRetro(root, 'f1').click();
+  assert.deepEqual(asked, [{ phase: 'investigate' }, { phase: 'fix', task: 'T1' }, { attemptId: 'f1' }]);
+  assert.equal(attemptRetro(root, 'g1'), null, 'a gated attempt never ran, so it has no Retrospective');
+});
+
+test('Retrospective shows Starting… while in flight, the error inline, and the Open recovery link', () => {
+  const asked = [];
+  const { root, pane } = mount({ onRetrospective: (selector) => asked.push(selector) });
+  pane.render(detail());
+  const key = JSON.stringify({ attemptId: 'a1' });
+  pane.setRetroState(key, { status: 'starting' }, 'job-1');
+  assert.equal(attemptRetro(root, 'a1').textContent, 'Starting…');
+  assert.equal(attemptRetro(root, 'a1').disabled, true);
+
+  pane.setRetroState(key, { status: 'error', error: 'no transcript was found (ERR_TRANSCRIPT_MISSING)' }, 'job-1');
+  assert.equal(attemptRetro(root, 'a1').disabled, false);
+  assert.equal(cardFor(root, 'a1').querySelector('.sa-retro-error').textContent, 'no transcript was found (ERR_TRANSCRIPT_MISSING)');
+
+  pane.setRetroState(key, { status: 'pending', name: 'Retro: x · investigate' }, 'job-1');
+  const open = cardFor(root, 'a1').querySelector('.sa-retro-open');
+  assert.equal(open.textContent, 'Retrospective started: Open');
+  assert.equal(cardFor(root, 'a1').querySelector('.sa-retro-error'), null);
+  open.click();
+  assert.deepEqual(asked, [{ attemptId: 'a1' }]);
+
+  // Another job's state never shows here.
+  pane.setRetroState(key, { status: 'starting' }, 'job-2');
+  assert.ok(cardFor(root, 'a1').querySelector('.sa-retro-open'));
+  pane.setRetroState(key, null, 'job-1');
+  assert.equal(attemptRetro(root, 'a1').textContent, 'Retro');
+});
+
+test('a pending or blocked Retrospective stays recoverable across a re-render without a second POST', async () => {
+  const { createHandoff } = await import('../public/superagent-handoff.js');
+  const posts = [];
+  const opened = [];
+  const handoff = createHandoff({
+    win: { location: { origin: 'http://127.0.0.1:4317' }, addEventListener() {}, removeEventListener() {} },
+    openWindow: (url) => { opened.push(url); return null; },
+    postJson: async (selector) => { posts.push(selector); return { id: 's1', token: 't1', name: 'Retro: x · investigate' }; },
+  });
+  let pane;
+  const runs = [];
+  const onRetrospective = (selector) => {
+    const key = JSON.stringify(selector);
+    pane.setRetroState(key, { status: 'starting' }, 'job-1');
+    runs.push(handoff.start(selector).then(({ status, session }) => pane.setRetroState(key, status === 'opened' ? null : { status: 'pending', name: session.name }, 'job-1')));
+  };
+  const mounted = mount({ onRetrospective });
+  pane = mounted.pane;
+  const { root } = mounted;
+  pane.render(detail());
+  stageRetro(root.querySelectorAll('.sa-stage-group')[0]).click();
+  await Promise.all(runs);
+  assert.equal(posts.length, 1);
+
+  // A poll brings a changed detail: the recovery link is still there.
+  pane.render(detail({ attempts: [attempt(), attempt({ attemptId: 'a2', n: 2, outcome: null, live: true })] }));
+  const head = root.querySelectorAll('.sa-stage-group')[0].querySelector('.sa-stage-head');
+  const open = head.querySelector('.sa-retro-open');
+  assert.equal(open.textContent, 'Retrospective started: Open');
+  open.click();
+  await Promise.all(runs);
+  assert.equal(posts.length, 1, 'Open repeats the handoff, never the POST');
+  assert.equal(opened.length, 2, 'each click opens a fresh handoff page');
+  assert.ok(root.querySelectorAll('.sa-stage-group')[0].querySelector('.sa-stage-head').querySelector('.sa-retro-open'));
+});

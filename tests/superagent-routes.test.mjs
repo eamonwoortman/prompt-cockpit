@@ -4,8 +4,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createRouter } from '../src/router.js';
+import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
+import { tempDir } from './superagent-helpers.mjs';
 import { registerSuperagentRoutes } from '../src/routes/superagent.js';
 import { registerNotificationRoutes } from '../src/routes/notifications.js';
 
@@ -24,9 +27,9 @@ function fakeHost({ supervisor = {}, refusal = null, readable = true, notificati
   };
 }
 
-async function serve(t, { host, registry = { get: () => undefined }, autopilot = { notifications: async () => ({ entries: [] }) }, readArtifactImpl, logImpl }) {
+async function serve(t, { host, registry = { get: () => undefined }, autopilot = { notifications: async () => ({ entries: [] }) }, readArtifactImpl, logImpl, retrospective }) {
   const router = createRouter();
-  registerSuperagentRoutes(router, { host, registry, readArtifactImpl });
+  registerSuperagentRoutes(router, { host, registry, readArtifactImpl, retrospective });
   registerNotificationRoutes(router, { autopilot, host, logImpl });
   const server = createServer((req, res) => {
     router.handle(req, res, new URL(req.url, 'http://127.0.0.1')).then((handled) => {
@@ -511,4 +514,268 @@ test('POST /api/superagent/jobs maps the workflow and folder error codes', async
     assert.equal(res.status, status, name);
     assert.equal(res.body.code, name);
   }
+});
+
+// --- POST /api/superagent/jobs/:id/retrospective ---
+
+const cardText = (attemptId) => `# Superagent job card\n\n\`\`\`json\n${JSON.stringify({ jobId: 'job-1', attemptId }, null, 2)}\n\`\`\`\n`;
+
+function fakeRegistry({ taken = [], sendError = null } = {}) {
+  const created = [];
+  const sent = [];
+  const closed = [];
+  return {
+    created,
+    sent,
+    closed,
+    get: () => undefined,
+    createSession(args) {
+      if (taken.includes(args.name)) throw Object.assign(new Error(`a session named "${args.name}" already exists in this project`), { code: 'ERR_NAME_TAKEN' });
+      created.push(args);
+      return { id: `sess-${created.length}`, token: `tok-${created.length}`, name: args.name, cwd: args.cwd };
+    },
+    sendInput: async (id, text) => {
+      if (sendError) throw sendError;
+      sent.push({ id, text });
+    },
+    closeSession: (id) => {
+      closed.push(id);
+      return true;
+    },
+  };
+}
+
+// A worktree job (its primary worktree lives under the superagent root, Ruling
+// 13) with a second, in-place folder, one plugin with a dev clone and a copy
+// under plugins/cache, and transcripts for every attempt except a3.
+async function retroWorld(t, { registry = fakeRegistry(), defaults = null, seedDefaults, refusal = null } = {}) {
+  const base = await fs.realpath(await tempDir('sa-retro-route-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const home = path.join(base, 'home');
+  const superagentRoot = path.join(home, '.prompt-cockpit', 'superagent');
+  const claudeHome = path.join(home, '.claude');
+  const cockpitRoot = path.join(base, 'cockpit');
+  await fs.mkdir(path.join(cockpitRoot, 'prompts', 'superagent'), { recursive: true });
+  await fs.writeFile(path.join(cockpitRoot, 'prompts', 'superagent', 'retrospective.md'), '# Retro template\n');
+  const worktree = path.join(superagentRoot, 'worktrees', 'login', 'app');
+  const inPlace = path.join(base, 'src', 'lib');
+  const clone = path.join(base, 'clones', 'tool-plugin');
+  const cached = path.join(claudeHome, 'plugins', 'cache', 'market', 'tool-plugin');
+  for (const dir of [worktree, inPlace, clone, cached]) await fs.mkdir(dir, { recursive: true });
+  const jobDir = path.join(superagentRoot, 'jobs', 'job-1');
+  await fs.mkdir(jobDir, { recursive: true });
+  await fs.writeFile(path.join(jobDir, 'events.jsonl'), '{}\n');
+
+  const projects = path.join(base, 'projects');
+  await fs.mkdir(projects, { recursive: true });
+  const transcript = async (attemptId) => {
+    const file = path.join(projects, `c-${attemptId}.jsonl`);
+    const rows = [
+      { type: 'user', cwd: worktree, message: { role: 'user', content: cardText(attemptId) } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'tool-plugin:do-thing' } }] } },
+    ];
+    await fs.writeFile(file, `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`);
+    return { status: 'found', claudeSessionId: `c-${attemptId}`, file, cwd: worktree };
+  };
+  const attempts = [
+    { attemptId: 'a1', phase: 'spec', role: 'spec-writer', model: 'm', n: 1, purpose: 'author', outcome: 'done', sessionId: 's1' },
+    { attemptId: 'a2', phase: 'implement', task: 't1', role: 'implementer', model: 'm', n: 1, purpose: 'author', outcome: 'failed', reason: 'turn-cap', sessionId: 's2' },
+    { attemptId: 'a3', phase: 'implement', task: 't2', role: 'implementer', model: 'm', n: 1, purpose: 'author', outcome: 'done', sessionId: 's3' },
+    { attemptId: 'a4', phase: 'implement', task: 't1', role: 'implementer', model: 'm', n: 2, purpose: 'author', outcome: 'done', sessionId: 's4' },
+  ];
+  const theJob = job({
+    pipeline: MILESTONE_2_PIPELINE,
+    limits: defaultConfig().limits,
+    attempts,
+    tasks: [{ id: 't1', title: 'One' }, { id: 't2', title: 'Two' }],
+    repos: [{ id: 'app', origin: path.join(base, 'origin'), worktree }, { id: 'lib', origin: inPlace, worktree: inPlace, inPlace: true }],
+  });
+  const found = { a1: await transcript('a1'), a2: await transcript('a2'), a4: await transcript('a4') };
+  const transcriptCalls = [];
+  const supervisor = {
+    getJob: (id) => (id === 'job-1' ? theJob : undefined),
+    transcriptFor: async (jobId, attemptId) => {
+      transcriptCalls.push(attemptId);
+      return found[attemptId] ?? { status: 'missing' };
+    },
+    jobDir: () => jobDir,
+    usageForJob: async () => new Map(),
+  };
+  const seeded = [];
+  const resolveCalls = [];
+  let ids = 0;
+  const retrospective = {
+    cockpitRoot,
+    superagentRoot,
+    claudeHome,
+    newId: () => `retro-${++ids}`,
+    readDefaults: async (cwd) => (cwd === cockpitRoot ? defaults : null),
+    seedDefaults: seedDefaults ?? (async (row) => { seeded.push(row.id); }),
+    resolvePluginsImpl: async (names, opts) => {
+      resolveCalls.push({ names, opts });
+      return names.map((plugin) => ({ plugin, marketplace: 'market', installPath: cached, sourceUrl: 'https://example.test/o/tool-plugin', clones: [clone, cached] }));
+    },
+    log: () => {},
+  };
+  const api = await serve(t, {
+    host: fakeHost({ supervisor, refusal }),
+    registry,
+    retrospective,
+    readArtifactImpl: async () => { throw Object.assign(new Error('not written'), { code: 'ERR_ARTIFACT_MISSING' }); },
+  });
+  const post = (body) => api('/api/superagent/jobs/job-1/retrospective', { method: 'POST', body });
+  return { base, api, post, registry, seeded, resolveCalls, transcriptCalls, superagentRoot, cockpitRoot, worktree, inPlace, clone, cached };
+}
+
+test('retrospective creates one session in the cockpit root with additionalDirectories from grantedDirectories and sends the prompt', async (t) => {
+  const w = await retroWorld(t);
+  const res = await w.post({ attemptId: 'a1' });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body, { id: 'sess-1', token: 'tok-1', name: 'Retro: Login page · spec' });
+  assert.equal(w.registry.created.length, 1);
+  const [args] = w.registry.created;
+  const snapshotDir = path.join(w.superagentRoot, 'retros', 'retro-1');
+  assert.equal(args.cwd, w.cockpitRoot);
+  assert.equal(args.provider, 'claude');
+  assert.deepEqual(args.sdkOptions, { additionalDirectories: [snapshotDir, w.worktree, w.inPlace, w.clone] });
+
+  assert.deepEqual(w.resolveCalls.map((c) => c.names), [['tool-plugin']]);
+  const roots = w.resolveCalls[0].opts.searchRoots;
+  for (const dir of [w.cockpitRoot, w.worktree, w.inPlace]) {
+    assert.ok(roots.includes(path.dirname(dir)), `parent of ${dir}`);
+    assert.ok(roots.includes(path.dirname(path.dirname(dir))), `grandparent of ${dir}`);
+  }
+  assert.equal(w.resolveCalls[0].opts.pluginsRoot, path.join(w.base, 'home', '.claude', 'plugins'));
+
+  assert.equal(w.registry.sent.length, 1);
+  const { id, text } = w.registry.sent[0];
+  assert.equal(id, 'sess-1');
+  assert.match(text, /^# Retro template/);
+  for (const needle of [snapshotDir, w.cockpitRoot, w.clone, '"attemptId": "a1"']) assert.ok(text.includes(needle), needle);
+  assert.ok(text.includes(`${w.cached}\`: outside the allowed folders`), 'the cached copy is reported, not granted');
+  assert.deepEqual(await fs.readdir(path.join(snapshotDir, 'transcripts')), ['a1']);
+});
+
+test('retrospective passes no model', async (t) => {
+  const w = await retroWorld(t);
+  await w.post({ phase: 'spec' });
+  assert.equal(w.registry.created.length, 1);
+  assert.ok(!('model' in w.registry.created[0]), 'the SDK default model');
+  assert.ok(!('permissionMode' in w.registry.created[0]), "the cwd's normal permission mode");
+});
+
+test('retrospective uses the persisted effort and seeds defaults', async (t) => {
+  const w = await retroWorld(t, { defaults: { effort: 'high', autoContinue: true } });
+  const res = await w.post({ attemptId: 'a1' });
+  assert.equal(res.status, 200);
+  assert.equal(w.registry.created[0].effort, 'high');
+  assert.deepEqual(w.seeded, ['sess-1']);
+
+  const bogus = await retroWorld(t, { defaults: { effort: 'turbo' } });
+  await bogus.post({ attemptId: 'a1' });
+  assert.equal(bogus.registry.created[0].effort, undefined);
+});
+
+test("retrospective name follows 'Retro: <title> · <phase> / <task> #n'; a collision picks #2", async (t) => {
+  const registry = fakeRegistry({ taken: ['Retro: Login page · implement / t1'] });
+  const w = await retroWorld(t, { registry });
+  const res = await w.post({ phase: 'implement', task: 't1' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.name, 'Retro: Login page · implement / t1 #2');
+  assert.deepEqual(registry.created.map((a) => a.name), ['Retro: Login page · implement / t1 #2']);
+
+  const stage = await (await retroWorld(t)).post({ phase: 'implement' });
+  assert.equal(stage.body.name, 'Retro: Login page · implement');
+  const ofAttempt = await (await retroWorld(t)).post({ attemptId: 'a4' });
+  assert.equal(ofAttempt.body.name, 'Retro: Login page · implement / t1');
+});
+
+test('retrospective gives up after #20 with 409 ERR_NAME_TAKEN and leaves no snapshot behind', async (t) => {
+  const base = 'Retro: Login page · spec';
+  const registry = fakeRegistry({ taken: [base, ...Array.from({ length: 19 }, (_, i) => `${base} #${i + 2}`)] });
+  const w = await retroWorld(t, { registry });
+  const res = await w.post({ attemptId: 'a1' });
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'ERR_NAME_TAKEN');
+  assert.deepEqual(registry.created, []);
+  assert.deepEqual(await fs.readdir(path.join(w.superagentRoot, 'retros')), []);
+});
+
+test('retrospective answers 409 ERR_TRANSCRIPT_MISSING when no selected attempt has a transcript', async (t) => {
+  const w = await retroWorld(t);
+  const res = await w.post({ attemptId: 'a3' });
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'ERR_TRANSCRIPT_MISSING');
+  assert.deepEqual(w.registry.created, []);
+  await assert.rejects(fs.stat(path.join(w.superagentRoot, 'retros')), { code: 'ENOENT' });
+});
+
+test("retrospective { phase, task } selects that task's attempts only", async (t) => {
+  const w = await retroWorld(t);
+  const res = await w.post({ phase: 'implement', task: 't1' });
+  assert.equal(res.status, 200);
+  assert.deepEqual(w.transcriptCalls, ['a2', 'a4']);
+  const snapshotDir = path.join(w.superagentRoot, 'retros', 'retro-1');
+  assert.deepEqual((await fs.readdir(path.join(snapshotDir, 'transcripts'))).sort(), ['a2', 'a4']);
+  const { text } = w.registry.sent[0];
+  assert.ok(text.includes('"attemptId": "a2"') && text.includes('"attemptId": "a4"'));
+  assert.ok(!text.includes('`a3`'), 'the other task is left out');
+
+  const whole = await retroWorld(t);
+  await whole.post({ phase: 'implement' });
+  assert.deepEqual(whole.transcriptCalls, ['a2', 'a3', 'a4']);
+});
+
+test('retrospective refuses a malformed or mixed selector with 400 ERR_INVALID_REQUEST before any work', async (t) => {
+  const w = await retroWorld(t);
+  const bad = [{}, { attemptId: 3 }, { attemptId: '' }, { attemptId: 'a1', phase: 'spec' }, { phase: 'spec', extra: 1 }, { task: 't1' }, { phase: 'implement', task: 7 }, { attemptId: 'a1', task: 't1' }, { phase: ['spec'] }];
+  for (const body of bad) {
+    const res = await w.post(body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.equal(res.body.code, 'ERR_INVALID_REQUEST', JSON.stringify(body));
+  }
+  assert.deepEqual(w.transcriptCalls, []);
+  assert.deepEqual(w.registry.created, []);
+  await assert.rejects(fs.stat(path.join(w.superagentRoot, 'retros')), { code: 'ENOENT' });
+});
+
+test('retrospective answers 404 ERR_UNKNOWN_SELECTION for an unknown attempt, phase or task, and a task on a non-task phase', async (t) => {
+  const w = await retroWorld(t);
+  for (const body of [{ attemptId: 'zz' }, { phase: 'nope' }, { phase: 'spec', task: 't1' }, { phase: 'implement', task: 't9' }, { phase: 'plan' }]) {
+    const res = await w.post(body);
+    assert.equal(res.status, 404, JSON.stringify(body));
+    assert.equal(res.body.code, 'ERR_UNKNOWN_SELECTION', JSON.stringify(body));
+  }
+  const unknownJob = await w.api('/api/superagent/jobs/nope/retrospective', { method: 'POST', body: { attemptId: 'a1' } });
+  assert.equal(unknownJob.status, 404);
+  assert.equal(unknownJob.body.code, 'ERR_UNKNOWN_JOB');
+  assert.deepEqual(w.transcriptCalls, []);
+  assert.deepEqual(w.registry.created, []);
+});
+
+test('retrospective ignores a failing seed of the session defaults', async (t) => {
+  const w = await retroWorld(t, { seedDefaults: async () => { throw new Error('settings.local.json is corrupt'); } });
+  const res = await w.post({ attemptId: 'a1' });
+  assert.equal(res.status, 200);
+  assert.equal(w.registry.sent.length, 1);
+  assert.deepEqual(w.registry.closed, []);
+});
+
+test('retrospective closes the new session when sending the prompt fails', async (t) => {
+  const registry = fakeRegistry({ sendError: new Error('the session ended') });
+  const w = await retroWorld(t, { registry });
+  const res = await w.post({ attemptId: 'a1' });
+  assert.equal(res.status, 500);
+  assert.match(res.body.error, /the session ended/);
+  assert.deepEqual(registry.closed, ['sess-1']);
+});
+
+test('retrospective goes through the host gate', async (t) => {
+  const w = await retroWorld(t, { refusal: { status: 503, state: 'stopping', ownerPort: null } });
+  const res = await w.post({ attemptId: 'a1' });
+  assert.equal(res.status, 503);
+  assert.equal(res.body.code, 'ERR_SUPERAGENT_UNAVAILABLE');
+  assert.equal(res.body.state, 'stopping');
+  assert.deepEqual(w.transcriptCalls, []);
+  assert.deepEqual(w.registry.created, []);
 });

@@ -2,12 +2,25 @@
 // routes/autopilot.js. Every action goes through host.admit and every read
 // through host.read, so "not owner", "starting" and "stopping" are answered by
 // the host (src/superagent-host.js), never by a route holding the supervisor.
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { respondJson, readJsonBody } from '../http-utils.js';
 import { isValidCwd } from '../session-launcher.js';
+import { readSessionDefaults } from '../session-defaults.js';
+import { CLAUDE_EFFORTS } from '../provider-registry.js';
 import { artifactWriterEnded, jobSummary, jobDetail } from '../superagent/view-model.js';
 import { readArtifact, snapshotDirFor } from '../superagent/artifacts.js';
+import { defaultSuperagentRoot } from '../superagent/config.js';
+import { gatedOut } from '../superagent/sequencer.js';
+import { buildSnapshot, grantedDirectories, renderRetrospectivePrompt, resolvePlugins } from '../superagent/retrospective.js';
 
 const TITLE_WORDS = 8;
+// The folder holding cockpit's package.json.
+const COCKPIT_ROOT = path.resolve(fileURLToPath(new URL('../../', import.meta.url)));
+const RETRO_NAME_TRIES = 20;
 
 const BAD_REQUEST = new Set([
   'ERR_INVALID_ANSWER', 'ERR_UNKNOWN_ARTIFACT', 'ERR_ARTIFACT_OUTSIDE',
@@ -19,8 +32,8 @@ const BAD_REQUEST = new Set([
 
 function statusFor(err) {
   if (err?.code === 'ERR_SUPERAGENT_UNAVAILABLE') return err.status;
-  if (err?.code === 'ERR_UNKNOWN_JOB' || err?.code === 'ERR_UNKNOWN_ATTEMPT' || err?.code === 'ERR_ARTIFACT_MISSING' || err?.code === 'ERR_TRANSCRIPT_MISSING') return 404;
-  if (err?.code === 'ERR_INVALID_STATE' || err?.code === 'ERR_FOLDER_IN_USE' || err?.code === 'ERR_TRANSCRIPT_AMBIGUOUS') return 409;
+  if (err?.code === 'ERR_UNKNOWN_JOB' || err?.code === 'ERR_UNKNOWN_ATTEMPT' || err?.code === 'ERR_UNKNOWN_SELECTION' || err?.code === 'ERR_ARTIFACT_MISSING' || err?.code === 'ERR_TRANSCRIPT_MISSING') return 404;
+  if (err?.code === 'ERR_INVALID_STATE' || err?.code === 'ERR_FOLDER_IN_USE' || err?.code === 'ERR_TRANSCRIPT_AMBIGUOUS' || err?.code === 'ERR_NAME_TAKEN') return 409;
   if (err?.code === 'ERR_ARTIFACT_GONE') return 410;
   if (BAD_REQUEST.has(err?.code)) return 400;
   return 500;
@@ -70,7 +83,132 @@ async function settled(read) {
   }
 }
 
-export function registerSuperagentRoutes(router, { host, registry, readArtifactImpl = readArtifact }) {
+// The body is exactly { attemptId }, { phase } or { phase, task }, all strings.
+function parseSelector(body) {
+  const keys = Object.keys(body).sort().join(',');
+  if (!['attemptId', 'phase', 'phase,task'].includes(keys)) return null;
+  return Object.values(body).every((v) => typeof v === 'string' && v) ? body : null;
+}
+
+// A stage covers every attempt that ran in it; a gated one never launched.
+function selectAttempts(job, selector) {
+  const unknown = (what) => coded('ERR_UNKNOWN_SELECTION', `job ${job.jobId} has no ${what}`);
+  const attempts = job.attempts ?? [];
+  if (selector.attemptId) {
+    const attempt = attempts.find((a) => a.attemptId === selector.attemptId);
+    if (!attempt) throw unknown(`attempt ${selector.attemptId}`);
+    return { phase: attempt.phase, task: attempt.task ?? null, attempts: [attempt] };
+  }
+  const phase = (job.pipeline ?? []).find((p) => p.phase === selector.phase);
+  if (!phase) throw unknown(`phase ${selector.phase}`);
+  const task = selector.task ?? null;
+  if (task !== null && phase.kind !== 'per-task') throw unknown(`tasks in phase ${selector.phase}`);
+  const chosen = attempts.filter((a) => a.phase === selector.phase && (task === null || a.task === task) && !gatedOut(a));
+  if (!chosen.length) throw unknown(`attempts in ${task === null ? selector.phase : `${selector.phase} / ${task}`}`);
+  return { phase: selector.phase, task, attempts: chosen };
+}
+
+// The parent and grandparent of each folder, where dev clones are looked for.
+function cloneSearchRoots(folders) {
+  const roots = folders.flatMap((f) => [path.dirname(f), path.dirname(path.dirname(f))]);
+  return [...new Map(roots.map((r) => [process.platform === 'win32' ? r.toLowerCase() : r, r])).values()];
+}
+
+async function persistedEffort(readDefaults, cwd) {
+  const persisted = await readDefaults(cwd).catch(() => null);
+  return persisted?.effort && CLAUDE_EFFORTS.includes(persisted.effort) ? persisted.effort : undefined;
+}
+
+// Spec F: a snapshot of what the selected attempts left, then a normal Claude
+// session in cockpit's own repo (not supervisor-owned, so not watch only) that
+// may also open the job's folders and the plugins' dev clones, and is sent the
+// first prompt. Everything the supervisor holds is read inside admit.
+function retrospectiveRoute({ host, registry, readArtifactImpl, options }) {
+  const {
+    cockpitRoot = COCKPIT_ROOT,
+    superagentRoot = defaultSuperagentRoot(),
+    claudeHome = path.join(os.homedir(), '.claude'),
+    newId = randomUUID,
+    readDefaults = readSessionDefaults,
+    seedDefaults = async () => {},
+    resolvePluginsImpl = resolvePlugins,
+    log = (...args) => console.error(...args),
+  } = options;
+  const forbiddenRoots = [
+    path.join(claudeHome, 'plugins', 'cache'),
+    path.join(claudeHome, 'plugins', 'marketplaces'),
+    path.join(claudeHome, 'projects'),
+    path.dirname(superagentRoot),
+    path.join(os.homedir(), '.prompt-cockpit'),
+  ];
+
+  async function prepare(supervisor, jobId, selector) {
+    const job = supervisor.getJob(jobId);
+    if (!job) throw coded('ERR_UNKNOWN_JOB', `unknown job: ${jobId}`);
+    const { phase, task, attempts } = selectAttempts(job, selector);
+    const found = new Map();
+    for (const a of attempts) found.set(a.attemptId, await supervisor.transcriptFor(jobId, a.attemptId));
+    if (![...found.values()].some((f) => f?.status === 'found')) {
+      throw coded('ERR_TRANSCRIPT_MISSING', 'none of the selected attempts has a transcript');
+    }
+    const usage = await settled(() => supervisor.usageForJob(jobId));
+    const spend = Object.fromEntries(jobDetail(job, { usageFor: (a) => usage?.get(a.attemptId)?.usage ?? null }).attempts.map((a) => [a.attemptId, a.cost]));
+    const snapshot = await buildSnapshot({ job, jobDir: supervisor.jobDir(jobId), attempts, found, root: superagentRoot, retroId: newId(), readArtifactFn: readArtifactImpl });
+    return { job, phase, task, attempts, spend, snapshot };
+  }
+
+  async function createSession({ job, phase, task, attempts, spend, snapshot }) {
+    const folders = (job.repos ?? []).map((r) => r.worktree).filter(Boolean);
+    const plugins = await resolvePluginsImpl(snapshot.plugins, { pluginsRoot: path.join(claudeHome, 'plugins'), searchRoots: cloneSearchRoots([cockpitRoot, ...folders]) });
+    const { granted, dropped } = await grantedDirectories(
+      [snapshot.dir, ...folders, ...plugins.flatMap((p) => p.clones)],
+      { forbiddenRoots, allow: [snapshot.dir, ...folders] },
+    );
+    const template = await fs.readFile(path.join(cockpitRoot, 'prompts', 'superagent', 'retrospective.md'), 'utf8');
+    const prompt = renderRetrospectivePrompt({ template, job, attempts, snapshot, plugins, cockpitRoot, spend, cards: snapshot.cards, dropped });
+    const effort = await persistedEffort(readDefaults, cockpitRoot);
+    const base = `Retro: ${job.title} · ${task === null ? phase : `${phase} / ${task}`}`;
+    for (let n = 1; n <= RETRO_NAME_TRIES; n += 1) {
+      try {
+        return { row: registry.createSession({ cwd: cockpitRoot, name: n === 1 ? base : `${base} #${n}`, provider: 'claude', effort, sdkOptions: { additionalDirectories: granted } }), prompt };
+      } catch (err) {
+        if (err.code !== 'ERR_NAME_TAKEN') throw err;
+      }
+    }
+    throw coded('ERR_NAME_TAKEN', `"${base}" and #2 to #${RETRO_NAME_TRIES} are all taken in this project`);
+  }
+
+  return async (req, res, url, { id }) => {
+    const selector = parseSelector(await readJsonBody(req));
+    if (!selector) return respondJson(res, 400, { error: 'the body must be { attemptId }, { phase } or { phase, task }', code: 'ERR_INVALID_REQUEST' });
+    let prepared;
+    let made;
+    try {
+      prepared = await host.admit((supervisor) => prepare(supervisor, id, selector));
+      made = await createSession(prepared);
+    } catch (err) {
+      if (prepared) await fs.rm(prepared.snapshot.dir, { recursive: true, force: true }).catch(() => {});
+      // On this route a missing transcript is a conflict with the request, not an unknown resource.
+      if (err?.code === 'ERR_TRANSCRIPT_MISSING') return respondJson(res, 409, { error: err.message, code: err.code });
+      return respondError(res, err);
+    }
+    const { row, prompt } = made;
+    try {
+      await seedDefaults(row);
+    } catch (err) {
+      log(`retrospective ${row.id}: could not apply the session defaults`, err);
+    }
+    try {
+      await registry.sendInput(row.id, prompt);
+    } catch (err) {
+      registry.closeSession(row.id);
+      return respondJson(res, 500, { error: `the retrospective prompt could not be sent: ${err?.message || err}` });
+    }
+    return respondJson(res, 200, { id: row.id, token: row.token, name: row.name });
+  };
+}
+
+export function registerSuperagentRoutes(router, { host, registry, readArtifactImpl = readArtifact, retrospective = {} }) {
   const isLive = (sessionId) => Boolean(registry.get(sessionId));
 
   router.get('/api/superagent', async (req, res) => {
@@ -180,4 +318,6 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
       return respondError(res, err);
     }
   });
+
+  router.post('/api/superagent/jobs/:id/retrospective', retrospectiveRoute({ host, registry, readArtifactImpl, options: retrospective }));
 }
