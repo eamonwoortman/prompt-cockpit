@@ -301,6 +301,16 @@ test('renderLink with autolink gets the bare URL as label', () => {
   assert.deepEqual(calls, [['https://example.com/a/1', 'https://example.com/a/1']]);
 });
 
+test('autolink keeps a closing paren that balances one inside the URL', () => {
+  const { calls, renderLink } = spy();
+  renderMarkdown('read https://en.wikipedia.org/wiki/Foo_(bar). Then (see https://x.com/a) and (https://y.com/b_(c)).', { autolink: true, renderLink });
+  assert.deepEqual(calls, [
+    ['https://en.wikipedia.org/wiki/Foo_(bar)', 'https://en.wikipedia.org/wiki/Foo_(bar)'],
+    ['https://x.com/a', 'https://x.com/a'],
+    ['https://y.com/b_(c)', 'https://y.com/b_(c)'],
+  ]);
+});
+
 test('mailto stays a plain anchor with renderLink set', () => {
   const { calls, renderLink } = spy();
   const out = renderMarkdown('[me](mailto:a@b.co)', { renderLink }).toHTML();

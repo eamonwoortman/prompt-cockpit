@@ -36,7 +36,16 @@ const LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\((${LINK_DEST_RE.source})\\)`);
 // escaped character, not a marker - e.g. "\*not bold\*" shouldn't italicize.
 const ESCAPE_RE = /\\([\\`*_{}[\]()#+\-.!~>])/;
 const BARE_URL_RE = /https?:\/\/[^\s<>]+/;
-const BARE_URL_TRAILING_RE = /[.,;:!?)]+$/;
+const BARE_URL_TRAILING_RE = /[.,;:!?]+$/;
+const count = (text, ch) => text.split(ch).length - 1;
+
+// Trailing punctuation is prose, not URL; a trailing ")" is only prose when
+// it has no "(" to close, so "https://en.wikipedia.org/wiki/Foo_(bar)" keeps it.
+function trimBareUrl(raw) {
+  let url = raw.replace(BARE_URL_TRAILING_RE, '');
+  while (url.endsWith(')') && count(url, ')') > count(url, '(')) url = url.slice(0, -1).replace(BARE_URL_TRAILING_RE, '');
+  return url;
+}
 
 // Link destinations are model-generated text, not a trusted URL - without a
 // protocol allowlist a reply (or a prompt-injected one) can turn
@@ -101,7 +110,7 @@ function renderInline(text, out, options = {}) {
   if (tag === 'esc') {
     out.append(document.createTextNode(match[1]));
   } else if (tag === 'bare') {
-    const url = match[0].replace(BARE_URL_TRAILING_RE, '');
+    const url = trimBareUrl(match[0]);
     consumed = url.length;
     appendLink(out, isSafeHref(url), url, options);
   } else if (tag === 'a' || tag === 'img') {
