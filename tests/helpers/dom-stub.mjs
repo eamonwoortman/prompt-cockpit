@@ -43,6 +43,8 @@ class Element {
   set href(v) { this.attrs.href = v; }
   set target(v) { this.attrs.target = v; }
   set rel(v) { this.attrs.rel = v; }
+  set title(v) { this.attrs.title = v; }
+  set className(v) { this.attrs.class = v; }
   set type(v) { this._type = v; }
   set checked(v) { this._checked = v; }
   set disabled(v) { this._disabled = v; }

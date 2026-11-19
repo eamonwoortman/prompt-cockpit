@@ -35,6 +35,8 @@ const LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\((${LINK_DEST_RE.source})\\)`);
 // GFM backslash-escape: a backslash before ASCII punctuation is a literal
 // escaped character, not a marker - e.g. "\*not bold\*" shouldn't italicize.
 const ESCAPE_RE = /\\([\\`*_{}[\]()#+\-.!~>])/;
+const BARE_URL_RE = /https?:\/\/[^\s<>]+/;
+const BARE_URL_TRAILING_RE = /[.,;:!?)]+$/;
 
 // Link destinations are model-generated text, not a trusted URL - without a
 // protocol allowlist a reply (or a prompt-injected one) can turn
@@ -71,7 +73,7 @@ function parseLinkDestination(raw) {
 // above, applies it, and recurses on both sides - so e.g. "**bold `code`**"
 // nests a <code> inside the <strong> instead of only matching the outermost
 // pattern and giving up on the rest.
-function renderInline(text, out) {
+function renderInline(text, out, options = {}) {
   if (!text) return;
   const candidates = [
     { re: ESCAPE_RE, tag: 'esc' },
@@ -83,6 +85,7 @@ function renderInline(text, out) {
     { re: ITALIC_RE, tag: 'em' },
     { re: STRIKE_RE, tag: 's' },
   ];
+  if (options.autolink) candidates.push({ re: BARE_URL_RE, tag: 'bare' });
   let earliest = null;
   for (const c of candidates) {
     const m = c.re.exec(text);
@@ -94,23 +97,23 @@ function renderInline(text, out) {
   }
   const { match, tag } = earliest;
   if (match.index > 0) out.append(document.createTextNode(text.slice(0, match.index)));
+  let consumed = match[0].length;
   if (tag === 'esc') {
     out.append(document.createTextNode(match[1]));
+  } else if (tag === 'bare') {
+    const url = match[0].replace(BARE_URL_TRAILING_RE, '');
+    consumed = url.length;
+    appendLink(out, isSafeHref(url), url, options);
   } else if (tag === 'a' || tag === 'img') {
     const href = isSafeHref(parseLinkDestination(match[2]));
     const label = match[1];
     if (href) {
-      const a = document.createElement('a');
-      a.href = href;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      renderInline(label, a);
-      out.append(a);
+      appendLink(out, href, label, options);
     } else {
       // Unsafe scheme (javascript:, data:, vbscript:, ...) - render the
       // link/image label as plain text instead of dropping the content.
       // Images are links-or-text, never <img> (no remote fetch from a reply).
-      renderInline(label, out);
+      renderInline(label, out, options);
     }
   } else if (tag === 'code') {
     const code = document.createElement('code');
@@ -119,19 +122,53 @@ function renderInline(text, out) {
   } else if (tag === 'strongem') {
     const strong = document.createElement('strong');
     const em = document.createElement('em');
-    renderInline(match[1], em);
+    renderInline(match[1], em, options);
     strong.append(em);
     out.append(strong);
   } else {
     const el = document.createElement(tag);
-    renderInline(match[1] ?? match[2], el);
+    renderInline(match[1] ?? match[2], el, options);
     out.append(el);
   }
-  renderInline(text.slice(match.index + match[0].length), out);
+  renderInline(text.slice(match.index + consumed), out, options);
 }
 
-function appendInline(parent, text) {
-  renderInline(text, parent);
+function isWebUrl(href) {
+  try {
+    const { protocol } = new URL(href);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+// `href` is already isSafeHref-approved (or null). Only http(s) goes to the
+// caller's renderLink; mailto: keeps the plain anchor; an http(s) URL that
+// new URL() rejects renders as text.
+function appendLink(out, href, label, options) {
+  if (!href) {
+    out.append(document.createTextNode(label));
+    return;
+  }
+  const web = /^https?:/i.test(href);
+  if (web && !isWebUrl(href)) {
+    out.append(document.createTextNode(label));
+    return;
+  }
+  if (web && options.renderLink) {
+    out.append(options.renderLink(href, label));
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = href;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  renderInline(label, a, { ...options, autolink: false });
+  out.append(a);
+}
+
+function appendInline(parent, text, options) {
+  renderInline(text, parent, options);
 }
 
 // Splits one `| a | b |` row into trimmed cell strings, tolerant of a
@@ -189,7 +226,7 @@ function listItemMatch(line) {
 // recurses into a nested list appended inside that item's <li> - only two
 // levels deep in practice (matches how Claude actually nests sub-bullets),
 // but the recursion itself isn't depth-limited.
-function parseList(lines, start, indent) {
+function parseList(lines, start, indent, options) {
   const first = listItemMatch(lines[start]);
   const ordered = first.ordered;
   const list = document.createElement(ordered ? 'ol' : 'ul');
@@ -210,10 +247,10 @@ function parseList(lines, start, indent) {
       li.append(cb);
       content = task[2];
     }
-    appendInline(li, content);
+    appendInline(li, content, options);
     const next = i < lines.length ? listItemMatch(lines[i]) : null;
     if (next && next.indent > indent) {
-      const nested = parseList(lines, i, next.indent);
+      const nested = parseList(lines, i, next.indent, options);
       li.append(nested.node);
       i = nested.i;
     }
@@ -227,7 +264,7 @@ function parseList(lines, start, indent) {
 // to `root`. Line-based, single pass, no lookahead beyond "does the next
 // line belong to the same block" - matches the flat structure of the prose
 // Claude actually writes (no nested lists/blockquotes support).
-export function renderMarkdown(text) {
+export function renderMarkdown(text, options = {}) {
   const root = document.createDocumentFragment();
   const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
   let i = 0;
@@ -235,7 +272,7 @@ export function renderMarkdown(text) {
   function flushParagraph(buf) {
     if (!buf.length) return;
     const p = document.createElement('p');
-    appendInline(p, buf.join('\n'));
+    appendInline(p, buf.join('\n'), options);
     root.append(p);
     buf.length = 0;
   }
@@ -287,7 +324,7 @@ export function renderMarkdown(text) {
     if (heading) {
       flushParagraph(paraBuf);
       const h = document.createElement(`h${heading[1].length}`);
-      appendInline(h, heading[2]);
+      appendInline(h, heading[2], options);
       root.append(h);
       i++;
       continue;
@@ -310,7 +347,7 @@ export function renderMarkdown(text) {
         i++;
       }
       const bq = document.createElement('blockquote');
-      appendInline(bq, quoteLines.join('\n'));
+      appendInline(bq, quoteLines.join('\n'), options);
       root.append(bq);
       continue;
     }
@@ -319,7 +356,7 @@ export function renderMarkdown(text) {
     const listItem = listItemMatch(line);
     if (listItem) {
       flushParagraph(paraBuf);
-      const { node, i: ni } = parseList(lines, i, listItem.indent);
+      const { node, i: ni } = parseList(lines, i, listItem.indent, options);
       root.append(node);
       i = ni;
       continue;
@@ -339,7 +376,7 @@ export function renderMarkdown(text) {
       headerCells.forEach((cell, idx) => {
         const th = document.createElement('th');
         if (aligns[idx]) th.style.textAlign = aligns[idx];
-        appendInline(th, cell);
+        appendInline(th, cell, options);
         headRow.append(th);
       });
       thead.append(headRow);
@@ -351,7 +388,7 @@ export function renderMarkdown(text) {
         headerCells.forEach((_, idx) => {
           const td = document.createElement('td');
           if (aligns[idx]) td.style.textAlign = aligns[idx];
-          appendInline(td, cells[idx] ?? '');
+          appendInline(td, cells[idx] ?? '', options);
           tr.append(td);
         });
         tbody.append(tr);

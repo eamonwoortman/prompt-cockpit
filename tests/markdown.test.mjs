@@ -258,3 +258,59 @@ test('renderMarkdown escapes ampersand/angle-brackets inside inline code too', (
   const out = html('`<b>&x</b>`');
   assert.equal(out, '<p><code>&lt;b&gt;&amp;x&lt;/b&gt;</code></p>');
 });
+
+const spy = () => {
+  const calls = [];
+  const renderLink = (href, label) => {
+    calls.push([href, label]);
+    const a = document.createElement('a');
+    a.href = href;
+    a.className = 'chip';
+    a.textContent = label;
+    return a;
+  };
+  return { calls, renderLink };
+};
+
+test('autolink off leaves bare URLs as text', () => {
+  assert.equal(html('see https://example.com/x now'), '<p>see https://example.com/x now</p>');
+});
+
+test('autolink turns a bare https URL into a link', () => {
+  const out = renderMarkdown('see https://example.com/x, now', { autolink: true }).toHTML();
+  assert.equal(
+    out,
+    '<p>see <a href="https://example.com/x" target="_blank" rel="noopener noreferrer">https://example.com/x</a>, now</p>',
+  );
+});
+
+test('renderLink receives only sanitised http(s) hrefs', () => {
+  const { calls, renderLink } = spy();
+  const out = renderMarkdown(
+    '[a](https://example.com/p) [b](javascript:alert(1)) [c](java\tscript:alert(1)) [d](JaVaScRiPt:alert(1)) [e](  javascript:alert(1))',
+    { renderLink },
+  ).toHTML();
+  assert.deepEqual(calls, [['https://example.com/p', 'a']]);
+  assert.ok(out.includes(' b ') && out.includes(' c ') && out.includes(' d ') && out.includes(' e'));
+  assert.ok(!out.includes('javascript'));
+});
+
+test('renderLink with autolink gets the bare URL as label', () => {
+  const { calls, renderLink } = spy();
+  renderMarkdown('go https://example.com/a/1.', { autolink: true, renderLink });
+  assert.deepEqual(calls, [['https://example.com/a/1', 'https://example.com/a/1']]);
+});
+
+test('mailto stays a plain anchor with renderLink set', () => {
+  const { calls, renderLink } = spy();
+  const out = renderMarkdown('[me](mailto:a@b.co)', { renderLink }).toHTML();
+  assert.equal(calls.length, 0);
+  assert.equal(out, '<p><a href="mailto:a@b.co" target="_blank" rel="noopener noreferrer">me</a></p>');
+});
+
+test('a malformed URL renders as text', () => {
+  const { calls, renderLink } = spy();
+  assert.equal(renderMarkdown('[x](http://)', { renderLink }).toHTML(), '<p>x</p>');
+  assert.equal(renderMarkdown('see http://[bad', { autolink: true, renderLink }).toHTML(), '<p>see http://[bad</p>');
+  assert.equal(calls.length, 0);
+});
