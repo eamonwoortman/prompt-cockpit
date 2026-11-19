@@ -37,6 +37,8 @@ The user asked that none of these is dropped. Each row is a control from rev 3's
 | Stepping into a worker session (rev 3: "open … to watch or step in") | The user chose watch-only for now: input would become part of the attempt the code then judges | Revisit with Give feedback / Retry (step 6) |
 | Base verifier evidence dropped from complete-phase verification after an extra round (Plan 5 final review) | A sequencer correctness gap, not UI | Next backend plan; logged in `backlog.md` **[Author's call]** |
 
+[2026-11-19] Update: the spend display (not the budget override or budget checks) shipped with the view UX plan; see `docs/superpowers/specs/2026-11-19-superagent-view-ux-design.md`.
+
 Also not in Plan 6: real-model probe runs (the user deferred probing until every plan is done), non-Claude providers.
 
 ## Anti-goals
