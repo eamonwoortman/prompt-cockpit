@@ -33,9 +33,9 @@ export function cockpitToolDefs(peers) {
         session: z.string().describe('Name of the target session, as shown by list_sessions'),
         prompt: z.string().min(1).describe('Self-contained message for the target session'),
       },
-      handler: async ({ session, prompt }) => {
+      handler: async ({ session, prompt }, { signal } = {}) => {
         try {
-          const reply = await peers.ask(session, prompt);
+          const reply = await peers.ask(session, prompt, { signal });
           return reply.ok ? text(reply.text) : text(`${session} could not answer: ${reply.text}`, true);
         } catch (err) {
           return text(String(err.message || err), true);

@@ -285,7 +285,7 @@ function canonCwd(cwd) {
 
 // What a session's own model may do across sessions (cockpit-tools.js).
 export function peersFor(id) {
-  return { listPeers: () => delegation.listPeers(id), ask: (targetName, text) => delegation.askFromTool(id, targetName, text) };
+  return { listPeers: () => delegation.listPeers(id), ask: (targetName, text, options) => delegation.askFromTool(id, targetName, text, options) };
 }
 
 export function findByName(cwd, name) {

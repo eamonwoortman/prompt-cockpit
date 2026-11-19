@@ -73,6 +73,47 @@ test('/mcp/:id requires the session bearer token, accepts POST only, and answers
   assert.equal((await fetch(`${BASE}/mcp/${row.id}`, { headers: { authorization: `Bearer ${row.token}` } })).status, 405);
 });
 
+test('handleMcpMessage hands the abort signal to the tool so a blocking ask can be cancelled', async () => {
+  let seen;
+  const spyPeers = { ...peers, ask: async (name, text, options) => { seen = options?.signal; return { ok: true, text: 'ok' }; } };
+  const controller = new AbortController();
+  await handleMcpMessage(spyPeers, rpc('tools/call', { name: 'ask_session', arguments: { session: 'Claude', prompt: 'hi' } }), { signal: controller.signal });
+  assert.equal(seen, controller.signal);
+});
+
+test('dropping the /mcp connection during ask_session frees the session instead of leaving it "waiting" forever', async () => {
+  registry._reset();
+  const codex = registry.createSession({ cwd: '/tmp/proj', name: 'Codex', startSessionImpl: fakeStartSession() });
+  const otherImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'Other', startSessionImpl: otherImpl });
+
+  const controller = new AbortController();
+  const call = fetch(`${BASE}/mcp/${codex.id}`, {
+    method: 'POST',
+    signal: controller.signal,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${codex.token}` },
+    body: JSON.stringify(rpc('tools/call', { name: 'ask_session', arguments: { session: 'Other', prompt: 'q' } })),
+  });
+  call.catch(() => {});
+  for (let i = 0; i < 100 && !otherImpl.lastInput; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(otherImpl.lastInput, 'the question reached the target');
+  await assert.rejects(() => otherImpl.lastOpts.peers.ask('Codex', 'x'), /waiting for YOUR answer/);
+
+  controller.abort(); // Codex gave up (interrupted turn or tool timeout)
+  // An accepted ask stays pending (nobody answers it here), a refused one
+  // rejects at once - so "still pending after a beat" means it was accepted.
+  const outcome = () => Promise.race([
+    otherImpl.lastOpts.peers.ask('Codex', 'x').then(() => 'answered', () => 'refused'),
+    new Promise((r) => setTimeout(() => r('accepted'), 30)),
+  ]);
+  let result = 'refused';
+  for (let i = 0; i < 100 && result === 'refused'; i++) {
+    result = await outcome();
+    if (result === 'refused') await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(result, 'accepted', 'Codex must stop being treated as blocked once its call is gone');
+});
+
 test('a session started while the server is up is handed its own MCP url and token', () => {
   registry._reset();
   const impl = fakeStartSession();

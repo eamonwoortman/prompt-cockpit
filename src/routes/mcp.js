@@ -15,7 +15,12 @@ export function registerMcpRoutes(router) {
       res.writeHead(405, { allow: 'POST' });
       return res.end();
     }
-    const response = await handleMcpMessage(registry.peersFor(id), await readJsonBody(req));
+    // A tool call like ask_session blocks for a whole turn of another session.
+    // If the caller drops the connection first (Codex interrupted, tool
+    // timeout), abort so the session is not left flagged as waiting forever.
+    const aborter = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) aborter.abort(); });
+    const response = await handleMcpMessage(registry.peersFor(id), await readJsonBody(req), { signal: aborter.signal });
     if (response === null) {
       res.writeHead(202);
       return res.end();

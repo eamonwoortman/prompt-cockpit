@@ -11,7 +11,9 @@ const FALLBACK_PROTOCOL_VERSION = '2025-03-26';
 const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
 const rpcResult = (id, result) => ({ jsonrpc: '2.0', id, result });
 
-export async function handleMcpMessage(peers, message) {
+// `signal` aborts when the HTTP caller goes away mid-call, so a long-blocking
+// tool (ask_session) can release what it was holding.
+export async function handleMcpMessage(peers, message, { signal } = {}) {
   if (!message || typeof message !== 'object' || message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
     return rpcError(message?.id ?? null, -32600, 'invalid request');
   }
@@ -42,7 +44,7 @@ export async function handleMcpMessage(peers, message) {
       if (!def) return rpcError(id, -32602, `unknown tool: ${params?.name}`);
       const parsed = z.object(def.shape).safeParse(params?.arguments ?? {});
       if (!parsed.success) return rpcError(id, -32602, `invalid arguments: ${parsed.error.message}`);
-      return rpcResult(id, await def.handler(parsed.data));
+      return rpcResult(id, await def.handler(parsed.data, { signal }));
     }
     default:
       return rpcError(id, -32601, `method not found: ${method}`);

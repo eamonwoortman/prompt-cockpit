@@ -379,6 +379,14 @@ JSON-RPC handling, the per-session bearer auth and the thread config, and
 and the server in-process, a few cents) is the end-to-end check; run it with
 `ASKER_MODE=default` to also exercise the approval prompt.
 
+The ask deadlock guard is covered in `delegation.test.mjs` (it refuses only a
+real wait cycle: a mutual wait names the asker, a three-session loop names the
+chain, and an ask to a target blocked on a third session queues instead; an
+aborted or pre-aborted ask releases the asker) and `mcp-endpoint.test.mjs` (a
+dropped `/mcp` connection frees the session). Hand-verified only: that a real Codex interrupt or tool
+timeout actually closes its HTTP connection to `/mcp/:id`. A cancelled ask
+still runs on the target and its answer is discarded.
+
 ## Model-aware thinking controls
 
 `src/thinking-rules.js` (shared verbatim with the browser) decides, per

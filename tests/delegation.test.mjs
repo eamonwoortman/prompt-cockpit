@@ -625,8 +625,69 @@ test('peers.ask refuses a target that is itself waiting on an ask, so two sessio
   registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
 
   const aAsksB = aImpl.lastOpts.peers.ask('B', 'q'); // A is now blocked on B
-  await assert.rejects(() => bImpl.lastOpts.peers.ask('A', 'q'), /itself waiting on another session/);
+  await assert.rejects(() => bImpl.lastOpts.peers.ask('A', 'q'), /waiting for YOUR answer/);
   void aAsksB;
+});
+
+test('an ask to a target that is waiting on a third session queues instead of being refused', async () => {
+  registry._reset();
+  const aImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
+  const bImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
+  registry.createSession({ cwd: '/tmp/proj', name: 'C', startSessionImpl: fakeStartSession() });
+
+  const aAsksC = aImpl.lastOpts.peers.ask('C', 'q'); // A is blocked on C, not on B: no cycle
+  const bAsksA = bImpl.lastOpts.peers.ask('A', 'from B'); // waits in A's queue until A's turn ends
+  assert.match(aImpl.lastInput, /^\[Prompt Cockpit\] Question from sibling session "B"/);
+  void aAsksC; void bAsksA;
+});
+
+test('a three-session wait cycle is refused and names the chain', async () => {
+  registry._reset();
+  const aImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
+  const bImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
+  const cImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'C', startSessionImpl: cImpl });
+
+  const aAsksB = aImpl.lastOpts.peers.ask('B', 'q'); // A -> B
+  const bAsksC = bImpl.lastOpts.peers.ask('C', 'q'); // B -> C
+  // C -> A would close the loop: A waits on B, B waits on C.
+  await assert.rejects(() => cImpl.lastOpts.peers.ask('A', 'q'), /A -> B -> you/);
+  void aAsksB; void bAsksC;
+});
+
+test('an aborted ask releases the asker, so a dead call cannot leave it permanently "waiting"', async () => {
+  registry._reset();
+  const aImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
+  const bImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
+
+  const controller = new AbortController();
+  const aAsksB = aImpl.lastOpts.peers.ask('B', 'q', { signal: controller.signal });
+  controller.abort(); // the caller went away (interrupted turn, dropped connection, tool timeout)
+  const reply = await aAsksB;
+  assert.equal(reply.ok, false);
+  assert.match(reply.text, /cancel/i);
+
+  const bAsksA = bImpl.lastOpts.peers.ask('A', 'now allowed'); // must not be refused
+  assert.match(aImpl.lastInput, /^\[Prompt Cockpit\] Question from sibling session "B"/);
+  void bAsksA;
+});
+
+test('an already-aborted signal fails fast without delivering the question', async () => {
+  registry._reset();
+  const aImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
+  const bImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
+
+  const reply = await aImpl.lastOpts.peers.ask('B', 'q', { signal: AbortSignal.abort() });
+  assert.equal(reply.ok, false);
+  assert.equal(bImpl.lastInput, undefined, 'a cancelled ask must not reach the target');
 });
 
 test('peers.listPeers lists other named trusted sessions only', () => {

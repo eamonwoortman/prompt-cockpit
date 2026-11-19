@@ -64,16 +64,55 @@ export function createDelegation({ sessions, pushTurn, broadcast, broadcastSumma
   // compose box - not an LLM tool call, so there's no real tool_use id for
   // the reply to attach to (see relayDelegationResult). Same-cwd lookup
   // first, then falls back to any session in the same handshake-trust group.
+  function resolveTarget(origin, targetName) {
+    return findByName(origin.cwd, targetName) || findTrustedByName(targetName);
+  }
+
+  // Follows the "is blocked waiting on" edges (row.awaitingOn, set while an
+  // ask_session call is in flight) from `from`, returning the rows from `from`
+  // to `to` inclusive, or null when `from`'s wait never leads to `to`.
+  function waitChain(from, to) {
+    const seen = new Set();
+    const walk = (row, trail) => {
+      if (row.id === to.id) return trail;
+      if (seen.has(row.id)) return null;
+      seen.add(row.id);
+      for (const nextId of row.awaitingOn?.keys() || []) {
+        const next = sessions.get(nextId);
+        const found = next && walk(next, [...trail, next]);
+        if (found) return found;
+      }
+      return null;
+    };
+    return walk(from, [from]);
+  }
+
   function delegateTask(originId, targetName, text, { onResult } = {}) {
     const origin = sessions.get(originId);
     if (!origin) throw new Error(`unknown session: ${originId}`);
-    const target = findByName(origin.cwd, targetName) || findTrustedByName(targetName);
+    const target = resolveTarget(origin, targetName);
     if (!target) throw new Error(`no session named "${targetName}"`);
     if (target.id === origin.id) throw new Error('cannot delegate to the same session');
-    // A model-initiated ask blocks its own turn until the target answers, so a
-    // target that is itself blocked on an ask could never reach this one
-    // (A asks B while B asks A, or any longer cycle) - refuse instead of hanging.
-    if (onResult && target.awaitingAsk) throw new Error(`"${target.name || targetName}" is itself waiting on another session - try again later`);
+    // A model-initiated ask blocks its own turn until the target answers. A
+    // target that is merely busy (even blocked on a third session) just queues
+    // this ask and gets to it when its turn ends, but if the target's wait
+    // chain leads back to this session (A asks B while B asks A, or any longer
+    // loop) neither turn can ever end - refuse that instead of hanging.
+    if (onResult) {
+      const chain = waitChain(target, origin);
+      if (chain) {
+        const name = target.name || targetName;
+        // The way out is to finish the turn that answers the blocked session,
+        // and retrying cannot help, so say that rather than "try later".
+        if (chain.length === 2) {
+          throw new Error(`"${name}" is blocked waiting for YOUR answer to its earlier question, so it cannot receive this yet. `
+            + `Finish answering it first (your reply goes back to it automatically), then ask again if you still need to.`);
+        }
+        const path = [...chain.slice(0, -1).map((row) => row.name || 'session'), 'you'].join(' -> ');
+        throw new Error(`"${name}" cannot receive this: it is blocked in a wait chain that ends at YOUR answer (${path}), so asking would deadlock. `
+          + `Finish answering first (your reply goes back automatically), then ask again if you still need to.`);
+      }
+    }
     // Handshake gate (see handshakeSecret's own comment above): both ends
     // have to currently agree with this process's canonical secret, not just
     // the target - an origin that's been manually revoked shouldn't be able
@@ -267,18 +306,35 @@ export function createDelegation({ sessions, pushTurn, broadcast, broadcastSumma
 
   // Backs the ask_session tool: resolves with the target's final answer (or
   // its failure text), rejects only when the ask could not be delivered.
-  // `awaitingAsk` marks the origin as blocked for delegateTask's cycle check.
-  async function askFromTool(originId, targetName, text) {
+  // `awaitingOn` (target id -> in-flight count) records who the origin is
+  // blocked on, which is what delegateTask's cycle check walks.
+  // `signal` fires when the caller stops waiting (interrupted turn, dropped
+  // connection, tool timeout): without it a dead call would leave the origin
+  // looking blocked, and could falsely close a cycle, until the target finally
+  // replied. Aborting only releases the origin; a question already queued on
+  // the target still runs there and its answer is discarded.
+  async function askFromTool(originId, targetName, text, { signal } = {}) {
     const origin = sessions.get(originId);
     if (!origin) throw new Error(`unknown session: ${originId}`);
+    if (signal?.aborted) return { ok: false, text: 'ask cancelled before it was sent' };
     let settle;
     const reply = new Promise((resolve) => { settle = resolve; });
-    origin.awaitingAsk = (origin.awaitingAsk || 0) + 1;
+    const target = resolveTarget(origin, targetName);
+    if (target) {
+      origin.awaitingOn ??= new Map();
+      origin.awaitingOn.set(target.id, (origin.awaitingOn.get(target.id) || 0) + 1);
+    }
+    const onAbort = () => settle({ ok: false, text: 'ask cancelled: the calling session stopped waiting for the answer' });
+    signal?.addEventListener('abort', onAbort, { once: true });
     try {
       delegateTask(originId, targetName, text, { onResult: settle });
       return await reply;
     } finally {
-      origin.awaitingAsk -= 1;
+      signal?.removeEventListener('abort', onAbort);
+      if (target) {
+        const left = (origin.awaitingOn.get(target.id) || 1) - 1;
+        if (left > 0) origin.awaitingOn.set(target.id, left); else origin.awaitingOn.delete(target.id);
+      }
     }
   }
 
