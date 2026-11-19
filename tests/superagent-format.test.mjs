@@ -4,7 +4,7 @@ import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
 const { renderMarkdown } = await import('../public/markdown.js');
-const { linkChipLabel, linkChip, formatUsd, formatTokens, formatDuration, stageColorIndex } =
+const { linkChipLabel, linkChip, formatUsd, formatMoney, formatTokens, formatDuration, stageColorIndex, statusLabel } =
   await import('../public/superagent-format.js');
 
 test('linkChipLabel takes the host and the last path segment', () => {
@@ -58,4 +58,20 @@ test('a bare URL autolinked through linkChip shows host and id, not the URL', ()
   const out = renderMarkdown('see https://www.github.com/a/b/pull/12.', { autolink: true, renderLink: linkChip }).toHTML();
   assert.ok(out.includes('>github.com · 12</a>'));
   assert.ok(!out.includes('>https://'));
+});
+
+test('formatMoney follows the money rules: unknown, lower bound, exact zero, nothing', () => {
+  assert.equal(formatMoney({ usd: null, complete: false }), 'not available');
+  assert.equal(formatMoney({ usd: 4.2, complete: false }), 'at least $4.20');
+  assert.equal(formatMoney({ usd: 0, complete: true }), '$0.00');
+  assert.equal(formatMoney({ usd: 16.42, complete: true }), '$16.42');
+  assert.equal(formatMoney({ usd: null, complete: true }), null);
+  assert.equal(formatMoney(null), null);
+});
+
+test('statusLabel shows a folder-changed pause as paused', () => {
+  assert.equal(statusLabel({ status: 'needs-you', reason: 'folder-changed' }), 'paused');
+  assert.equal(statusLabel({ status: 'needs-you', reason: 'question' }), 'needs you');
+  assert.equal(statusLabel({ status: 'running' }), 'running');
+  assert.equal(statusLabel({ status: 'odd' }), 'odd');
 });

@@ -24,6 +24,15 @@
 // every heartbeat. Its first brainstorm attempt and its spec attempt were
 // ended by that gate (paused before launch), with a folder-restored between.
 // The invalid workflow file is <superagent root>/workflows/broken.json.
+// Spend (superagent view UX, Ruling 14): every job gets a final usage.json
+// entry per attempt, so the job pane shows spend without a real transcript:
+// priced by default, one attempt recorded unknown ('missing'), one with an
+// unpriced model, and router decisions with and without a cost. The
+// Troubleshooting job's diagnosis is snapshotted (artifacts.js's own
+// snapshotArtifact) and then deleted from its worktree, and its test report is
+// deleted with no snapshot, so the artifact chips show 'snapshot' and 'gone'.
+// The proof's supervisor reads transcripts from an empty <cockpitHome>/
+// claude-projects, never ~/.claude/projects.
 // None of them is a state the supervisor resumes. That is PROVEN before the
 // script exits, not assumed: it builds a real supervisor over the seeded store
 // with a registry whose createSession records the call and throws, runs
@@ -55,6 +64,9 @@ const { resolveWorkflowModels, substituteArtifacts, workflowsDir } = await impor
 const { createSuperagentStore, deriveJob } = await import('../src/superagent/store.js');
 const { createSuperagent } = await import('../src/superagent/index.js');
 const { artifactPaths, reviewPaths } = await import('../src/superagent/results.js');
+const { snapshotArtifact, snapshotDirFor } = await import('../src/superagent/artifacts.js');
+const { createTranscriptIndex } = await import('../src/superagent/transcripts.js');
+const { gatedOut } = await import('../src/superagent/sequencer.js');
 const { BRANCH_PREFIX, createWorktree, slugify } = await import('../src/superagent/worktree.js');
 const { initRepo, jobCreated } = await import('./superagent-helpers.mjs');
 
@@ -113,9 +125,11 @@ function attemptEvents(a, models = defaults.models) {
   return events;
 }
 
-const routerDecided = (forAttemptId, action, note, estimatedTokens) => ({
+const routerDecided = (forAttemptId, action, note, estimatedTokens, costUsd = null) => ({
   type: 'router-decided', forAttemptId, action, note, ok: true, error: null, model: routerModel,
-  request: { estimatedTokens, truncated: false }, usage: null, latencyMs: 1800,
+  request: { estimatedTokens, truncated: false },
+  usage: costUsd === null ? null : { costUsd, totalInputTokens: estimatedTokens, outputTokens: 180 },
+  latencyMs: 1800,
 });
 
 // Provisions the worktree with createWorktree, commits `files` into it, then
@@ -286,6 +300,15 @@ function troubleshootingPipeline() {
   return { events, files };
 }
 
+const TROUBLESHOOTING_IDEA = [
+  'The CSV export loses its header row when the first cell is empty. Investigate [the work item](https://dev.azure.com/example/Project/_workitems/edit/171558) for these two Sentry issues:',
+  '',
+  '- https://example.sentry.io/issues/4908023691/?project=1',
+  '- https://example.sentry.io/issues/4908733049/',
+  '',
+  'Reproduce it with a **real export** before changing code.',
+].join('\n');
+
 const questionSpec1 = randomUUID();
 const questionSpec2 = randomUUID();
 const stuckIds = [randomUUID(), randomUUID(), randomUUID()];
@@ -299,7 +322,7 @@ seeded.push(await seedJob({
   events: [
     ...brainstormDone(),
     ...attemptEvents({ id: questionSpec1, phase: 'spec', role: 'spec-writer', purpose: 'author', n: 1, outcome: 'failed', reason: 'no-result', signature: 'no-result' }),
-    routerDecided(questionSpec1, 'retry', 'The worker ended without a result; one more try.', 1834),
+    routerDecided(questionSpec1, 'retry', 'The worker ended without a result; one more try.', 1834, 0.0041),
     ...attemptEvents({ id: questionSpec2, phase: 'spec', role: 'spec-writer', purpose: 'author', n: 2, outcome: 'question', question: QUESTION, sessionId: randomUUID() }),
     { type: 'needs-you', reason: 'question', detail: { attemptId: questionSpec2, question: QUESTION } },
   ],
@@ -311,14 +334,56 @@ seeded.push(await seedJob({
   events: [
     ...brainstormDone(),
     ...stuckIds.flatMap((id, i) => attemptEvents({ id, phase: 'spec', role: 'spec-writer', purpose: 'author', n: i + 1, outcome: 'failed', reason: 'no-result', signature: 'no-result' })),
-    routerDecided(stuckIds[0], 'retry', 'Transient: retry once.', 1702),
+    routerDecided(stuckIds[0], 'retry', 'Transient: retry once.', 1702, 0.0038),
     routerDecided(stuckIds[1], 'retry-alternate', 'Same failure twice; try the alternate model.', 2210),
     { type: 'needs-you', reason: 'stuck', detail: { phase: 'spec', task: null, why: 'attempt-cap', lastReason: 'no-result', signature: 'no-result' } },
   ],
 }));
 seeded.push(await seedJob({ title: 'Update README badge', idea: 'Point the build badge at the new CI.', files: done.files, events: [...done.events, { type: 'job-accepted' }] }));
-seeded.push(await seedJob({ title: 'Header row missing in export', idea: 'The CSV export loses its header row when the first cell is empty.', workflowId: 'troubleshooting', ...troubleshootingPipeline() }));
+seeded.push(await seedJob({
+  title: 'Header row missing in export',
+  idea: TROUBLESHOOTING_IDEA,
+  workflowId: 'troubleshooting',
+  ...troubleshootingPipeline(),
+}));
 seeded.push(await seedInPlaceJob({ title: 'Add dark mode', idea: 'Add a dark mode toggle to the settings page.' }));
+
+// --- Spend and artifact states (Ruling 14) ---
+const PRICE_PER_MTOK = { opus: 0.62, sonnet: 0.21, haiku: 0.05 };
+function usageEntry(model, total, extra = {}) {
+  const family = Object.keys(PRICE_PER_MTOK).find((f) => String(model).includes(f));
+  const costUsd = family ? Number(((total / 1e6) * PRICE_PER_MTOK[family]).toFixed(4)) : null;
+  const byModel = { [model]: { costUsd, tokens: total }, ...(extra.byModel ?? {}) };
+  const unpricedModels = Object.entries(byModel).filter(([, m]) => m.costUsd === null).map(([m]) => m);
+  return {
+    state: 'final', claudeSessionId: null, file: null, cwd: null, fingerprint: null,
+    knownCostUsd: Object.values(byModel).reduce((sum, m) => sum + (m.costUsd ?? 0), 0),
+    tokens: { input: Math.round(total * 0.1), output: Math.round(total * 0.05), cacheRead: Math.round(total * 0.8), cacheWrite: total - Math.round(total * 0.1) - Math.round(total * 0.05) - Math.round(total * 0.8), total },
+    byModel, unpricedModels, complete: unpricedModels.length === 0, conflicts: 0, scannedAt: Date.now(),
+  };
+}
+// pick(attempt, i) may return an entry to use instead of the priced default.
+async function seedUsage(jobId, pick = () => undefined) {
+  const job = await store.load(jobId);
+  const attempts = {};
+  job.attempts.filter((a) => !gatedOut(a)).forEach((a, i) => {
+    attempts[a.attemptId] = pick(a, i) ?? usageEntry(a.model, 380_000 + ((i * 917_000) % 6_400_000));
+  });
+  await fs.writeFile(path.join(store.jobDir(jobId), 'usage.json'), `${JSON.stringify({ format: 1, attempts }, null, 2)}\n`);
+}
+const [questionJob, readyJob, stuckJob, doneJob, troubleJob, inPlaceJob] = seeded;
+await seedUsage(questionJob, (a) => (a.attemptId === questionSpec1 ? { state: 'final', unknown: 'missing', scannedAt: Date.now() } : undefined));
+await seedUsage(readyJob, (a) => (a.phase === 'test' ? usageEntry(a.model, 2_100_000, { byModel: { 'mystery-model-1': { costUsd: null, tokens: 40_000 } } }) : undefined));
+for (const jobId of [stuckJob, doneJob, troubleJob, inPlaceJob]) await seedUsage(jobId);
+{
+  const job = await store.load(troubleJob);
+  const snapshotDir = snapshotDirFor(store.jobDir(troubleJob));
+  const worktree = job.repos[0].worktree;
+  const paths = artifactPaths(job);
+  if ((await snapshotArtifact(job, 'diagnosis', { snapshotDir })) === 'missing') throw new Error('fixture: diagnosis was not snapshotted');
+  await fs.rm(path.join(worktree, ...paths.diagnosis.split('/')));
+  await fs.rm(path.join(worktree, ...paths.testReport.split('/')));
+}
 
 const before = new Map();
 for (const jobId of seeded) {
@@ -349,7 +414,10 @@ try {
   const config = createSuperagentConfig({ filePath: path.join(root, 'config.json') });
   await config.load();
   const guardStore = createSuperagentStore({ rootDir: path.join(root, 'jobs') });
-  const supervisor = createSuperagent({ registry, store: guardStore, config, worktreesRoot, logImpl: (line) => console.log(`[supervisor] ${line}`) });
+  const projectsRoot = path.join(home, 'claude-projects');
+  await fs.mkdir(projectsRoot, { recursive: true });
+  const transcripts = createTranscriptIndex({ projectsRoot });
+  const supervisor = createSuperagent({ registry, store: guardStore, config, worktreesRoot, transcripts, logImpl: (line) => console.log(`[supervisor] ${line}`) });
   try {
     await supervisor.start();
     for (let i = 0; i < 3; i++) await supervisor.tick();

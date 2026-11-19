@@ -57,3 +57,21 @@ export function formatDuration(ms) {
 export function stageColorIndex(i) {
   return i % 8;
 }
+
+// Money is { usd: number|null, complete: boolean } (R2-5): usd null means no
+// part of it was priced, complete false means part of it is unknown. Null when
+// there is nothing to show (an empty aggregate, a gated attempt).
+export function formatMoney(money) {
+  if (!money) return null;
+  if (money.usd === null) return money.complete ? null : 'not available';
+  return money.complete ? formatUsd(money.usd) : `at least ${formatUsd(money.usd)}`;
+}
+
+const STATUS_LABEL = {
+  running: 'running', 'needs-you': 'needs you', done: 'done', stopped: 'stopped', failed: 'failed', provisioning: 'provisioning',
+};
+
+export function statusLabel(job) {
+  if (job.reason === 'folder-changed' && job.status === 'needs-you') return 'paused';
+  return STATUS_LABEL[job.status] ?? job.status;
+}

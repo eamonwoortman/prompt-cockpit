@@ -1,7 +1,8 @@
 // The Superagent tab (/?view=superagent, chosen by entry.js before app.js and
 // its session bootstrap could run). Three panes: jobs and the New job form;
-// the selected job's phases, tasks, attempts and artifacts; and what the job
-// needs from you plus its router log.
+// the selected job (superagent-job-pane.js: header, description, timeline,
+// spend, attempts, artifacts, tasks, branches); and what the job needs from
+// you plus its router log.
 //
 // A POLL, like the bell: GET /api/superagent and the selected job every 5s
 // while the tab is visible. Panes render only while the host is `ready`;
@@ -13,23 +14,18 @@
 import { initOperatorGate } from '/operator-auth.js';
 import { initDirBrowser } from '/dir-browser.js';
 import { initNotificationsPanel, requestBrowserNotifications, SUPERAGENT_TAB, SUPERAGENT_SELECT_MESSAGE } from '/notifications-panel.js';
+import { createJobPane } from '/superagent-job-pane.js';
+import { statusLabel } from '/superagent-format.js';
 
 const POLL_MS = 5_000;
 const ANSWER_MAX_CHARS = 4000;
 const ASSUMPTIONS_HEADING = '## Assumptions made for you';
 const FINISHED = new Set(['done', 'stopped', 'failed']);
-const STATUS_LABEL = {
-  running: 'running', 'needs-you': 'needs you', done: 'done', stopped: 'stopped', failed: 'failed', provisioning: 'provisioning',
-};
-const CHIP_MARK = { done: ' ✓', running: ' ●', waiting: ' !', todo: '' };
 const IN_PLACE_LABEL = 'Use this folder directly (no new worktree)';
 const IN_PLACE_NOTE = "The job switches this folder to its own branch and works there. Don't work in this folder while the job runs.";
 const WORKFLOW_WAIT = 'Wait for the workflow list to load.';
 const WORKFLOW_FAILED = 'The workflow list could not be loaded; pick the primary folder again to retry.';
-const IN_PLACE_FINISHED = "This folder is still on the job's branch.";
 const READY_LABEL = { testReport: 'Test report' };
-
-const statusLabel = (job) => (job.reason === 'folder-changed' && job.status === 'needs-you' ? 'paused' : (STATUS_LABEL[job.status] ?? job.status));
 
 function firstError(workflow) {
   const e = workflow.errors?.[0];
@@ -412,9 +408,9 @@ export function initSuperagentView() {
       if (job.jobId === selectedId) row.classList.add('selected');
       row.append(el('span', 'sa-job-title', job.title));
       const meta = el('span', 'sa-job-meta');
-      if (job.phaseId) meta.append(el('span', 'sa-job-phase', job.phaseId));
+      meta.append(el('span', `sa-badge status-${job.status}`, statusLabel(job)));
       if (job.workflow) meta.append(el('span', 'sa-job-workflow', job.workflow.name));
-      meta.append(el('span', 'sa-status', statusLabel(job)));
+      if (job.phaseId) meta.append(el('span', 'sa-job-phase', job.phaseId));
       row.append(meta);
       row.addEventListener('click', () => select(job.jobId));
       jobList.append(row);
@@ -425,7 +421,13 @@ export function initSuperagentView() {
 
   const middleError = middle.appendChild(el('div', 'sa-error'));
   middleError.hidden = true;
-  const middleBody = middle.appendChild(el('div'));
+  const middleNotice = middle.appendChild(el('div', 'sa-placeholder'));
+  const paneRoot = middle.appendChild(el('div', 'sa-job-pane'));
+  const jobPane = createJobPane({
+    root: paneRoot,
+    onOpenArtifact: (key) => openArtifact(detail.jobId, key),
+    stopButton: () => stopButton(middleError),
+  });
 
   function showError(target, err) {
     target.textContent = err ? errorText(err) : '';
@@ -482,97 +484,18 @@ export function initSuperagentView() {
     return li;
   }
 
-  function openWorker(sessionId) {
-    window.open(`/?attach=${encodeURIComponent(sessionId)}`, '_blank');
-  }
-
-  function attemptRow(a) {
-    const row = el('li', 'sa-attempt');
-    const scope = [a.phase, a.task].filter(Boolean).join(' / ');
-    // A gated attempt never launched and takes no attempt number, so the
-    // launch after it reuses its n; it must not read as a second attempt n.
-    const parts = a.pausedBeforeLaunch
-      ? [a.role, a.model, 'paused before launch (folder changed)', 'not counted']
-      : [a.role, a.model, a.outcome ?? 'running', `${a.n}/${a.cap ?? '?'}`];
-    // A Retry restarts the count, so the attempts it left behind say so.
-    if (a.retried) parts.push('retried, not counted');
-    if (a.round != null) parts.push(`round ${a.round}`);
-    row.append(el('span', 'sa-attempt-scope', scope), el('span', 'sa-attempt-meta', parts.join(' · ')));
-    if (a.live && a.sessionId) {
-      const open = button('open', '', () => openWorker(a.sessionId));
-      open.title = 'Watch this worker in a new tab (watch only)';
-      row.append(open);
-    }
-    return row;
-  }
-
+  // The job pane lives in its own module; this only picks between it and a
+  // one-line notice (no job selected, loading, or the job could not be read).
   function renderMiddle() {
-    middleBody.textContent = '';
-    if (!selectedId) {
-      middleBody.append(el('div', 'sa-placeholder', 'Select a job, or create one with + New job.'));
-      return;
-    }
-    if (detailError && !detail) {
-      middleBody.append(el('div', 'sa-error', errorText(detailError)));
-      return;
-    }
-    if (!detail) {
-      middleBody.append(el('div', 'sa-placeholder', 'Loading…'));
-      return;
-    }
-    const head = el('div', 'sa-job-head');
-    head.append(el('h2', 'sa-heading', detail.title), el('span', `sa-status status-${detail.status}`, statusLabel(detail)));
-    if (!FINISHED.has(detail.status)) head.append(stopButton(middleError));
-    middleBody.append(head);
-    if (detail.workflow) middleBody.append(el('div', 'sa-note', `Workflow: ${detail.workflow.name}`));
-    if (detail.idea) middleBody.append(el('div', 'sa-idea', detail.idea));
-
-    if (detail.phases.length) {
-      const chips = el('div', 'sa-chips');
-      for (const p of detail.phases) {
-        const chip = el('span', `sa-chip chip-${p.status}`, `${p.phase}${CHIP_MARK[p.status] ?? ''}`);
-        chip.title = `${p.kind} · ${p.status}`;
-        chips.append(chip);
-      }
-      middleBody.append(chips);
-    }
-
-    if (detail.repos.length) {
-      const box = section('Branches');
-      const list = el('ul', 'sa-list');
-      for (const r of detail.repos) {
-        const li = branchLine(r);
-        li.append(` (${r.origin})`);
-        if (r.inPlace && FINISHED.has(detail.status)) li.append(el('div', 'sa-note', IN_PLACE_FINISHED));
-        list.append(li);
-      }
-      box.append(list);
-      middleBody.append(box);
-    }
-
-    if (detail.tasks) {
-      const box = section('Tasks');
-      const list = el('ul', 'sa-list sa-tasks');
-      for (const t of detail.tasks) list.append(el('li', t.done ? 'done' : null, `${t.done ? '☑' : '☐'} ${t.id} ${t.title}`));
-      if (!detail.tasks.length) list.append(el('li', 'sa-placeholder', 'No tasks.'));
-      box.append(list);
-      middleBody.append(box);
-    }
-
-    const attempts = section('Attempts');
-    const list = el('ul', 'sa-list');
-    for (const a of detail.attempts) list.append(attemptRow(a));
-    if (!detail.attempts.length) list.append(el('li', 'sa-placeholder', 'No attempts yet.'));
-    attempts.append(list);
-    middleBody.append(attempts);
-
-    if (detail.artifacts.length) {
-      const box = section('Artifacts');
-      const links = el('div', 'sa-artifacts');
-      for (const a of detail.artifacts) links.append(button(a.label, 'btn-ghost', () => openArtifact(detail.jobId, a.key)));
-      box.append(links);
-      middleBody.append(box);
-    }
+    let notice = null;
+    if (!selectedId) notice = 'Select a job, or create one with + New job.';
+    else if (detailError && !detail) notice = errorText(detailError);
+    else if (!detail) notice = 'Loading…';
+    middleNotice.className = detailError && !detail ? 'sa-error' : 'sa-placeholder';
+    middleNotice.textContent = notice ?? '';
+    middleNotice.hidden = notice == null;
+    paneRoot.hidden = notice != null;
+    if (notice == null) jobPane.render(detail);
   }
 
   // --- Artifact viewer (read-only, plain text) ---
