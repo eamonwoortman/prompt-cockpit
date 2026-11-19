@@ -161,7 +161,16 @@ function routerView(job) {
     maxInputTokens: job.router?.maxInputTokens ?? null,
     calls: decisions.length,
     lastRequestTokens: decisions.at(-1)?.request?.estimatedTokens ?? null,
-    decisions: decisions.map((d) => ({ forAttemptId: d.forAttemptId, action: d.action, note: d.note, ok: d.ok, error: d.error, at: d.at })),
+    decisions: decisions.map((d) => ({
+      forAttemptId: d.forAttemptId,
+      action: d.action,
+      note: d.note,
+      ok: d.ok,
+      error: d.error,
+      at: d.at,
+      model: d.model ?? null,
+      cost: typeof d.usage?.costUsd === 'number' ? { usd: d.usage.costUsd, complete: true } : { usd: null, complete: false },
+    })),
   };
 }
 

@@ -85,6 +85,36 @@ export function renderArtifactBody({ path = '', text = '' }) {
   return pre;
 }
 
+function clockText(ms) {
+  const d = new Date(ms);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// The router log: one small card per decision, newest last as persisted.
+// `attempts` names the scope each decision routed.
+export function renderRouterLog(router, attempts = []) {
+  const list = el('ul', 'sa-list sa-router-log');
+  for (const d of router?.decisions ?? []) {
+    const item = el('li', 'sa-router-card');
+    const head = item.appendChild(el('div', 'sa-router-head'));
+    head.append(el('span', `sa-badge router-${d.ok ? 'ok' : 'error'}`, d.ok ? d.action : 'error'));
+    const a = attempts.find((x) => x.attemptId === d.forAttemptId);
+    const scope = a
+      ? `${scopeLabel(a.phase, a.task)} · attempt ${a.n}${a.outcome ? ` ${a.outcome}` : ''}`
+      : `attempt ${String(d.forAttemptId).slice(0, 8)}`;
+    head.append(el('span', 'sa-router-scope', scope));
+    const facts = head.appendChild(el('span', 'sa-router-facts'));
+    if (d.model) facts.append(el('span', null, shortModel(d.model)));
+    facts.append(moneySpan('sa-router-cost', d.cost ?? { usd: null, complete: false }, 'This decision has no recorded cost.'));
+    if (d.at != null) facts.append(el('span', null, clockText(d.at)));
+    const note = d.ok ? d.note : `error: ${d.error ?? 'unknown'}`;
+    if (note) item.appendChild(el('div', 'sa-router-note sa-markdown markdown-body')).append(markdown(note));
+    list.append(item);
+  }
+  if (!list.children.length) list.append(el('li', 'sa-placeholder', 'No decisions yet.'));
+  return list;
+}
+
 function card(title, className) {
   const box = el('section', `sa-card ${className}`);
   const head = box.appendChild(el('header', 'sa-card-head'));

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
-const { artifactErrorText, createJobPane, renderArtifactBody } = await import('../public/superagent-job-pane.js');
+const { artifactErrorText, createJobPane, renderArtifactBody, renderRouterLog } = await import('../public/superagent-job-pane.js');
 
 const money = (usd, complete = true) => ({ usd, complete });
 
@@ -482,4 +482,29 @@ test('Inspect is disabled without a transcript unless the attempt is live, and c
   inspect('ok').click();
   inspect('live').click();
   assert.deepEqual(inspected, ['ok', 'live']);
+});
+
+test('the router log is one card per decision: action badge, scope, model, cost, time and note; no cost shows not available', () => {
+  const at = new Date(2026, 10, 19, 14, 5).getTime();
+  const router = {
+    decisions: [
+      { forAttemptId: 'a1', action: 'retry', ok: true, note: 'transient, see https://example.com/x/1', model: 'claude-haiku-5-5', cost: money(0.0123), at },
+      { forAttemptId: 'a2', action: 'escalate', ok: true, note: null, model: 'claude-haiku-5-5', cost: money(null, false), at },
+      { forAttemptId: 'zzzzzzzzzz', action: null, ok: false, error: 'timeout <b>x</b>', model: null, cost: money(null, false), at: null },
+    ],
+  };
+  const attempts = [attempt({ attemptId: 'a1', phase: 'fix', task: 'T1', n: 2, outcome: 'failed' }), attempt({ attemptId: 'a2', outcome: 'failed' })];
+  const list = renderRouterLog(router, attempts);
+  const cards = list.querySelectorAll('.sa-router-card');
+  assert.equal(cards.length, 3);
+  assert.equal(cards[0].querySelector('.sa-badge').textContent, 'retry');
+  const first = cards[0].textContent;
+  for (const part of ['fix / T1 · attempt 2 failed', 'haiku-5-5', '$0.01', '14:05', 'transient']) assert.ok(first.includes(part), `${part} in ${first}`);
+  assert.equal(cards[0].querySelectorAll('.sa-link-chip').length, 1);
+  assert.ok(cards[1].textContent.includes('not available'));
+  assert.ok(!cards[1].textContent.includes('$0'));
+  assert.equal(cards[2].querySelector('.sa-badge').textContent, 'error');
+  assert.ok(cards[2].textContent.includes('attempt zzzzzzzz'));
+  assert.ok(cards[2].textContent.includes('error: timeout <b>x</b>'));
+  assert.equal(renderRouterLog({ decisions: [] }).querySelectorAll('.sa-placeholder').length, 1);
 });

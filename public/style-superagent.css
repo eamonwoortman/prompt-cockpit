@@ -302,6 +302,11 @@ body.view-superagent #superagentView {
 .sa-needs-you { display: flex; flex-direction: column; gap: 6px; }
 .sa-reason { font-weight: 600; color: var(--warn); }
 .sa-router-log li { font-size: 12px; }
+.sa-router-card { padding: 8px; margin-bottom: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; }
+.sa-router-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; }
+.sa-router-facts { display: inline-flex; gap: 8px; color: var(--muted); margin-left: auto; }
+.sa-router-note { margin-top: 4px; max-width: none; }
+.sa-badge.router-error { color: var(--error); }
 
 #superagentArtifactModal .modal-box { width: min(1100px, 94vw); }
 #superagentArtifactText { overflow-wrap: anywhere; font-size: 12px; }

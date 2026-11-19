@@ -476,3 +476,11 @@ test('artifactWriterEnded is true only for a writer that ended done', () => {
     assert.equal(artifactWriterEnded(job, 'diagnosis'), expected, outcome);
   }
 });
+
+test('each router decision in the detail carries its model and cost, null when usage or costUsd is missing', () => {
+  const decided = (usage) => ({ type: 'router-decided', forAttemptId: 'a1', action: 'retry', ok: true, model: 'haiku', usage });
+  const router = (usage) => jobDetail(m2([start('a1', 'spec'), done('a1'), decided(usage)]), withUsage({})).router.decisions[0];
+  assert.deepEqual([router({ costUsd: 0.1 }).model, router({ costUsd: 0.1 }).cost], ['haiku', { usd: 0.1, complete: true }]);
+  assert.deepEqual(router(null).cost, { usd: null, complete: false });
+  assert.deepEqual(router({ costUsd: null }).cost, { usd: null, complete: false });
+});

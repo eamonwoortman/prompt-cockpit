@@ -15,7 +15,7 @@ import { initOperatorGate } from '/operator-auth.js';
 import { initDirBrowser } from '/dir-browser.js';
 import { initNotificationsPanel, requestBrowserNotifications, SUPERAGENT_TAB, SUPERAGENT_SELECT_MESSAGE } from '/notifications-panel.js';
 import { initHistoryPane } from '/history-pane.js';
-import { ARTIFACT_STATE, artifactErrorText, createJobPane, renderArtifactBody } from '/superagent-job-pane.js';
+import { ARTIFACT_STATE, artifactErrorText, createJobPane, renderArtifactBody, renderRouterLog } from '/superagent-job-pane.js';
 import { statusLabel } from '/superagent-format.js';
 
 const POLL_MS = 5_000;
@@ -717,14 +717,7 @@ export function initSuperagentView() {
       const limit = router.maxInputTokens ?? '?';
       box.append(el('div', null, `${router.model ?? '—'} · ${router.calls} call${router.calls === 1 ? '' : 's'}`));
       box.append(el('div', 'sa-muted', `Last request: ${router.lastRequestTokens ?? '—'} / ${limit} tokens`));
-      const log = el('ul', 'sa-list sa-router-log');
-      for (const d of router.decisions) {
-        const a = detail.attempts.find((x) => x.attemptId === d.forAttemptId);
-        const event = a ? `${[a.phase, a.task].filter(Boolean).join(' / ')} attempt ${a.n} ${a.outcome ?? ''}`.trim() : `attempt ${String(d.forAttemptId).slice(0, 8)}`;
-        const note = d.ok ? (d.note ?? '') : `error: ${d.error ?? 'unknown'}`;
-        log.append(el('li', null, `${event} → ${d.action} → ${note}`));
-      }
-      if (!router.decisions.length) log.append(el('li', 'sa-placeholder', 'No decisions yet.'));
+      const log = renderRouterLog(router, detail.attempts);
       box.append(log);
     }
     routerBox.append(box);
