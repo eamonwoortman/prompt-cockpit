@@ -91,7 +91,7 @@ export function summarizeUsage(rows, { truncated = false } = {}) {
       out.unpricedModels.push(key);
     }
   }
-  out.complete = !truncated && out.unpricedModels.length === 0 && conflicts === 0;
+  out.complete = !truncated && out.unpricedModels.length === 0;
   return out;
 }
 
@@ -120,8 +120,10 @@ export function createTranscriptIndex({ projectsRoot = path.join(os.homedir(), '
     let cwd = null;
     let card = null;
     let rl;
+    let stream;
     try {
-      rl = createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }) });
+      stream = fs.createReadStream(file, { encoding: 'utf8' });
+      rl = createInterface({ input: stream });
       let lines = 0;
       for await (const line of rl) {
         if (++lines > MAX_HEAD_LINES) break;
@@ -144,6 +146,7 @@ export function createTranscriptIndex({ projectsRoot = path.join(os.homedir(), '
       return { cwd, card: null };
     } finally {
       rl?.close();
+      stream?.destroy();
     }
     return { cwd, card };
   }
@@ -214,8 +217,10 @@ export function createTranscriptIndex({ projectsRoot = path.join(os.homedir(), '
     const rows = [];
     let truncated = false;
     let rl;
+    let stream;
     try {
-      rl = createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }) });
+      stream = fs.createReadStream(file, { encoding: 'utf8' });
+      rl = createInterface({ input: stream });
       for await (const line of rl) {
         if (!line) continue;
         let entry;
@@ -233,6 +238,7 @@ export function createTranscriptIndex({ projectsRoot = path.join(os.homedir(), '
       truncated = true;
     } finally {
       rl?.close();
+      stream?.destroy();
     }
     return { rows, truncated };
   }

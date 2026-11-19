@@ -130,12 +130,27 @@ test('summarizeUsage keeps the largest output_tokens row for conflicting repeats
   const s = summarizeUsage([row('m', OPUS, { ...USAGE, output_tokens: 5 }), row('m', OPUS, { ...USAGE, output_tokens: 50 }), row('m', OPUS, { ...USAGE, output_tokens: 7 })], { truncated: false });
   assert.equal(s.outputTokens, 50);
   assert.equal(s.conflicts, 1);
+  assert.equal(s.complete, true);
 });
 
 test('summarizeUsage counts an id-less row once and as a conflict', () => {
   const s = summarizeUsage([row(null, OPUS, USAGE)], { truncated: false });
   assert.equal(s.outputTokens, 20);
   assert.equal(s.conflicts, 1);
+});
+
+test('find and usage destroy every stream they open', async () => {
+  const { dir, job, root } = await setup();
+  const streams = [];
+  const index = createTranscriptIndex({ projectsRoot: root, fsImpl: { createReadStream: (...a) => { const st = createReadStream(...a); streams.push(st); return st; } } });
+  const many = [userLine('x'), ...Array.from({ length: 60 }, () => userLine('filler'))];
+  await writeTranscript(dir, 'nocard', many);
+  await writeTranscript(dir, 'A', [userLine(card('j1', 'a1')), asst('m1', OPUS, USAGE)]);
+  const found = await index.find(job, { attemptId: 'a1' });
+  await index.usage(found);
+  await index.verify(found, { jobId: 'j1', attemptId: 'a1' });
+  assert.ok(streams.length >= 4);
+  assert.ok(streams.every((s) => s.destroyed));
 });
 
 test('summarizeUsage reports an unpriced model as incomplete with tokens but no cost', () => {
