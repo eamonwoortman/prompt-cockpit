@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
-const { createJobPane } = await import('../public/superagent-job-pane.js');
+const { artifactErrorText, createJobPane, renderArtifactBody } = await import('../public/superagent-job-pane.js');
 
 const money = (usd, complete = true) => ({ usd, complete });
 
@@ -432,4 +432,54 @@ test('branches and tasks are still listed', () => {
   const tasks = root.querySelector('.sa-tasks').querySelectorAll('li');
   assert.equal(tasks.length, 2);
   assert.match(tasks[0].textContent, /☑ T1 Guard the loader/);
+});
+
+test('renderArtifactBody renders a test report table as a <table>', () => {
+  const body = renderArtifactBody({ path: 'docs/test-report.md', text: ['| Test | Result |', '| --- | --- |', '| login | pass |', '', 'See https://example.com/a/1'].join('\n') });
+  assert.ok(body.classList.contains('markdown-body'));
+  assert.equal(body.querySelectorAll('table').length, 1);
+  assert.equal(body.querySelectorAll('td').length, 2);
+  assert.equal(body.querySelectorAll('.sa-link-chip').length, 1);
+});
+
+test('renderArtifactBody renders JSON pretty-printed', () => {
+  const body = renderArtifactBody({ path: 'out/result.json', text: '{"a":1,"b":[2]}' });
+  assert.equal(body.tag, 'pre');
+  assert.equal(body.querySelector('code').textContent, JSON.stringify({ a: 1, b: [2] }, null, 2));
+});
+
+test('renderArtifactBody shows invalid JSON and other files as text', () => {
+  assert.equal(renderArtifactBody({ path: 'out/result.json', text: '{"a":' }).textContent, '{"a":');
+  const plain = renderArtifactBody({ path: 'notes.txt', text: '# not markdown' });
+  assert.equal(plain.tag, 'pre');
+  assert.equal(plain.textContent, '# not markdown');
+});
+
+test('a deleted artifact says so, while one not written yet does not', () => {
+  const gone = artifactErrorText(Object.assign(new Error('x'), { code: 'ERR_ARTIFACT_GONE' }));
+  const missing = artifactErrorText(Object.assign(new Error('x'), { code: 'ERR_ARTIFACT_MISSING' }));
+  assert.equal(gone, 'Deleted from the workspace; no snapshot was taken');
+  assert.ok(!missing.includes('Deleted'));
+  assert.match(missing, /^Not written yet/);
+});
+
+test('Inspect is disabled without a transcript unless the attempt is live, and calls onInspect otherwise', () => {
+  const inspected = [];
+  const { root, pane } = mount({ onInspect: (a) => inspected.push(a.attemptId) });
+  pane.render(detail({
+    attempts: [
+      attempt({ attemptId: 'ok' }),
+      attempt({ attemptId: 'none', transcript: { available: false }, usageNote: 'pruned' }),
+      attempt({ attemptId: 'live', outcome: null, live: true, sessionId: 's9', transcript: { available: false } }),
+    ],
+  }));
+  const inspect = (id) => cardFor(root, id).querySelector('.sa-attempt-inspect');
+  assert.equal(inspect('ok').disabled, false);
+  assert.equal(inspect('none').disabled, true);
+  assert.match(inspect('none').title, /removed from the Claude history/);
+  assert.equal(inspect('live').disabled, false);
+  assert.match(inspect('live').title, /watch only/);
+  inspect('ok').click();
+  inspect('live').click();
+  assert.deepEqual(inspected, ['ok', 'live']);
 });

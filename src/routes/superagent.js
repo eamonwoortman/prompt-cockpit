@@ -19,8 +19,8 @@ const BAD_REQUEST = new Set([
 
 function statusFor(err) {
   if (err?.code === 'ERR_SUPERAGENT_UNAVAILABLE') return err.status;
-  if (err?.code === 'ERR_UNKNOWN_JOB' || err?.code === 'ERR_ARTIFACT_MISSING') return 404;
-  if (err?.code === 'ERR_INVALID_STATE' || err?.code === 'ERR_FOLDER_IN_USE') return 409;
+  if (err?.code === 'ERR_UNKNOWN_JOB' || err?.code === 'ERR_UNKNOWN_ATTEMPT' || err?.code === 'ERR_ARTIFACT_MISSING' || err?.code === 'ERR_TRANSCRIPT_MISSING') return 404;
+  if (err?.code === 'ERR_INVALID_STATE' || err?.code === 'ERR_FOLDER_IN_USE' || err?.code === 'ERR_TRANSCRIPT_AMBIGUOUS') return 409;
   if (err?.code === 'ERR_ARTIFACT_GONE') return 410;
   if (BAD_REQUEST.has(err?.code)) return 400;
   return 500;
@@ -163,6 +163,19 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
       const job = await readJob(host, id);
       const snapshotDir = host.read((supervisor) => snapshotDirFor(supervisor.jobDir(id)));
       return respondJson(res, 200, await readArtifactImpl(job, key, { snapshotDir, ended: artifactWriterEnded(job, key) }));
+    } catch (err) {
+      return respondError(res, err);
+    }
+  });
+  // The cwd is the transcript's own, which the history route needs to find the
+  // file; it can differ from the attempt's worktree.
+  router.get('/api/superagent/jobs/:id/attempts/:attemptId/transcript', async (req, res, url, { id, attemptId }) => {
+    try {
+      await readJob(host, id);
+      const found = await host.read((supervisor) => supervisor.transcriptFor(id, attemptId));
+      if (found?.status === 'found') return respondJson(res, 200, { claudeSessionId: found.claudeSessionId, cwd: found.cwd });
+      if (found?.status === 'ambiguous') throw coded('ERR_TRANSCRIPT_AMBIGUOUS', 'more than one transcript matches this attempt');
+      throw coded('ERR_TRANSCRIPT_MISSING', 'no transcript was found for this attempt');
     } catch (err) {
       return respondError(res, err);
     }

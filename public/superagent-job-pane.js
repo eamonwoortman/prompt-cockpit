@@ -27,7 +27,7 @@ const UNKNOWN_NOTE = {
   pruned: 'Its transcript has been removed from the Claude history.',
   unavailable: 'Its spend has not been read yet.',
 };
-const ARTIFACT_STATE = {
+export const ARTIFACT_STATE = {
   workspace: 'In the workspace',
   snapshot: 'From snapshot: deleted from the workspace',
   gone: 'Deleted from the workspace; no snapshot was taken',
@@ -41,6 +41,14 @@ function el(tag, className, text) {
   return node;
 }
 
+// The modal and the Ready-to-try blocks tell a deleted artifact (its writer
+// succeeded, so the file was there once) from one not written yet.
+export function artifactErrorText(err) {
+  if (err?.code === 'ERR_ARTIFACT_GONE') return ARTIFACT_STATE.gone;
+  if (err?.code === 'ERR_ARTIFACT_MISSING') return 'Not written yet: the file does not exist so far.';
+  return err?.code ? `${err.message} (${err.code})` : String(err?.message || err);
+}
+
 const markdown = (text) => renderMarkdown(text, { autolink: true, renderLink: linkChip });
 const scopeLabel = (phase, task) => (task != null ? `${phase} / ${task}` : phase);
 const shortModel = (model) => String(model ?? 'unknown').replace(/^claude-/, '');
@@ -50,6 +58,31 @@ const pad = (n) => String(n).padStart(2, '0');
 function createdText(ms) {
   const d = new Date(ms);
   return `${d.getDate()} ${MONTHS[d.getMonth()]} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// .md renders as Markdown, .json pretty-printed (as text when it does not
+// parse, e.g. a truncated file), anything else as preformatted text.
+export function renderArtifactBody({ path = '', text = '' }) {
+  const lower = String(path).toLowerCase();
+  if (lower.endsWith('.md')) {
+    const body = el('div', 'sa-markdown markdown-body');
+    body.append(markdown(text));
+    return body;
+  }
+  let shown = text;
+  let isJson = false;
+  if (lower.endsWith('.json')) {
+    try {
+      shown = JSON.stringify(JSON.parse(text), null, 2);
+      isJson = true;
+    } catch {
+      shown = text;
+    }
+  }
+  const pre = el('pre', 'sa-pre');
+  if (isJson) pre.append(el('code', 'sa-json', shown));
+  else pre.textContent = shown;
+  return pre;
 }
 
 function card(title, className) {
@@ -116,7 +149,7 @@ function costOf(a) {
   return moneySpan('sa-attempt-cost', money, unknownWhy(a));
 }
 
-export function createJobPane({ root, onOpenArtifact = () => {}, stopButton = () => null }) {
+export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () => {}, stopButton = () => null }) {
   const expanded = new Set();
   let shownJobId = null;
 
@@ -239,6 +272,21 @@ export function createJobPane({ root, onOpenArtifact = () => {}, stopButton = ()
     return node;
   }
 
+  // A live attempt opens its watch-only tab; a finished one needs a transcript.
+  function inspectButton(a) {
+    const watchable = a.live && Boolean(a.sessionId);
+    const button = el('button', 'btn btn-ghost sa-attempt-inspect', 'Inspect');
+    button.type = 'button';
+    if (watchable) button.title = 'Watch this worker in a new tab (watch only)';
+    else if (a.transcript?.available) button.title = "Open this attempt's transcript";
+    else {
+      button.disabled = true;
+      button.title = UNKNOWN_NOTE[a.usageNote] ?? 'No transcript is available for this attempt.';
+    }
+    button.addEventListener('click', () => onInspect(a));
+    return button;
+  }
+
   function attemptCard(a) {
     const item = el('li', 'sa-attempt-card');
     item.dataset.attemptId = a.attemptId;
@@ -266,13 +314,7 @@ export function createJobPane({ root, onOpenArtifact = () => {}, stopButton = ()
     if (a.retried) line.append(el('span', 'sa-attempt-flag', 'retried, not counted'));
     const cost = costOf(a);
     if (cost) line.append(cost);
-    if (a.live && a.sessionId) {
-      const watch = el('button', 'btn btn-ghost sa-attempt-watch', 'Watch');
-      watch.type = 'button';
-      watch.title = 'Watch this worker in a new tab (watch only)';
-      watch.addEventListener('click', () => window.open(`/?attach=${encodeURIComponent(a.sessionId)}`, '_blank'));
-      line.append(watch);
-    }
+    line.append(inspectButton(a));
     const result = resultOf(a);
     if (result) item.append(resultEl(a, result));
     return item;

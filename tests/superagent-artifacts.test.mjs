@@ -211,3 +211,17 @@ test('artifactStates reports workspace, snapshot, gone and pending by stat alone
     'review:spec-review:2': 'pending',
   });
 });
+
+test('artifactStates keeps a key pending when its latest writer failed, stopped or asked a question', async (t) => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'sa-artifacts-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const worktree = path.join(base, 'worktree');
+  await fs.mkdir(worktree);
+  const started = (attemptId, phase) => ({ type: 'attempt-started', attemptId, phase, role: 'r', model: 'm', n: 1, purpose: 'author' });
+  for (const outcome of ['failed', 'stopped', 'question', 'interrupted']) {
+    const events = [...provisionedEvents({ pipeline: MILESTONE_2_PIPELINE }), started('s1', 'spec'), { type: 'attempt-ended', attemptId: 's1', outcome }];
+    const job = deriveJob(events.map((e, i) => ({ seq: i + 1, at: 1000 + i, ...e })));
+    primaryRepo(job).worktree = worktree;
+    assert.equal((await artifactStates(job, { snapshotDir: path.join(base, 'none') })).get('spec'), 'pending', outcome);
+  }
+});

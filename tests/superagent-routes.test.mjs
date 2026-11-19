@@ -326,6 +326,55 @@ test('GET artifact answers 410 ERR_ARTIFACT_GONE, and passes the snapshot folder
   assert.equal(calls[0][1].ended, false, 'a running writer has not ended');
 });
 
+test('GET artifact: a writer that ended failed without the file stays 404 ERR_ARTIFACT_MISSING (ended false)', async (t) => {
+  const pipeline = [{ phase: 'spec', kind: 'author', role: 'writer', inputs: ['idea'], outputs: ['spec'] }];
+  const attempts = [{ attemptId: 'a1', phase: 'spec', task: null, purpose: 'author', outcome: 'failed', reason: 'x' }];
+  const calls = [];
+  const readArtifactImpl = async (j, key, options) => {
+    calls.push(options.ended);
+    throw Object.assign(new Error('missing'), { code: 'ERR_ARTIFACT_MISSING' });
+  };
+  const supervisor = { getJob: () => job({ pipeline, attempts, artifacts: { spec: 'docs/spec.md' } }), jobDir: (id) => path.join('/jobs', id) };
+  const api = await serve(t, { host: fakeHost({ supervisor }), readArtifactImpl });
+  const res = await api('/api/superagent/jobs/job-1/artifacts/spec');
+  assert.equal(res.status, 404);
+  assert.deepEqual(calls, [false]);
+});
+
+test('GET transcript answers the session id and cwd, 404 when missing, 409 when ambiguous, 404 for an unknown attempt or job', async (t) => {
+  const answers = {
+    a1: { status: 'found', claudeSessionId: 'c1', file: '/p/c1.jsonl', cwd: '/w/own' },
+    a2: { status: 'missing' },
+    a3: { status: 'ambiguous', files: ['/p/x.jsonl', '/q/y.jsonl'] },
+  };
+  const supervisor = {
+    getJob: (id) => (id === 'job-1' ? job() : undefined),
+    transcriptFor: async (jobId, attemptId) => {
+      if (!answers[attemptId]) throw Object.assign(new Error('unknown attempt'), { code: 'ERR_UNKNOWN_ATTEMPT' });
+      return answers[attemptId];
+    },
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const found = await api('/api/superagent/jobs/job-1/attempts/a1/transcript');
+  assert.equal(found.status, 200);
+  assert.deepEqual(found.body, { claudeSessionId: 'c1', cwd: '/w/own' });
+  const missing = await api('/api/superagent/jobs/job-1/attempts/a2/transcript');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.code, 'ERR_TRANSCRIPT_MISSING');
+  const ambiguous = await api('/api/superagent/jobs/job-1/attempts/a3/transcript');
+  assert.equal(ambiguous.status, 409);
+  assert.equal(ambiguous.body.code, 'ERR_TRANSCRIPT_AMBIGUOUS');
+  assert.equal((await api('/api/superagent/jobs/job-1/attempts/zz/transcript')).status, 404);
+  assert.equal((await api('/api/superagent/jobs/nope/attempts/a1/transcript')).status, 404);
+});
+
+test('GET transcript goes through the host gate', async (t) => {
+  const api = await serve(t, { host: fakeHost({ readable: false, refusal: { status: 503, state: 'initialising' } }) });
+  const res = await api('/api/superagent/jobs/job-1/attempts/a1/transcript');
+  assert.equal(res.status, 503);
+  assert.equal(res.body.code, 'ERR_SUPERAGENT_UNAVAILABLE');
+});
+
 test('notifications merge both sources', async (t) => {
   const pilotEntry = { kind: 'needs-input', pilotId: 'p1', message: 'waiting' };
   const superagentEntry = { kind: 'superagent', type: 'question', key: 'superagent:job-1:4', jobId: 'job-1', title: 'Login page', message: 'Which?' };

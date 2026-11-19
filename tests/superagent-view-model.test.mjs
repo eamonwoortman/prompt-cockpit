@@ -469,3 +469,10 @@ test('jobDetail artifacts carry phase, task and state', () => {
   assert.deepEqual(artifacts.find((a) => a.key === 'report:T1'), { key: 'report:T1', label: 'report:T1', phase: 'fix', task: 'T1', state: 'workspace' });
   assert.equal(artifacts.find((a) => a.key === 'tasks').state, null);
 });
+
+test('artifactWriterEnded is true only for a writer that ended done', () => {
+  for (const [outcome, expected] of [['done', true], ['failed', false], ['stopped', false], ['question', false], ['interrupted', false]]) {
+    const job = deriveJob(stamp([...provisionedEvents(troubleshooting()), start('i1', 'investigate'), ended('i1', outcome)]));
+    assert.equal(artifactWriterEnded(job, 'diagnosis'), expected, outcome);
+  }
+});

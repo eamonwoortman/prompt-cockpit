@@ -262,7 +262,7 @@ body.view-superagent #superagentView {
 .sa-attempt-flag { padding: 0 6px; border: 1px dashed var(--border); border-radius: 999px; color: var(--muted); font-size: 11px; }
 .sa-attempt-cost { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sa-attempt-cost.unknown { font-weight: 400; }
-.sa-attempt-watch { padding: 2px 8px; }
+.sa-attempt-inspect { padding: 2px 8px; }
 .sa-attempt-result { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; cursor: pointer; border-radius: 4px; }
 .sa-attempt-result::before { content: '\25B8'; flex: none; color: var(--muted); }
 .sa-attempt-result.expanded::before { content: '\25BE'; }
@@ -303,8 +303,11 @@ body.view-superagent #superagentView {
 .sa-reason { font-weight: 600; color: var(--warn); }
 .sa-router-log li { font-size: 12px; }
 
-#superagentArtifactModal .modal-box { width: min(900px, 92vw); }
-#superagentArtifactText { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+#superagentArtifactModal .modal-box { width: min(1100px, 94vw); }
+#superagentArtifactText { overflow-wrap: anywhere; font-size: 12px; }
+#superagentArtifactText .sa-pre { max-height: none; }
+#superagentArtifactText .sa-markdown { max-width: none; }
+.sa-json { font-family: var(--mono, ui-monospace, monospace); }
 
 @media (max-width: 900px) {
   body.view-superagent #superagentView { overflow-y: auto; }

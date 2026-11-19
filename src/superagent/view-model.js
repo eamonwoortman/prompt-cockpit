@@ -119,8 +119,10 @@ export function artifactWriters(job) {
   return writers;
 }
 
+// Only a writer that ended 'done' claimed to write the key; one that failed,
+// stopped or asked a question without the file leaves it pending, not deleted.
 export function writerEnded(job, writer) {
-  return Boolean(writer && (job.attempts ?? []).find((a) => a.attemptId === writer.attemptId)?.outcome);
+  return Boolean(writer && (job.attempts ?? []).find((a) => a.attemptId === writer.attemptId)?.outcome === 'done');
 }
 
 export function artifactWriterEnded(job, key) {

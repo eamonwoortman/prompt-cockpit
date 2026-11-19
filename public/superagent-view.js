@@ -14,7 +14,8 @@
 import { initOperatorGate } from '/operator-auth.js';
 import { initDirBrowser } from '/dir-browser.js';
 import { initNotificationsPanel, requestBrowserNotifications, SUPERAGENT_TAB, SUPERAGENT_SELECT_MESSAGE } from '/notifications-panel.js';
-import { createJobPane } from '/superagent-job-pane.js';
+import { initHistoryPane } from '/history-pane.js';
+import { ARTIFACT_STATE, artifactErrorText, createJobPane, renderArtifactBody } from '/superagent-job-pane.js';
 import { statusLabel } from '/superagent-format.js';
 
 const POLL_MS = 5_000;
@@ -61,9 +62,6 @@ const postJson = (url, payload = {}) => getJson(url, {
 });
 
 const errorText = (err) => (err?.code ? `${err.message} (${err.code})` : String(err?.message || err));
-
-// An attempt's artifact is listed from launch, before the worker writes it.
-const artifactErrorText = (err) => (err?.code === 'ERR_ARTIFACT_MISSING' ? 'Not written yet: the file does not exist so far.' : errorText(err));
 
 // The brief's section, from its heading to the next `## ` heading.
 function briefSection(text, heading = ASSUMPTIONS_HEADING) {
@@ -426,6 +424,7 @@ export function initSuperagentView() {
   const jobPane = createJobPane({
     root: paneRoot,
     onOpenArtifact: (key) => openArtifact(detail.jobId, key),
+    onInspect: (attempt) => inspect(attempt),
     stopButton: () => stopButton(middleError),
   });
 
@@ -498,7 +497,7 @@ export function initSuperagentView() {
     if (notice == null) jobPane.render(detail);
   }
 
-  // --- Artifact viewer (read-only, plain text) ---
+  // --- Artifact viewer (read-only; Markdown and JSON rendered) ---
 
   const viewer = document.getElementById('superagentArtifactModal');
   const viewerTitle = document.getElementById('superagentArtifactTitle');
@@ -508,19 +507,53 @@ export function initSuperagentView() {
 
   const artifactUrl = (jobId, key) => `/api/superagent/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(key)}`;
 
+  function viewerMessage(text, className = 'sa-muted') {
+    viewerText.replaceChildren(el('div', className, text));
+  }
+
   async function openArtifact(jobId, key) {
     viewerTitle.textContent = key;
-    viewerText.textContent = 'Loading…';
+    viewerMessage('Loading…');
     viewerNote.hidden = true;
     if (!viewer.open) viewer.showModal();
     try {
       const artifact = await getJson(artifactUrl(jobId, key));
       viewerTitle.textContent = `${key} · ${artifact.path}`;
-      viewerText.textContent = artifact.text || 'Empty: the file exists but has nothing in it yet.';
-      viewerNote.textContent = 'Truncated: only the first part of this file is shown.';
-      viewerNote.hidden = !artifact.truncated;
+      if (artifact.text) viewerText.replaceChildren(renderArtifactBody(artifact));
+      else viewerMessage('Empty: the file exists but has nothing in it yet.');
+      const notes = [];
+      if (artifact.source === 'snapshot') notes.push(ARTIFACT_STATE.snapshot);
+      if (artifact.truncated) notes.push('Truncated: only the first part of this file is shown.');
+      viewerNote.textContent = notes.join(' · ');
+      viewerNote.hidden = !notes.length;
     } catch (err) {
-      viewerText.textContent = artifactErrorText(err);
+      viewerMessage(artifactErrorText(err));
+    }
+  }
+
+  // --- Inspect: a live attempt opens its watch-only tab; a finished one opens
+  // its transcript in the read-only history modal over this tab. ---
+
+  const historyPane = initHistoryPane({
+    modal: document.getElementById('historyModal'),
+    body: document.getElementById('historyBody'),
+    closeButton: document.getElementById('historyCloseBtn'),
+    titleEl: document.getElementById('historyTitle'),
+    exportButton: document.getElementById('historyExportBtn'),
+  });
+
+  async function inspect(attempt) {
+    if (attempt.live && attempt.sessionId) {
+      window.open(`/?attach=${encodeURIComponent(attempt.sessionId)}`, '_blank');
+      return;
+    }
+    showError(middleError, null);
+    try {
+      const { claudeSessionId, cwd } = await getJson(`/api/superagent/jobs/${encodeURIComponent(detail.jobId)}/attempts/${encodeURIComponent(attempt.attemptId)}/transcript`);
+      const scope = [attempt.phase, attempt.task].filter(Boolean).join(' / ');
+      historyPane.open({ sessionId: claudeSessionId, cwd, label: `${detail.title} · ${scope} · ${attempt.role ?? 'worker'} #${attempt.n}`, provider: 'claude', assistantLabel: 'Claude' });
+    } catch (err) {
+      showError(middleError, err);
     }
   }
 
@@ -532,7 +565,7 @@ export function initSuperagentView() {
     if (!artifactCache.has(cacheKey)) {
       artifactCache.set(cacheKey, null);
       getJson(artifactUrl(jobId, key))
-        .then((a) => ({ text: a.text }), (err) => ({ error: artifactErrorText(err) }))
+        .then((a) => ({ text: a.text, path: a.path, source: a.source }), (err) => ({ error: artifactErrorText(err), code: err?.code }))
         .then((value) => {
           artifactCache.set(cacheKey, value);
           renderRight();
@@ -573,12 +606,19 @@ export function initSuperagentView() {
     return el('pre', className, text);
   }
 
-  function artifactBlock(label, value, pick = (text) => text) {
+  // `pick` extracts a part of the text (the brief's assumptions), which stays
+  // Markdown whatever the file's own extension.
+  function artifactBlock(label, value, pick = null) {
     const box = el('div', 'sa-section');
     box.append(el('h4', 'sa-subheading', label));
     if (value == null) box.append(el('div', 'sa-placeholder', 'Loading…'));
-    else if (value.error) box.append(el('div', 'sa-error', value.error));
-    else box.append(preBlock(pick(value.text) ?? 'Not in the brief.'));
+    else if (value.error) box.append(el('div', value.code === 'ERR_ARTIFACT_GONE' ? 'sa-muted' : 'sa-error', value.error));
+    else {
+      const text = pick ? pick(value.text) : value.text;
+      if (text == null) box.append(preBlock('Not in the brief.'));
+      else box.append(renderArtifactBody({ path: pick ? 'section.md' : value.path, text }));
+      if (value.source === 'snapshot') box.append(el('div', 'sa-muted', ARTIFACT_STATE.snapshot));
+    }
     return box;
   }
 
