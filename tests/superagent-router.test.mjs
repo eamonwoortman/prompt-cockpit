@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   ROUTER_ACTIONS, ROUTED_REASONS, ROUTER_OVERHEAD_TOKENS, NOTE_MAX_WORDS, ROUTER_SYSTEM_PROMPT, ROUTER_THINKING_ALLOWANCE,
   estimateTokens, allowedActions, buildRouterRequest, validateRouterOutput,
-  readUserApiKeyHelper, createRouter,
+  readUserApiKeyHelper, readUserSettingsEnv, createRouter,
 } from '../src/superagent/router.js';
 import * as sequencer from '../src/superagent/sequencer.js';
 
@@ -275,14 +275,14 @@ const decideArgs = (over = {}) => ({
   allowed: ['retry', 'escalate'], maxOutputTokens: 300, ...over,
 });
 const makeRouter = (queryImpl, over = {}) => createRouter({
-  queryImpl, cwd: path.join(tmpRoot, 'unused'), apiKeyHelper: async () => 'helper-cmd',
+  queryImpl, cwd: path.join(tmpRoot, 'unused'), apiKeyHelper: async () => 'helper-cmd', userEnv: async () => ({}),
   mkdirImpl: async () => {}, baseEnv: { A: '1' }, ...over,
 });
 
 test('decide passes exactly the isolation options', async () => {
   const q = fakeQuery();
   const cwd = path.join(tmpRoot, 'iso', 'router');
-  const r = await createRouter({ queryImpl: q.impl, cwd, apiKeyHelper: async () => 'helper-cmd', baseEnv: { A: '1' } })
+  const r = await createRouter({ queryImpl: q.impl, cwd, apiKeyHelper: async () => 'helper-cmd', userEnv: async () => ({}), baseEnv: { A: '1' } })
     .decide(decideArgs());
   assert.equal(r.ok, true);
   assert.equal(q.calls.length, 1);
@@ -310,6 +310,27 @@ test('the generation cap is the answer limit plus the thinking allowance', async
   for (const bad of [-1, 1.5, NaN, '1000', null]) {
     assert.throws(() => makeRouter(fakeQuery().impl, { thinkingAllowance: bad }), /thinkingAllowance/, String(bad));
   }
+});
+
+test('the user settings env block reaches the spawn env over the process env, under the generation cap', async () => {
+  const q = fakeQuery();
+  const userEnv = async () => ({ ANTHROPIC_BASE_URL: 'https://gateway.example', A: 'settings', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '9' });
+  await makeRouter(q.impl, { userEnv }).decide(decideArgs());
+  assert.deepEqual(q.calls[0].options.env, { A: 'settings', ANTHROPIC_BASE_URL: 'https://gateway.example', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1300' });
+});
+
+test('readUserSettingsEnv keeps only the string values of an env object and is empty otherwise', async () => {
+  const dir = await fs.mkdtemp(path.join(tmpRoot, 'cfg-env-'));
+  const file = path.join(dir, 'settings.json');
+  assert.deepEqual(await readUserSettingsEnv({ configDir: dir }), {});
+  await fs.writeFile(file, '{not json');
+  assert.deepEqual(await readUserSettingsEnv({ configDir: dir }), {});
+  for (const bad of ['"x"', '["A"]', 'null', '5']) {
+    await fs.writeFile(file, `{"env":${bad}}`);
+    assert.deepEqual(await readUserSettingsEnv({ configDir: dir }), {}, bad);
+  }
+  await fs.writeFile(file, '{"env":{"ANTHROPIC_BASE_URL":"https://gw","N":5,"O":{"x":1},"E":""}}');
+  assert.deepEqual(await readUserSettingsEnv({ configDir: dir }), { ANTHROPIC_BASE_URL: 'https://gw', E: '' });
 });
 
 test('a maxOutputTokens that is not a positive integer is refused before any I/O', async () => {

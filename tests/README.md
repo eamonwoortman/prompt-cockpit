@@ -419,7 +419,7 @@ Only observed by the manual probe `tests/superagent-pipeline.manual.mjs` (not ye
 
 Unit tested (no model, no network; the router's `query` is always injected):
 
-- `superagent-router.test.mjs` (`router.js`): the pure parts (`estimateTokens`, `allowedActions`, `buildRouterRequest` with its truncation order and over-limit refusal, `validateRouterOutput` including the output cap and missing usage) and `createRouter().decide` against a fake `query` (isolation options, `apiKeyHelper` passthrough, allowlist, timeout, abort, isolation-breach guard, usage totals).
+- `superagent-router.test.mjs` (`router.js`): the pure parts (`estimateTokens`, `allowedActions`, `buildRouterRequest` with its truncation order and over-limit refusal, `validateRouterOutput` including the output cap and missing usage) and `createRouter().decide` against a fake `query` (isolation options, `apiKeyHelper` passthrough, the settings `env` block merged into the spawn env, allowlist, timeout, abort, isolation-breach guard, usage totals).
 - Sequencer routing (`superagent-sequencer.test.mjs`): the `route` action for eligible failures after the attempt cap, repeated-error and back-off checks, and applying a `router-decided` decision (`retry`, `retry-alternate`, `retry-handoff`, `escalate`, stuck why `router-escalated` / `router-failed`).
 - Supervisor routing (`superagent-pipeline.test.mjs`): non-blocking per-job routing, per-job cancellation on `stopJob`/`stop`, confirmed decision appends with retry and no second model call, and no router injected keeps the code-only retries.
 

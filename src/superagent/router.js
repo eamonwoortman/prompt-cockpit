@@ -168,18 +168,31 @@ export function validateRouterOutput(text, { allowed, maxOutputTokens, outputTok
   return { ok: true, action: parsed.action, note: parsed.note };
 }
 
-// `settingSources: []` drops the user's apiKeyHelper, so the router hands that
-// one key back inline (S4b). Read only; never throws.
-export async function readUserApiKeyHelper({
+async function readUserSettings({
   configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'),
   readFileImpl = fs.readFile,
 } = {}) {
   try {
-    const settings = JSON.parse(await readFileImpl(path.join(configDir, 'settings.json'), 'utf8'));
-    return typeof settings?.apiKeyHelper === 'string' ? settings.apiKeyHelper : null;
+    return JSON.parse(await readFileImpl(path.join(configDir, 'settings.json'), 'utf8'));
   } catch {
     return null;
   }
+}
+
+// `settingSources: []` drops the user's apiKeyHelper, so the router hands that
+// one key back inline (S4b). Read only; never throws.
+export async function readUserApiKeyHelper(opts) {
+  const settings = await readUserSettings(opts);
+  return typeof settings?.apiKeyHelper === 'string' ? settings.apiKeyHelper : null;
+}
+
+// It drops the settings `env` block too, which can carry ANTHROPIC_BASE_URL:
+// without it a gateway apiKeyHelper token goes to the default endpoint and the
+// call hangs until the timeout (2026-11-18). Read only; never throws.
+export async function readUserSettingsEnv(opts) {
+  const env = (await readUserSettings(opts))?.env;
+  if (env === null || typeof env !== 'object' || Array.isArray(env)) return {};
+  return Object.fromEntries(Object.entries(env).filter(([, v]) => typeof v === 'string'));
 }
 
 const ISOLATION_LISTS = ['tools', 'mcp_servers', 'plugins'];
@@ -239,6 +252,7 @@ export function createRouter({
   queryImpl = query,
   cwd = path.join(defaultSuperagentRoot(), 'router'),
   apiKeyHelper = readUserApiKeyHelper,
+  userEnv = readUserSettingsEnv,
   timeoutMs = ROUTER_TIMEOUT_MS,
   now = Date.now,
   mkdirImpl = fs.mkdir,
@@ -273,6 +287,7 @@ export function createRouter({
     const call = async () => {
       await mkdirImpl(cwd, { recursive: true });
       const helper = await apiKeyHelper();
+      const settingsEnv = await userEnv();
       if (controller.signal.aborted) return { ok: false, error: 'aborted' };
       q = queryImpl({
         prompt: card,
@@ -283,7 +298,7 @@ export function createRouter({
           persistSession: false, thinking: { type: 'disabled' }, cwd, abortController: controller,
           // A hard API max (probe 2026-11-05): over it the call fails. It
           // bounds answer plus thinking; the answer itself is checked below.
-          env: { ...baseEnv, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(maxOutputTokens + thinkingAllowance) },
+          env: { ...baseEnv, ...settingsEnv, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(maxOutputTokens + thinkingAllowance) },
         },
       });
       let text = '';
