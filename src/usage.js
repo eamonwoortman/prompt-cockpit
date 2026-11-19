@@ -18,9 +18,18 @@ function loadModels(filename) {
 const CLAUDE_PRICING = loadModels('pricing.json');
 const GROK_PRICING = loadModels('pricing_grok.json');
 
-function ratesFor(model) {
+const PROVIDER_PREFIX = 'anthropic.';
+
+function exactRates(model) {
   if (model && Object.prototype.hasOwnProperty.call(GROK_PRICING, model)) return GROK_PRICING[model];
   if (model && Object.prototype.hasOwnProperty.call(CLAUDE_PRICING, model)) return CLAUDE_PRICING[model];
+  return null;
+}
+
+function ratesFor(model) {
+  const exact = exactRates(model);
+  if (exact) return exact;
+  if (typeof model === 'string' && model.startsWith(PROVIDER_PREFIX)) return exactRates(model.slice(PROVIDER_PREFIX.length));
   return null;
 }
 

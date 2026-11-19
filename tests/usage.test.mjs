@@ -121,3 +121,17 @@ test('5.5 models are priced, including cache tokens', () => {
   close(costForUsage('claude-sonnet-5-5', usage).cost, 2 + 10 + 0.10 + 2.5 + 4);
   close(costForUsage('claude-haiku-5-5', usage).cost, 0.10 + 0.50 + 0.01 + 0.125 + 0.20);
 });
+
+test('costForUsage prices an anthropic.-prefixed id as the bare id', () => {
+  const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+  assert.equal(costForUsage('anthropic.claude-opus-5-5', usage).cost, costForUsage('claude-opus-5-5', usage).cost);
+});
+
+test('costForUsage keeps an exact prefixed entry ahead of the fallback', () => {
+  const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+  assert.equal(costForUsage('anthropic.claude-opus-5', usage).cost, 5); // pricing.json:11
+});
+
+test('costForUsage still returns null for an unknown prefixed id', () => {
+  assert.equal(costForUsage('anthropic.nope', { input_tokens: 1 }), null);
+});
