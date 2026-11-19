@@ -66,6 +66,9 @@ const postJson = (url, payload = {}) => getJson(url, {
 
 const errorText = (err) => (err?.code ? `${err.message} (${err.code})` : String(err?.message || err));
 
+// An attempt's artifact is listed from launch, before the worker writes it.
+const artifactErrorText = (err) => (err?.code === 'ERR_ARTIFACT_MISSING' ? 'Not written yet: the file does not exist so far.' : errorText(err));
+
 // The brief's section, from its heading to the next `## ` heading.
 function briefSection(text, heading = ASSUMPTIONS_HEADING) {
   const lines = String(text).split(/\r?\n/);
@@ -588,11 +591,11 @@ export function initSuperagentView() {
     try {
       const artifact = await getJson(artifactUrl(jobId, key));
       viewerTitle.textContent = `${key} · ${artifact.path}`;
-      viewerText.textContent = artifact.text;
+      viewerText.textContent = artifact.text || 'Empty: the file exists but has nothing in it yet.';
       viewerNote.textContent = 'Truncated: only the first part of this file is shown.';
       viewerNote.hidden = !artifact.truncated;
     } catch (err) {
-      viewerText.textContent = errorText(err);
+      viewerText.textContent = artifactErrorText(err);
     }
   }
 
@@ -604,7 +607,7 @@ export function initSuperagentView() {
     if (!artifactCache.has(cacheKey)) {
       artifactCache.set(cacheKey, null);
       getJson(artifactUrl(jobId, key))
-        .then((a) => ({ text: a.text }), (err) => ({ error: errorText(err) }))
+        .then((a) => ({ text: a.text }), (err) => ({ error: artifactErrorText(err) }))
         .then((value) => {
           artifactCache.set(cacheKey, value);
           renderRight();
