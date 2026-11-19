@@ -150,7 +150,10 @@ test('workflow artifact keys are listed', () => {
   const artifacts = { diagnosis: 'docs/jobs/x/diagnosis.md', tasks: 'docs/jobs/x/tasks.json', testReport: 'docs/jobs/x/report.md' };
   const job = deriveJob(stamp([...provisionedEvents({ pipeline, workflow, artifacts }), start('a1', 'diagnose')]));
   assert.deepEqual(artifactKeys(job), ['diagnosis', 'tasks']);
-  assert.deepEqual(jobDetail(job, notLive).artifacts, [{ key: 'diagnosis', label: 'diagnosis' }, { key: 'tasks', label: 'tasks' }]);
+  assert.deepEqual(jobDetail(job, notLive).artifacts, [
+    { key: 'diagnosis', label: 'diagnosis', phase: 'diagnose', task: null, state: null },
+    { key: 'tasks', label: 'tasks', phase: 'diagnose', task: null, state: null },
+  ]);
   assert.equal(artifactPath(job, 'diagnosis'), 'docs/jobs/x/diagnosis.md');
   assert.equal(artifactPath(job, 'testReport'), 'docs/jobs/x/report.md');
   for (const unknown of ['spec', 'brief', 'plan', 'constructor', '__proto__', 'toString']) assert.equal(artifactPath(job, unknown), null, unknown);
@@ -337,4 +340,132 @@ test('the legacy brief is attributed to the brainstorm phase', () => {
     assert.deepEqual(artifactWriters(job).get('brief'), { attemptId: 'b3', phase: 'brainstorm', task: null }, JSON.stringify(outputs));
     assert.equal(artifactWriters(job).get('spec').attemptId, 's1');
   }
+});
+
+const fin = (byModel, over = {}) => {
+  const costs = Object.values(byModel).map((m) => m.costUsd);
+  const known = costs.reduce((sum, c) => sum + (c ?? 0), 0);
+  const unpriced = Object.entries(byModel).filter(([, m]) => m.costUsd === null).map(([k]) => k);
+  return { state: 'final', knownCostUsd: known, tokens: { total: 0 }, byModel, unpricedModels: unpriced, complete: unpriced.length === 0, claudeSessionId: 'c', ...over };
+};
+const spendJob = () => m2([
+  start('a1', 'spec'), { type: 'attempt-ended', attemptId: 'a1', outcome: 'done', summary: 'S', reason: 'R', verdict: 'v', findings: [1, 2], commits: ['c1'], question: 'Q' },
+  start('t1', 'implement', { task: 'T1', purpose: 'implement', model: 'x' }), done('t1'),
+  start('t2', 'implement', { task: 'T1', purpose: 'fix', round: 1 }), done('t2'),
+]);
+const withUsage = (map) => ({ isLive: () => false, usageFor: (a) => map[a.attemptId] ?? null });
+
+test('jobDetail exposes attempt result fields', () => {
+  const [a] = jobDetail(spendJob(), notLive).attempts;
+  assert.equal(a.summary, 'S');
+  assert.equal(a.reason, 'R');
+  assert.equal(a.verdict, 'v');
+  assert.equal(a.findingsCount, 2);
+  assert.equal(a.question, 'Q');
+  assert.equal(a.commits, 1);
+  assert.equal(typeof a.durationMs, 'number');
+  assert.equal(a.durationMs, a.endedAt - a.startedAt);
+});
+
+test('jobDetail sums known spend by phase, task and model', () => {
+  const spend = jobDetail(spendJob(), withUsage({
+    a1: fin({ opus: { costUsd: 1, tokens: 100 } }),
+    t1: fin({ opus: { costUsd: 0.5, tokens: 50 }, haiku: { costUsd: 0.25, tokens: 5 } }),
+    t2: fin({ haiku: { costUsd: 0.25, tokens: 5 } }),
+  })).spend;
+  assert.deepEqual(spend.total, { usd: 2, complete: true });
+  assert.deepEqual(spend.workers, { usd: 2, complete: true });
+  assert.deepEqual(spend.router, { usd: null, complete: true });
+  assert.deepEqual(spend.byPhase, [
+    { phase: 'spec', task: null, attempts: 1, usd: 1, complete: true },
+    { phase: 'implement', task: 'T1', attempts: 2, usd: 1, complete: true },
+  ]);
+  assert.deepEqual(spend.byTask, [{ task: 'T1', usd: 1, complete: true }]);
+  assert.deepEqual(spend.byModel, [
+    { model: 'opus', source: 'worker', tokens: 150, usd: 1.5, complete: true },
+    { model: 'haiku', source: 'worker', tokens: 10, usd: 0.5, complete: true },
+  ]);
+  assert.equal(spend.complete, true);
+});
+
+test('jobDetail with no usage marks spend incomplete and never sums null', () => {
+  const d = jobDetail(spendJob(), notLive);
+  assert.deepEqual(d.spend.total, { usd: null, complete: false });
+  assert.equal(d.spend.complete, false);
+  assert.deepEqual(d.attempts[0].cost, { usd: null, complete: false });
+  assert.equal(d.attempts[0].usage, null);
+  assert.equal(d.attempts[0].usageNote, 'unavailable');
+  const unknown = jobDetail(spendJob(), withUsage({ a1: { state: 'unknown', note: 'pruned' } })).attempts[0];
+  assert.equal(unknown.usageNote, 'pruned');
+  assert.equal(unknown.usage, null);
+});
+
+test('a partially priced attempt makes spend incomplete', () => {
+  const map = { a1: fin({ opus: { costUsd: 1, tokens: 1 }, mystery: { costUsd: null, tokens: 2 } }), t1: fin({}), t2: fin({}) };
+  const d = jobDetail(spendJob(), withUsage(map));
+  assert.deepEqual(d.attempts[0].cost, { usd: 1, complete: false });
+  assert.deepEqual(d.spend.total, { usd: 1, complete: false });
+  assert.deepEqual(d.spend.byModel.find((m) => m.model === 'mystery'), { model: 'mystery', source: 'worker', tokens: 2, usd: null, complete: false });
+});
+
+test('an all unpriced attempt has usd null; a genuinely zero cost has usd 0 and is complete', () => {
+  const unpriced = jobDetail(spendJob(), withUsage({ a1: fin({ mystery: { costUsd: null, tokens: 2 } }) })).attempts[0];
+  assert.deepEqual(unpriced.cost, { usd: null, complete: false });
+  const zero = jobDetail(spendJob(), withUsage({ a1: fin({ opus: { costUsd: 0, tokens: 0 } }) })).attempts[0];
+  assert.deepEqual(zero.cost, { usd: 0, complete: true });
+});
+
+test('a router decision with usage null or costUsd null makes spend incomplete; a numeric one lands in byModel with source router', () => {
+  const decided = (forAttemptId, model, usage) => ({ type: 'router-decided', forAttemptId, action: 'retry', ok: true, model, usage });
+  const all = { a1: fin({ opus: { costUsd: 1, tokens: 1 } }) };
+  const numeric = m2([start('a1', 'spec'), done('a1'), decided('a1', 'haiku', { costUsd: 0.1, totalInputTokens: 10, outputTokens: 2 })]);
+  const ok = jobDetail(numeric, withUsage(all)).spend;
+  assert.deepEqual(ok.router, { usd: 0.1, complete: true });
+  assert.deepEqual(ok.byModel.at(-1), { model: 'haiku', source: 'router', tokens: 12, usd: 0.1, complete: true });
+  assert.equal(ok.total.usd, 1.1);
+  for (const usage of [null, { costUsd: null }]) {
+    const bad = jobDetail(m2([start('a1', 'spec'), done('a1'), decided('a1', 'haiku', usage)]), withUsage(all)).spend;
+    assert.deepEqual(bad.router, { usd: null, complete: false });
+    assert.equal(bad.complete, false);
+    assert.equal(bad.total.usd, 1);
+  }
+  const two = m2([start('a1', 'spec'), done('a1'), decided('a1', 'haiku', { costUsd: 0.1 }), start('a2', 'spec'), done('a2'), decided('a2', 'sonnet', { costUsd: 0.2 })]);
+  const routers = jobDetail(two, withUsage({})).spend.byModel.filter((m) => m.source === 'router');
+  assert.deepEqual(routers.map((m) => [m.model, m.usd]), [['haiku', 0.1], ['sonnet', 0.2]]);
+});
+
+test('a gated attempt does not make spend incomplete', () => {
+  const job = m2([
+    start('a1', 'spec'), done('a1'),
+    start('g1', 'spec-review', { purpose: 'review', round: 1 }), { type: 'attempt-ended', attemptId: 'g1', outcome: 'failed', reason: 'folder-changed' },
+  ]);
+  const d = jobDetail(job, withUsage({ a1: fin({ opus: { costUsd: 1, tokens: 1 } }) }));
+  assert.deepEqual(d.spend.total, { usd: 1, complete: true });
+  assert.equal(d.spend.byPhase.length, 1);
+  const gated = d.attempts.find((a) => a.attemptId === 'g1');
+  assert.equal(gated.usageNote, null);
+  assert.equal(gated.usage, null);
+});
+
+test('pruned history keeps final spend but disables Inspect', () => {
+  const job = spendJob();
+  const usage = { a1: fin({ opus: { costUsd: 1, tokens: 1 } }) };
+  const d = jobDetail(job, { usageFor: (a) => usage[a.attemptId] ?? null, transcriptFor: () => ({ available: false, claudeSessionId: 'c', cwd: null }) });
+  assert.equal(d.attempts[0].transcript.available, false);
+  assert.deepEqual(d.attempts[0].cost, { usd: 1, complete: true });
+  const kept = jobDetail(job, { transcriptFor: () => ({ available: true, claudeSessionId: 'c', cwd: '/w' }) });
+  assert.equal(kept.attempts[0].transcript.available, true);
+});
+
+test('jobDetail artifacts carry phase, task and state', () => {
+  const job = deriveJob(stamp([
+    ...provisionedEvents(troubleshooting()),
+    start('i1', 'investigate'), ended('i1'), phaseDone('investigate'), phaseDone('diagnosis-review'),
+    start('x1', 'fix', { task: 'T1', purpose: 'implement' }), ended('x1'),
+  ]));
+  const states = new Map([['diagnosis', 'snapshot'], ['report:T1', 'workspace']]);
+  const artifacts = jobDetail(job, { artifactStates: states }).artifacts;
+  assert.deepEqual(artifacts.find((a) => a.key === 'diagnosis'), { key: 'diagnosis', label: 'diagnosis', phase: 'investigate', task: null, state: 'snapshot' });
+  assert.deepEqual(artifacts.find((a) => a.key === 'report:T1'), { key: 'report:T1', label: 'report:T1', phase: 'fix', task: 'T1', state: 'workspace' });
+  assert.equal(artifacts.find((a) => a.key === 'tasks').state, null);
 });

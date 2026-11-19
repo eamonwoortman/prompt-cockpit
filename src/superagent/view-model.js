@@ -186,12 +186,86 @@ function readyInputs(job) {
   return [...(last?.inputs ?? [])];
 }
 
-export function jobDetail(job, { isLive = () => false } = {}) {
+// usd is null when no part of it was priced; complete is false when anything
+// inside is unknown or unpriced.
+const money = (usd, complete) => ({ usd, complete });
+
+function sumMoney(list) {
+  const priced = list.filter((m) => m.usd !== null);
+  return money(priced.length ? priced.reduce((sum, m) => sum + m.usd, 0) : null, list.every((m) => m.complete));
+}
+
+function attemptCost(usage) {
+  if (!usage || usage.state === 'unknown') return money(null, false);
+  const priced = Object.values(usage.byModel ?? {}).some((m) => m.costUsd !== null);
+  const nothingToPrice = usage.complete && (usage.unpricedModels ?? []).length === 0;
+  return money(priced || nothingToPrice ? usage.knownCostUsd : null, usage.complete === true);
+}
+
+function group(rows, keyOf) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return groups;
+}
+
+function spendView(job, costed) {
+  const ran = costed.filter(({ attempt }) => !gatedOut(attempt));
+  const attemptMoney = ({ cost }) => cost;
+  const workers = sumMoney(ran.map(attemptMoney));
+  const decisions = job.routerDecisions ?? [];
+  const routerRows = [...group(decisions, (d) => d.model ?? 'unknown')].map(([model, ds]) => {
+    const costs = ds.map((d) => (typeof d.usage?.costUsd === 'number' ? money(d.usage.costUsd, true) : money(null, false)));
+    const tokens = ds.reduce((sum, d) => sum + (d.usage?.totalInputTokens ?? 0) + (d.usage?.outputTokens ?? 0), 0);
+    return { model, source: 'router', tokens, ...sumMoney(costs) };
+  });
+  const router = sumMoney(routerRows.map(({ usd, complete }) => money(usd, complete)));
+  const models = new Map();
+  for (const { usage } of ran) {
+    if (!usage || usage.state === 'unknown') continue;
+    for (const [model, m] of Object.entries(usage.byModel ?? {})) {
+      if (!models.has(model)) models.set(model, { costs: [], tokens: 0 });
+      const entry = models.get(model);
+      entry.costs.push(money(m.costUsd, m.costUsd !== null));
+      entry.tokens += m.tokens ?? 0;
+    }
+  }
+  const workerRows = [...models].map(([model, { costs, tokens }]) => ({ model, source: 'worker', tokens, ...sumMoney(costs) }));
+  const total = sumMoney([workers, router]);
+  return {
+    total,
+    workers,
+    router,
+    byPhase: [...group(ran, ({ attempt }) => `${attempt.phase}|${attempt.task ?? ''}`).values()].map((rows) => ({
+      phase: rows[0].attempt.phase,
+      task: rows[0].attempt.task ?? null,
+      attempts: rows.length,
+      ...sumMoney(rows.map(attemptMoney)),
+    })),
+    byTask: [...group(ran.filter(({ attempt }) => attempt.task != null), ({ attempt }) => attempt.task).entries()].map(([task, rows]) => ({ task, ...sumMoney(rows.map(attemptMoney)) })),
+    byModel: [...workerRows, ...routerRows],
+    complete: total.complete,
+  };
+}
+
+const usageShape = (usage) => (usage && usage.state !== 'unknown'
+  ? { state: usage.state, knownCostUsd: usage.knownCostUsd, tokens: usage.tokens, byModel: usage.byModel, unpricedModels: usage.unpricedModels, complete: usage.complete }
+  : null);
+
+export function jobDetail(job, { isLive = () => false, usageFor = () => null, transcriptFor = () => null, artifactStates = null } = {}) {
   const summary = jobSummary(job);
   if (isCorrupt(job)) {
-    return { ...summary, idea: null, branch: null, repos: [], readyInputs: [], phases: [], tasks: null, attempts: [], artifacts: [], router: routerView(job), needsYou: null };
+    return { ...summary, idea: null, branch: null, repos: [], readyInputs: [], phases: [], tasks: null, attempts: [], artifacts: [], spend: spendView(job, []), router: routerView(job), needsYou: null };
   }
   const limits = job.limits ?? {};
+  const writers = artifactWriters(job);
+  const costed = (job.attempts ?? []).map((attempt) => {
+    const usage = gatedOut(attempt) ? null : usageFor(attempt);
+    return { attempt, usage, cost: gatedOut(attempt) ? money(null, true) : attemptCost(usage) };
+  });
   return {
     ...summary,
     idea: job.idea ?? null,
@@ -200,7 +274,7 @@ export function jobDetail(job, { isLive = () => false } = {}) {
     readyInputs: readyInputs(job),
     phases: phaseChips(job),
     tasks: job.tasks == null ? null : job.tasks.map((t) => ({ id: t.id, title: t.title ?? t.id, done: taskStatus(job, t) === 'done' })),
-    attempts: (job.attempts ?? []).map((a) => ({
+    attempts: costed.map(({ attempt: a, usage, cost }) => ({
       attemptId: a.attemptId,
       phase: a.phase,
       task: a.task ?? null,
@@ -215,8 +289,28 @@ export function jobDetail(job, { isLive = () => false } = {}) {
       retried: retriedAway(a),
       live: a.outcome == null && a.sessionId != null && isLive(a.sessionId) === true,
       sessionId: a.sessionId ?? null,
+      startedAt: a.startedAt ?? null,
+      endedAt: a.endedAt ?? null,
+      durationMs: a.startedAt != null && a.endedAt != null ? a.endedAt - a.startedAt : null,
+      summary: a.summary ?? null,
+      reason: a.reason ?? null,
+      verdict: a.verdict ?? null,
+      findingsCount: Array.isArray(a.findings) ? a.findings.length : null,
+      question: a.question ?? null,
+      commits: (a.commits ?? []).length,
+      usage: usageShape(usage),
+      usageNote: gatedOut(a) || usageShape(usage) ? null : (usage?.note ?? 'unavailable'),
+      cost,
+      transcript: { available: transcriptFor(a)?.available === true },
     })),
-    artifacts: artifactKeys(job).map((key) => ({ key, label: key })),
+    artifacts: artifactKeys(job).map((key) => ({
+      key,
+      label: key,
+      phase: writers.get(key)?.phase ?? null,
+      task: writers.get(key)?.task ?? null,
+      state: artifactStates?.get(key) ?? null,
+    })),
+    spend: spendView(job, costed),
     router: routerView(job),
     needsYou: needsYouView(job),
   };

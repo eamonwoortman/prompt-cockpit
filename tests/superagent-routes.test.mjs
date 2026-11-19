@@ -61,7 +61,11 @@ test('GET /api/superagent reports status and summaries', async (t) => {
 
 test('GET /api/superagent/jobs/:id returns the detail, with live attempts from the registry', async (t) => {
   const attempt = { attemptId: 'a1', phase: 'spec', role: 'writer', model: 'm', n: 1, purpose: 'author', sessionId: 's1' };
-  const supervisor = { getJob: (id) => (id === 'job-1' ? job({ attempts: [attempt] }) : undefined) };
+  const supervisor = {
+    getJob: (id) => (id === 'job-1' ? job({ attempts: [attempt] }) : undefined),
+    usageForJob: async () => new Map(),
+    artifactStates: async () => new Map(),
+  };
   const api = await serve(t, { host: fakeHost({ supervisor }), registry: { get: (sid) => (sid === 's1' ? { id: 's1' } : undefined) } });
   const found = await api('/api/superagent/jobs/job-1');
   assert.equal(found.status, 200);
@@ -73,7 +77,29 @@ test('GET /api/superagent/jobs/:id returns the detail, with live attempts from t
   assert.equal(missing.body.code, 'ERR_UNKNOWN_JOB');
 });
 
-test('GET /api/superagent/jobs/:id answers with the host status while unreadable', async (t) => {
+test('GET job detail includes spend from usageForJob', async (t) => {
+  const attempt = { attemptId: 'a1', phase: 'spec', role: 'writer', model: 'm', n: 1, purpose: 'author', sessionId: null, startedAt: 1000, endedAt: 3000, outcome: 'done' };
+  const usage = { state: 'final', knownCostUsd: 0.5, tokens: { total: 10 }, byModel: { m: { costUsd: 0.5, tokens: 10 } }, unpricedModels: [], complete: true, claudeSessionId: 'c1' };
+  const supervisor = {
+    getJob: () => job({ attempts: [attempt] }),
+    usageForJob: async () => new Map([['a1', { usage, transcript: { available: true, claudeSessionId: 'c1', cwd: '/w' } }]]),
+    artifactStates: async () => new Map(),
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  const { body } = await api('/api/superagent/jobs/job-1');
+  assert.deepEqual(body.spend.total, { usd: 0.5, complete: true });
+  assert.equal(body.attempts[0].durationMs, 2000);
+  assert.deepEqual(body.attempts[0].cost, { usd: 0.5, complete: true });
+  assert.deepEqual(body.attempts[0].transcript, { available: true });
+
+  const broken = { getJob: () => job({ attempts: [attempt] }), usageForJob: async () => { throw new Error('boom'); } };
+  const fallback = await (await serve(t, { host: fakeHost({ supervisor: broken }) }))('/api/superagent/jobs/job-1');
+  assert.equal(fallback.status, 200);
+  assert.deepEqual(fallback.body.spend.total, { usd: null, complete: false });
+  assert.equal(fallback.body.attempts[0].usageNote, 'unavailable');
+});
+
+test('GET /api/superagent/jobs/:id answers with the host status while unreadable',async (t) => {
   const api = await serve(t, { host: fakeHost({ readable: false, refusal: { status: 503, state: 'initialising', ownerPort: null } }) });
   const res = await api('/api/superagent/jobs/job-1');
   assert.equal(res.status, 503);

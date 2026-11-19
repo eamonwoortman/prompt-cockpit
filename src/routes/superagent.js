@@ -61,6 +61,15 @@ function titleFor(body) {
   return given || body.idea.trim().split(/\s+/).slice(0, TITLE_WORDS).join(' ');
 }
 
+// A supervisor that cannot answer must not break the detail route.
+async function settled(read) {
+  try {
+    return (await read()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function registerSuperagentRoutes(router, { host, registry, readArtifactImpl = readArtifact }) {
   const isLive = (sessionId) => Boolean(registry.get(sessionId));
 
@@ -71,7 +80,15 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
 
   router.get('/api/superagent/jobs/:id', async (req, res, url, { id }) => {
     try {
-      return respondJson(res, 200, jobDetail(await readJob(host, id), { isLive }));
+      const job = await readJob(host, id);
+      const usage = await settled(() => host.read((sv) => sv.usageForJob(id)));
+      const states = await settled(() => host.read((sv) => sv.artifactStates(id)));
+      return respondJson(res, 200, jobDetail(job, {
+        isLive,
+        usageFor: (a) => usage?.get(a.attemptId)?.usage ?? null,
+        transcriptFor: (a) => usage?.get(a.attemptId)?.transcript ?? null,
+        artifactStates: states,
+      }));
     } catch (err) {
       return respondError(res, err);
     }
