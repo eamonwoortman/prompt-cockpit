@@ -4,7 +4,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { tempDir, initRepo, sessionFactory, deferred, T0 } from './superagent-helpers.mjs';
+import { tempDir, initRepo, sessionFactory, deferred, missingTranscripts, T0 } from './superagent-helpers.mjs';
 
 process.env.COCKPIT_HOME = await tempDir('sa-stop-prov-home-');
 
@@ -56,6 +56,7 @@ async function harness({ git } = {}) {
     platform: process.platform,
     ...(git && { git }),
     workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
+    transcripts: missingTranscripts(),
   });
   const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   const jobId = async () => (await store.listJobIds())[0];

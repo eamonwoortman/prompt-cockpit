@@ -38,9 +38,14 @@
 // check pauses the job with needs-you folder-changed; runTick re-checks a
 // paused job every heartbeat and appends folder-restored once it passes. The
 // runner checks again immediately before createSession.
+//
+// Accounting (spec C): after each tick every known job is handed to the
+// accounting queue (accounting.js), never awaited; stop() gives it the same
+// absolute deadline as the in-flight tick.
 import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { createAccounting } from './accounting.js';
 import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateMilestoneFixture } from './config.js';
 import { checkGate, checkInPlace, folderChangedEvent, normaliseTop, provisionInPlace, refuseJobBranch } from './inplace.js';
 import { hasTemplate } from './prompts.js';
@@ -49,6 +54,7 @@ import { allowedActions, buildRouterRequest } from './router.js';
 import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, attemptsFor, buildFixTask, gatedOut, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
+import { createTranscriptIndex } from './transcripts.js';
 import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
 import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, removeAbortedWorktree, repoIds, repoToplevel, slugify } from './worktree.js';
 
@@ -126,8 +132,10 @@ export function createSuperagent({
   platform = process.platform,
   router = null,
   workflowDirs = { builtin: workflowsDir(), global: path.join(defaultSuperagentRoot(), 'workflows') },
+  transcripts = createTranscriptIndex(),
 }) {
   const runner = createRunner({ registry, store, git, now, idImpl, logImpl, beforeSession: inPlaceGate });
+  const accounting = createAccounting({ store, transcripts, isLive: (sessionId) => sessionId != null && registry.get(sessionId) != null, now, logImpl });
   const known = new Set();
   const corrupt = new Map();
   const chains = new Map();
@@ -549,6 +557,7 @@ export function createSuperagent({
       ticking = (async () => {
         try {
           await runTick();
+          accounting.enqueue([...known].map((jobId) => store.get(jobId)).filter(Boolean));
         } catch (err) {
           log('tick failed', err);
         } finally {
@@ -588,6 +597,7 @@ export function createSuperagent({
   async function doStart() {
     stopping = false;
     runner.setStopping(false);
+    accounting.start();
     maxConcurrentSessions = config.resolve(null).maxConcurrentSessions;
     let jobIds = [];
     try {
@@ -613,7 +623,10 @@ export function createSuperagent({
     await store.flush();
   }
 
+  // One deadline, taken once, bounds both the in-flight tick and the
+  // accounting queue.
   async function stop() {
+    const deadline = now() + stopTickDeadlineMs;
     stopping = true;
     for (const { controller } of routing.values()) controller.abort();
     runner.setStopping(true);
@@ -624,11 +637,12 @@ export function createSuperagent({
     }
     if (ticking) {
       let handle;
-      const deadline = new Promise((resolve) => {
-        handle = setTimeout(resolve, stopTickDeadlineMs);
+      const timeout = new Promise((resolve) => {
+        handle = setTimeout(resolve, Math.max(0, deadline - now()));
       });
-      await Promise.race([ticking, deadline]).finally(() => clearTimeout(handle));
+      await Promise.race([ticking, timeout]).finally(() => clearTimeout(handle));
     }
+    await accounting.stop({ deadline });
     await drain();
   }
 
@@ -1014,6 +1028,25 @@ export function createSuperagent({
     return [...jobs, ...corrupt.values()].map((j) => structuredClone(j));
   }
 
+  // A corrupt job has no attempts to account.
+  function jobForRead(jobId) {
+    if (corrupt.has(jobId)) return { jobId, attempts: [] };
+    const job = store.get(jobId);
+    if (!job) throw fail('ERR_UNKNOWN_JOB', `superagent: no job ${jobId}`);
+    return job;
+  }
+
+  async function usageForJob(jobId) {
+    return accounting.usageForJob(jobForRead(jobId));
+  }
+
+  async function transcriptFor(jobId, attemptId) {
+    const job = jobForRead(jobId);
+    const attempt = job.attempts.find((a) => a.attemptId === attemptId);
+    if (!attempt) throw fail('ERR_UNKNOWN_ATTEMPT', `superagent: job ${jobId} has no attempt ${attemptId}`);
+    return accounting.transcriptFor(job, attempt);
+  }
+
   function getJob(jobId) {
     const bad = corrupt.get(jobId);
     return bad ? structuredClone(bad) : store.get(jobId);
@@ -1026,5 +1059,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, retryJob, stopJob, listJobs, getJob, orphanWorktrees };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, retryJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, jobDir: store.jobDir };
 }

@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as registry from '../src/session-registry.js';
-import { HOLD, MIN, T0, deferred, ev, initRepo, scriptedWorker, sessionFactory, tempDir } from './superagent-helpers.mjs';
+import { HOLD, MIN, T0, deferred, ev, initRepo, missingTranscripts, scriptedWorker, sessionFactory, tempDir } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
 import { MILESTONE_2_PIPELINE, createSuperagentConfig, defaultConfig } from '../src/superagent/config.js';
 import { brainstormLog } from '../src/superagent/sequencer.js';
@@ -83,6 +83,7 @@ async function harness({ handlers = handlersWith(), limits = null, defaults = {}
       logImpl: quiet,
       platform: 'linux',
       workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
+      transcripts: missingTranscripts(),
       ...(router === undefined ? {} : { router }),
       ...(budgetCheck === undefined ? {} : { budgetCheck }),
     });

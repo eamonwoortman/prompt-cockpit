@@ -124,6 +124,16 @@ export function launchAction(over = {}) {
   };
 }
 
+// A transcripts index that never finds one, so a supervisor under test never
+// reads the real ~/.claude/projects.
+export function missingTranscripts() {
+  return {
+    find: async () => ({ status: 'missing' }),
+    usage: async () => { throw new Error('missingTranscripts: usage of a transcript that was never found'); },
+    verify: async () => false,
+  };
+}
+
 export function ids(prefix = 'a') {
   let n = 0;
   return () => `${prefix}${++n}`;

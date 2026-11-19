@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as registry from '../src/session-registry.js';
-import { tempDir, initRepo, sessionFactory, jobCreated, deferred, taskCreated, ev, T0 } from './superagent-helpers.mjs';
+import { tempDir, initRepo, sessionFactory, jobCreated, deferred, taskCreated, ev, missingTranscripts, T0 } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
 import { createSuperagentConfig, defaultConfig, MILESTONE_1_PIPELINE, MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import { RESULT_FILE, artifactPaths, attemptDir } from '../src/superagent/results.js';
@@ -53,6 +53,7 @@ async function harness({ configJson = {}, ...over } = {}) {
       logImpl: quiet,
       platform: 'linux',
       workflowDirs: { builtin: workflowsDir(), global: globalWorkflows },
+      transcripts: missingTranscripts(),
       ...opts,
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
@@ -196,6 +197,132 @@ test('stopJob closes the live attempt and archives the ledger', async () => {
     assert.equal(registry.list().length, 0);
     await h.sa.stop();
   } finally { registry._reset(); }
+});
+
+const until = async (cond, what) => {
+  for (let i = 0; i < 200; i++) {
+    if (await cond()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+};
+
+test('tick enqueues every known job, including finished ones', async () => {
+  try {
+    const seen = [];
+    const transcripts = { ...missingTranscripts(), async find(job, attempt) { seen.push([job.jobId, job.state, attempt.attemptId]); return { status: 'missing' }; } };
+    const h = await harness({ transcripts });
+    const job = await create(h);
+    await h.sa.tick();
+    const { attemptId } = h.store.get(job.jobId).attempts.at(-1);
+    await h.sa.stopJob(job.jobId);
+    assert.deepEqual(seen, [], 'nothing is queued outside a tick');
+    await h.sa.tick();
+    await until(() => seen.length > 0, 'the finished job to be accounted');
+    assert.deepEqual(seen, [[job.jobId, 'stopped', attemptId]]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accounting keeps an attempt provisional while its worker row is live, and the supervisor serves its usage and transcript', async () => {
+  try {
+    const file = path.join(await tempDir('sa-tx-'), 'claude-1.jsonl');
+    await fs.writeFile(file, '{}\n');
+    let usageCalls = 0;
+    const transcripts = {
+      find: async () => ({ status: 'found', claudeSessionId: 'claude-1', file, cwd: '/wt' }),
+      usage: async () => {
+        usageCalls += 1;
+        return { knownCostUsd: 0.5, inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, byModel: {}, unpricedModels: [], complete: true, conflicts: 0, fingerprint: 'fp' };
+      },
+      verify: async () => true,
+    };
+    const factory = sessionFactory(registry);
+    const h = await harness({ registry: { ...factory.registry, closeSession: () => false }, transcripts });
+    const job = await create(h);
+    await h.sa.tick();
+    const { attemptId, sessionId } = h.store.get(job.jobId).attempts.at(-1);
+    await h.sa.stopJob(job.jobId);
+    assert.ok(registry.get(sessionId), 'the row lingers');
+    assert.equal(h.sa.jobDir(job.jobId), path.join(h.jobsRoot, job.jobId));
+    const entry = () => {
+      try {
+        return JSON.parse(readFileSync(path.join(h.sa.jobDir(job.jobId), 'usage.json'), 'utf8')).attempts[attemptId];
+      } catch {
+        return undefined;
+      }
+    };
+    await h.sa.tick();
+    await until(() => entry()?.state === 'provisional', 'a provisional entry');
+    await h.sa.tick();
+    await until(() => usageCalls === 2, 'the second scan');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(entry().state, 'provisional', 'a live row keeps it provisional');
+    registry.closeSession(sessionId);
+    await h.sa.tick();
+    await until(() => entry()?.state === 'final', 'the final entry');
+
+    const usage = await h.sa.usageForJob(job.jobId);
+    assert.equal(usage.get(attemptId).usage.state, 'final');
+    assert.equal(usage.get(attemptId).usage.knownCostUsd, 0.5);
+    assert.deepEqual(usage.get(attemptId).transcript, { available: true, claudeSessionId: 'claude-1', cwd: '/wt' });
+    assert.deepEqual(await h.sa.transcriptFor(job.jobId, attemptId), { status: 'found', claudeSessionId: 'claude-1', file, cwd: '/wt' });
+    await assert.rejects(h.sa.transcriptFor(job.jobId, 'no-such-attempt'), { code: 'ERR_UNKNOWN_ATTEMPT' });
+    await assert.rejects(h.sa.usageForJob('no-such-job'), { code: 'ERR_UNKNOWN_JOB' });
+    await assert.rejects(h.sa.transcriptFor('no-such-job', attemptId), { code: 'ERR_UNKNOWN_JOB' });
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('stop drains the accounting queue within stopTickDeadlineMs', async () => {
+  try {
+    const called = { done: false };
+    const transcripts = { ...missingTranscripts(), find: () => { called.done = true; return new Promise(() => {}); } };
+    const h = await harness({ transcripts, stopTickDeadlineMs: 100 });
+    const job = await create(h);
+    await h.sa.tick();
+    await h.sa.stopJob(job.jobId);
+    await h.sa.tick();
+    await until(() => called.done, 'the accounting item to start');
+    const t0 = Date.now();
+    await h.sa.stop();
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed >= 80 && elapsed < 1500, `stop took ${elapsed} ms`);
+  } finally { registry._reset(); }
+});
+
+test('stop gives the in-flight tick and the accounting queue one shared deadline', async () => {
+  const spy = rejectionSpy();
+  try {
+    const called = { done: false };
+    const asked = deferred();
+    let hold = false;
+    const transcripts = { ...missingTranscripts(), find: () => { called.done = true; return new Promise(() => {}); } };
+    const budgetCheck = () => {
+      if (!hold) return { allow: true };
+      asked.resolve();
+      return new Promise(() => {});
+    };
+    // A running clock: the harness's frozen one would hand each wait the full budget.
+    const h = await harness({ transcripts, budgetCheck, stopTickDeadlineMs: 150, now: () => Date.now() });
+    const first = await create(h);
+    await h.sa.tick();
+    await h.sa.stopJob(first.jobId);
+    await h.sa.tick();
+    await until(() => called.done, 'the accounting item to start');
+    hold = true;
+    await create(h, { title: 'Add bye' });
+    h.sa.tick();
+    await asked.promise;
+    const t0 = Date.now();
+    await h.sa.stop();
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed >= 130 && elapsed < 290, `stop took ${elapsed} ms for a 150 ms deadline`);
+  } finally {
+    await spy.stop();
+    registry._reset();
+  }
+  assert.deepEqual(spy.seen, []);
 });
 
 test('createJob refuses pipelines this plan cannot run', async () => {

@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { tempDir, initRepo, sessionFactory, jobCreated, deferred, T0 } from './superagent-helpers.mjs';
+import { tempDir, initRepo, sessionFactory, jobCreated, deferred, missingTranscripts, T0 } from './superagent-helpers.mjs';
 import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 
 process.env.COCKPIT_HOME = await tempDir('sa-inplace-home-');
@@ -62,6 +62,7 @@ async function harness({ git, platform = process.platform, worktreesRoot: worktr
       ...(budgetCheck && { budgetCheck }),
       router,
       workflowDirs: { builtin: workflowsDir(), global: path.join(root, 'workflows') },
+      transcripts: missingTranscripts(),
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     return {
