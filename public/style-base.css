@@ -124,6 +124,28 @@
     font-size: 14px;
     font-weight: 700;
   }
+  .app-header #appTitle {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    line-height: 0;
+  }
+  .app-logo {
+    display: block;
+    width: 40px;
+    height: 30px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .app-logo-canopy {
+    fill: var(--accent);
+    fill-opacity: .1;
+    stroke: color-mix(in srgb, var(--accent) 75%, white);
+    stroke-width: 2.4;
+  }
+  .app-logo-prompt { stroke: var(--text); stroke-width: 2.4; }
+  .app-logo-horizon { stroke: color-mix(in srgb, var(--accent) 75%, white); stroke-width: 2.4; }
+  .app-logo-panels { stroke: var(--accent); stroke-width: 2; opacity: .55; }
   .app-header .spacer { flex: 1; }
 
   #operatorGate {

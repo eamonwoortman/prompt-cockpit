@@ -21,7 +21,14 @@
 </head>
 <body data-screen="launcher">
   <header class="app-header">
-    <h1 id="appTitle">Prompt Cockpit</h1>
+    <h1 id="appTitle" aria-label="Prompt Cockpit" title="Prompt Cockpit">
+      <svg class="app-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 36" fill="none" aria-hidden="true" focusable="false">
+        <path class="app-logo-canopy" d="M8 27 11.5 14.5C13.2 8.8 17.6 5 24 5s10.8 3.8 12.5 9.5L40 27"/>
+        <path class="app-logo-prompt" d="m17 15 5 5-5 5m10 0h5"/>
+        <path class="app-logo-horizon" d="M5 30h38"/>
+        <path class="app-logo-panels" d="M9 34h8m14 0h8"/>
+      </svg>
+    </h1>
     <button type="button" id="sessionLabel"></button>
     <span id="sessionLabelError" class="mcp-error" hidden></span>
     <span id="modelBadge" class="model-badge session-chrome" hidden title="Model / reasoning effort / thinking budget in use"></span>
