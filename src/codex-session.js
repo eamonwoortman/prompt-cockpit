@@ -14,6 +14,13 @@ function unsupported(name) {
 }
 
 const OUTPUT_FLUSH_MS = 100;
+const COMPACT_START_WAIT_MS = 5000;
+
+// The cockpit's Compact button sends the CLI-style "/compact [note]". Codex
+// compaction takes no custom instructions, so any note is dropped.
+export function isCompactCommand(text) {
+  return /^\/compact(\s|$)/.test(String(text || '').trim());
+}
 
 function eventBelongsToHandle(params, threadId, ownedTurnIds, recentTurnIds, method) {
   if (!params?.threadId || params.threadId !== threadId) return false;
@@ -204,6 +211,20 @@ export function startCodexSession({
     }
   }
 
+  let compactStartWaiter = null;
+  function waitForCompactTurnStart() {
+    return new Promise((resolve) => {
+      const timer = setTimeout(done, COMPACT_START_WAIT_MS);
+      timer.unref?.();
+      function done() {
+        clearTimeout(timer);
+        compactStartWaiter = null;
+        resolve();
+      }
+      compactStartWaiter = done;
+    });
+  }
+
   function waitForTurn(turnId) {
     if (completedTurns.has(turnId)) return Promise.resolve(completedTurns.get(turnId));
     return new Promise((resolve, reject) => completionWaiters.set(turnId, { resolve, reject }));
@@ -275,6 +296,7 @@ export function startCodexSession({
       if (startedTurnId) {
         activeTurnId = startedTurnId;
         ownedTurnIds.add(startedTurnId);
+        compactStartWaiter?.();
       }
     }
     if (!eventBelongsToHandle(params, threadId, ownedTurnIds, recentTurnIds, method)) return;
@@ -530,9 +552,24 @@ export function startCodexSession({
     startPending = true;
     let result;
     try {
-      result = await manager.request('turn/start', params);
+      if (isCompactCommand(entry.text)) {
+        // Codex has no slash commands over app-server: "/compact" sent as turn
+        // text is just a chat message. Compaction is its own RPC, whose empty
+        // response carries no turn id - the turn it spawns is claimed from the
+        // turn/started notification instead.
+        await manager.request('thread/compact/start', { threadId });
+        if (!activeTurnId) await waitForCompactTurnStart();
+        result = {};
+      } else {
+        result = await manager.request('turn/start', params);
+      }
     } finally {
       startPending = false;
+    }
+    if (isCompactCommand(entry.text) && !activeTurnId && !closed) {
+      // Nothing to compact (no turn was spawned): finish quietly.
+      resultEpoch.consume(entry.id);
+      return;
     }
     if (closed) {
       resultEpoch.consume(entry.id);

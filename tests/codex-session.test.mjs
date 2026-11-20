@@ -110,6 +110,24 @@ test('Codex sessions start a thread, queue a prompt, and finish a streamed turn'
   handle.close();
 });
 
+test('Codex /compact calls thread/compact/start instead of sending chat text', async () => {
+  const manager = createManager();
+  manager.completeTurns = false;
+  const { handle, states } = startOptions(manager);
+  handle.pushInput('/compact keep the auth work');
+
+  await waitFor(() => manager.calls.some(([method]) => method === 'thread/compact/start'), 'compact request');
+  assert.deepEqual(manager.calls.find(([method]) => method === 'thread/compact/start')[1], { threadId: 'thread-new' });
+  assert.ok(!manager.calls.some(([method]) => method === 'turn/start'));
+
+  // The compaction turn is claimed from turn/started, then settles normally.
+  manager.emit('turn/started', { threadId: 'thread-new', turn: { id: 'compact-1', status: 'inProgress' } });
+  await waitFor(() => handle.debugSnapshot().activeTurnId === 'compact-1', 'claimed compaction turn');
+  manager.emit('turn/completed', { threadId: 'thread-new', turn: { id: 'compact-1', status: 'completed' } });
+  await waitFor(() => states.at(-1) === 'idle', 'idle after compaction');
+  handle.close();
+});
+
 test('Codex claims turn/started before turn/start resolves so events and interrupt are not dropped', async () => {
   const manager = createManager({ deferTurnStart: true });
   const { handle, states } = startOptions(manager);
