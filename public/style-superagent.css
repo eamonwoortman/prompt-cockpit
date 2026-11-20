@@ -4,6 +4,8 @@
 
 #superagentView { display: none; }
 
+.superagent-btn-icon { width: 1.15em; height: 1.15em; vertical-align: -0.2em; margin-right: 0.3em; }
+
 body.view-superagent > :not(.app-header, #operatorGate, #superagentView, #notificationsPanel, dialog, script),
 body.view-superagent .app-header > :not(h1, .spacer, #superagentBtn, #notificationsBtn) {
   display: none !important;

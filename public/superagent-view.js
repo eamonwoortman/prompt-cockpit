@@ -102,6 +102,7 @@ export function initSuperagentView() {
   const answerDrafts = new Map();
 
   document.title = 'Superagent - Prompt Cockpit';
+  document.getElementById('favicon')?.setAttribute('href', '/superagent-favicon.svg');
   // Lets other tabs' bell, Superagent button and notification clicks find
   // this tab (openSuperagentView), which then asks it to select a job instead
   // of reloading it.
