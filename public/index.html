@@ -252,6 +252,21 @@
     </div>
   </dialog>
 
+  <dialog id="superagentRenameModal" class="modal" aria-labelledby="superagentRenameTitle">
+    <form class="modal-box" id="superagentRenameForm">
+      <header class="modal-header"><strong id="superagentRenameTitle">Rename job</strong></header>
+      <div class="modal-body sa-form">
+        <input type="text" id="superagentRenameInput" maxlength="200" required aria-labelledby="superagentRenameTitle">
+        <div class="sa-note">Changes the title shown here and on later workers' job cards. The branch and file paths keep the original name.</div>
+        <div id="superagentRenameError" class="sa-error" hidden></div>
+      </div>
+      <footer>
+        <button type="button" id="superagentRenameCancel" class="btn" title="Keep the current title">Cancel</button>
+        <button type="submit" id="superagentRenameSave" class="btn btn-primary" title="Save the new title">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="superagentArtifactModal" class="modal" aria-labelledby="superagentArtifactTitle">
     <div class="modal-box">
       <header class="modal-header"><strong id="superagentArtifactTitle"></strong></header>

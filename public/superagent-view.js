@@ -429,7 +429,42 @@ export function initSuperagentView() {
     onOpenArtifact: (key) => openArtifact(detail.jobId, key),
     onInspect: (attempt) => inspect(attempt),
     onRetrospective: (selector) => retrospective(selector),
+    onRename: (job) => openRename(job),
     stopButton: () => stopButton(middleError),
+  });
+
+  // --- Rename (a dialog: the middle pane is rebuilt on every poll) ---
+
+  const renameModal = document.getElementById('superagentRenameModal');
+  const renameInput = document.getElementById('superagentRenameInput');
+  const renameError = document.getElementById('superagentRenameError');
+  const renameSave = document.getElementById('superagentRenameSave');
+  let renameJobId = null;
+  document.getElementById('superagentRenameCancel').addEventListener('click', () => renameModal.close());
+
+  function openRename(job) {
+    renameJobId = job.jobId;
+    renameInput.value = job.title;
+    showError(renameError, null);
+    renameSave.disabled = false;
+    renameModal.showModal();
+    renameInput.select();
+  }
+
+  document.getElementById('superagentRenameForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const jobId = renameJobId;
+    showError(renameError, null);
+    renameSave.disabled = true;
+    try {
+      await postJson(`/api/superagent/jobs/${encodeURIComponent(jobId)}/rename`, { title: renameInput.value });
+      renameModal.close();
+      await refresh();
+    } catch (err) {
+      showError(renameError, err);
+    } finally {
+      renameSave.disabled = false;
+    }
   });
 
   // One handoff per job, kept across polls and job switches, so a

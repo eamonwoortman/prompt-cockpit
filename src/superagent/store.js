@@ -21,7 +21,7 @@ import { isSafeSessionId } from '../safe-id.js';
 import { defaultConfig, defaultSuperagentRoot } from './config.js';
 import { LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
 
-export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored', 'job-retried'];
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored', 'job-retried', 'job-renamed'];
 
 const NEWLINE = 0x0a;
 
@@ -115,6 +115,11 @@ export function deriveJob(events) {
         // A verifier-confirmed blocker's question lives only in the detail.
         job.answers.push({ forAttemptId: ev.forAttemptId, answer: ev.answer, question: job.detail?.question ?? job.detail?.text ?? null, at: ev.at ?? null });
         setState('running');
+        break;
+      // A rename changes the title only: slug, branch and paths keep the
+      // created title's.
+      case 'job-renamed':
+        if (typeof ev.title === 'string' && ev.title) job.title = ev.title;
         break;
       case 'folder-restored':
         if (job.state === 'needs-you' && job.reason === 'folder-changed') setState('running');

@@ -638,3 +638,13 @@ test("artifactFileName and artifactMimeType name the artifact viewer's download"
   assert.equal(artifactMimeType('x/tasks.json'), 'application/json;charset=utf-8');
   assert.equal(artifactMimeType('x/report.txt'), 'text/plain;charset=utf-8');
 });
+
+test('the header has a Rename button that hands the job to onRename, in every state', () => {
+  const renamed = [];
+  const { root, pane } = mount({ onRename: (job) => renamed.push([job.jobId, job.title]) });
+  pane.render(detail());
+  root.querySelector('.sa-jp-head').querySelector('.sa-rename').click();
+  pane.render(detail({ status: 'done', reason: null }));
+  root.querySelector('.sa-jp-head').querySelector('.sa-rename').click();
+  assert.deepEqual(renamed, [['job-1', 'Investigate this ADO issue'], ['job-1', 'Investigate this ADO issue']]);
+});

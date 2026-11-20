@@ -284,12 +284,16 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
     accept: (supervisor, id, body) => supervisor.accept(id, { needsYouSeq: body.needsYouSeq }),
     retry: (supervisor, id, body) => supervisor.retryJob(id, { needsYouSeq: body.needsYouSeq, note: body.note }),
     stop: (supervisor, id) => supervisor.stopJob(id),
+    rename: (supervisor, id, body) => supervisor.renameJob(id, body.title),
   };
   for (const [name, act] of Object.entries(actions)) {
     router.post(`/api/superagent/jobs/:id/${name}`, async (req, res, url, { id }) => {
       const body = await readJsonBody(req);
       if (name === 'answer' && !Number.isInteger(body.needsYouSeq)) {
         return respondJson(res, 400, { error: 'needsYouSeq is required: the needs-you this answer was written for', code: 'ERR_INVALID_ANSWER' });
+      }
+      if (name === 'rename' && typeof body.title !== 'string') {
+        return respondJson(res, 400, { error: 'title must be text', code: 'ERR_INVALID_REQUEST' });
       }
       if (name === 'retry' && !Number.isInteger(body.needsYouSeq)) {
         return respondJson(res, 400, { error: 'needsYouSeq is required: the stuck entry this retry was made for', code: 'ERR_INVALID_REQUEST' });

@@ -1,6 +1,6 @@
 // Superagent supervisor: createSuperagent owns one heartbeat that reviews and
 // advances every running job, plus job creation, accept, answerQuestion,
-// retryJob and stop.
+// retryJob, renameJob and stop.
 //
 // Modelled on createAutopilot (src/autopilot.js): everything injected, one
 // timer, a tick that never overlaps itself, an idempotent start/stop and a
@@ -9,7 +9,7 @@
 // src/server.js.
 //
 // Per-job serialisation: tick's job step, createJob's provisioning, stopJob,
-// accept, answerQuestion and retryJob all run on one promise chain per job (withJob),
+// accept, answerQuestion, retryJob and renameJob all run on one promise chain per job (withJob),
 // so a stop can never interleave with a launch. stopJob marks the job in
 // stopRequested synchronously, before it queues, so a tick step already
 // waiting on a budget check sees the stop on its recheck and launches nothing.
@@ -62,6 +62,7 @@ import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, li
 
 export const TICK_MS = 15_000;
 const ANSWER_MAX_CHARS = 4000;
+export const TITLE_MAX_CHARS = 200;
 const FINISHED_STATES = new Set(['done', 'stopped', 'failed']);
 
 // Decision 14: MAX_PATH less its terminating NUL. Validation bounds phase ids
@@ -1004,6 +1005,20 @@ export function createSuperagent({
     });
   }
 
+  // Any state: a rename changes the shown title and later attempts' job
+  // cards, never the slug, branch or artifact paths.
+  function renameJob(jobId, title) {
+    return withJob(jobId, async () => {
+      const job = await requireJob(jobId);
+      const text = typeof title === 'string' ? title.trim() : '';
+      if (text.length < 1 || text.length > TITLE_MAX_CHARS) {
+        throw fail('ERR_INVALID_REQUEST', `superagent: a job title must be 1-${TITLE_MAX_CHARS} characters`);
+      }
+      if (text === job.title) return job;
+      return appendConfirmed(jobId, { type: 'job-renamed', title: text }, (j) => j.title === text);
+    });
+  }
+
   function stopJob(jobId) {
     stopRequested.add(jobId);
     routing.get(jobId)?.controller.abort();
@@ -1067,5 +1082,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, retryJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, retryJob, renameJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
 }

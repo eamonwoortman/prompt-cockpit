@@ -236,6 +236,31 @@ test('retry passes the needs-you and note through, requires the needs-you, and m
   assert.deepEqual(calls.slice(0, 2), [{ needsYouSeq: 7, note: 'from code only' }, { needsYouSeq: 4, note: undefined }]);
 });
 
+test('rename passes the title through, refuses a non-text title before the supervisor, and maps refusals', async (t) => {
+  const calls = [];
+  const supervisor = {
+    renameJob: async (jobId, title) => {
+      calls.push([jobId, title]);
+      if (jobId === 'nope') throw Object.assign(new Error('no job'), { code: 'ERR_UNKNOWN_JOB' });
+      if (!title.trim() || title.length > 200) throw Object.assign(new Error('bad title'), { code: 'ERR_INVALID_REQUEST' });
+      return job({ jobId, title: title.trim() });
+    },
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  for (const title of [undefined, null, 5, ['x']]) {
+    const res = await api('/api/superagent/jobs/job-1/rename', { method: 'POST', body: { title } });
+    assert.deepEqual([res.status, res.body.code], [400, 'ERR_INVALID_REQUEST'], String(title));
+  }
+  assert.deepEqual(calls, []);
+  const ok = await api('/api/superagent/jobs/job-1/rename', { method: 'POST', body: { title: '  New name ' } });
+  assert.deepEqual([ok.status, ok.body.title], [200, 'New name']);
+  const empty = await api('/api/superagent/jobs/job-1/rename', { method: 'POST', body: { title: '   ' } });
+  assert.deepEqual([empty.status, empty.body.code], [400, 'ERR_INVALID_REQUEST']);
+  const unknown = await api('/api/superagent/jobs/nope/rename', { method: 'POST', body: { title: 'x' } });
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(calls, [['job-1', '  New name '], ['job-1', '   '], ['nope', 'x']]);
+});
+
 test('accept and stop return the job summary; an unknown job is 404', async (t) => {
   const unknown = Object.assign(new Error('superagent: no job nope'), { code: 'ERR_UNKNOWN_JOB' });
   const supervisor = {

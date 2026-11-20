@@ -488,3 +488,14 @@ test('store.append accepts folder-restored', async () => {
   assert.equal(store.get('j1').state, 'running');
   assert.equal((await store.load('j1')).state, 'running');
 });
+
+test('job-renamed changes the title only; slug and branch keep the created title', async () => {
+  const store = createSuperagentStore({ rootDir: await tempDir('sa-store-renamed-'), logImpl: quiet });
+  for (const e of [jobCreated(), { type: 'job-provisioned' }]) await store.append('j1', e);
+  const before = store.get('j1');
+  await store.append('j1', { type: 'job-renamed', title: 'A better name' });
+  const after = (await store.load('j1'));
+  assert.equal(after.title, 'A better name');
+  assert.deepEqual([after.slug, after.branch, after.state], [before.slug, before.branch, 'running']);
+  assert.equal(deriveJob(stamp([jobCreated(), { type: 'job-renamed', title: '' }])).title, jobCreated().title);
+});

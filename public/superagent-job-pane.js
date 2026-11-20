@@ -203,7 +203,7 @@ export function stageState(group, phaseChip) {
   return { label: outcome.label, className: `outcome-${outcome.kind}` };
 }
 
-export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () => {}, onRetrospective = () => {}, stopButton = () => null }) {
+export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () => {}, onRetrospective = () => {}, onRename = () => {}, stopButton = () => null }) {
   const expanded = new Set();
   // Stage groups start folded; one the operator opened stays open across polls.
   const openStages = new Set();
@@ -220,7 +220,12 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
 
   function header(detail) {
     const head = el('div', 'sa-jp-head');
-    head.append(el('h2', 'sa-jp-title', detail.title), el('span', `sa-badge status-${detail.status}`, statusLabel(detail)));
+    head.append(el('h2', 'sa-jp-title', detail.title));
+    const rename = head.appendChild(el('button', 'btn btn-ghost sa-rename', 'Rename'));
+    rename.type = 'button';
+    rename.title = 'Change the title of this job';
+    rename.addEventListener('click', () => onRename(detail));
+    head.append(el('span', `sa-badge status-${detail.status}`, statusLabel(detail)));
     if (!FINISHED.has(detail.status)) {
       const stop = stopButton();
       if (stop) head.append(stop);

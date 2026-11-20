@@ -1391,6 +1391,31 @@ test('retryJob resumes a stuck job from its last attempt, with handoff.md and th
   } finally { registry._reset(); }
 });
 
+test('renameJob changes the title in any state, keeps slug and branch, and refuses an empty or too-long title', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h);
+    let lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.renameJob(job.jobId, '   '), { code: 'ERR_INVALID_REQUEST' });
+    await assert.rejects(h.sa.renameJob(job.jobId, 'x'.repeat(201)), { code: 'ERR_INVALID_REQUEST' });
+    await assert.rejects(h.sa.renameJob(job.jobId, 7), { code: 'ERR_INVALID_REQUEST' });
+    await assert.rejects(h.sa.renameJob('nope', 'x'), { code: 'ERR_UNKNOWN_JOB' });
+    assert.equal(lineCount(h, job.jobId), lines);
+
+    const renamed = await h.sa.renameJob(job.jobId, '  Fix the CSV header  ');
+    assert.equal(renamed.title, 'Fix the CSV header');
+    assert.deepEqual([renamed.slug, renamed.branch], [job.slug, job.branch]);
+    lines = lineCount(h, job.jobId);
+    assert.equal((await h.sa.renameJob(job.jobId, 'Fix the CSV header')).title, 'Fix the CSV header');
+    assert.equal(lineCount(h, job.jobId), lines, 'the same title appends nothing');
+
+    await h.sa.stopJob(job.jobId);
+    const late = await h.sa.renameJob(job.jobId, 'x'.repeat(200));
+    assert.deepEqual([late.state, late.title.length], ['stopped', 200]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('an answer or accept for a needs-you the job has left is refused and appends nothing', async () => {
   try {
     const h = await harness();
