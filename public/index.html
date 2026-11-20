@@ -159,6 +159,9 @@
       <button type="button" id="detailPaneToggleBtn" class="btn" title="Toggle the tool-call detail pane" aria-pressed="true">🔍 Detail pane</button>
       <button type="button" id="taskPanelToggleBtn" class="btn" title="Show the task list in the detail pane" aria-pressed="false" hidden>📋 Tasks</button>
       <button type="button" id="agentsBtn" class="btn" title="Choose a subagent to run this turn" aria-expanded="false" hidden>Agents</button>
+      <button type="button" id="compactBtn" class="btn session-chrome" title="Run /compact now to free up context">Compact</button>
+      <button type="button" id="copyLastBtn" class="btn session-chrome" title="Copy the most recent reply">Copy reply</button>
+      <button type="button" id="exportBtn" class="btn session-chrome" title="Download the whole transcript as markdown">Export .md</button>
     </div>
     <ul id="agentsList" hidden></ul>
   </div>
@@ -196,9 +199,6 @@
       <button type="button" id="chainGoBtn" class="btn" title="Start the new session in this folder and send it a summary of this one">Chain</button>
     </span>
     <span id="statsPanel" hidden></span>
-    <button type="button" id="compactBtn" class="btn session-chrome" title="Run /compact now to free up context">Compact</button>
-    <button type="button" id="copyLastBtn" class="btn session-chrome" title="Copy the most recent reply">Copy reply</button>
-    <button type="button" id="exportBtn" class="btn session-chrome" title="Download the whole transcript as markdown">Export .md</button>
   </div>
   <form id="compose" class="session-chrome">
     <div id="composeResizeHandle" title="Drag to resize"></div>
