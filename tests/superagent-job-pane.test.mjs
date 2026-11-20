@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
-const { artifactErrorText, createJobPane, renderArtifactBody, renderRouterLog } = await import('../public/superagent-job-pane.js');
+const { artifactErrorText, artifactFileName, artifactMimeType, createJobPane, renderArtifactBody, renderRouterLog, stageState } = await import('../public/superagent-job-pane.js');
 
 const money = (usd, complete = true) => ({ usd, complete });
 
@@ -124,7 +124,7 @@ test('the header carries title, status badge, Stop and a meta line with workflow
   assert.ok(badge.classList.contains('status-needs-you'));
   assert.equal(head.querySelector('.btn-danger').textContent, 'Stop job');
   const meta = root.querySelector('.sa-jp-meta').textContent;
-  assert.match(meta, /^Troubleshooting · created \d+ \w{3} \d\d:\d\d · in place: FallGuys · \$4\.44 spent$/);
+  assert.match(meta, /^🕵️ Troubleshooting · created \d+ \w{3} \d\d:\d\d · in place: FallGuys · \$4\.44 spent$/);
 
   pane.render(detail({ status: 'done', reason: null }));
   assert.equal(root.querySelector('.sa-jp-head').querySelector('.btn-danger'), null);
@@ -134,7 +134,7 @@ test('renders one timeline step per phase with arrows between and the workflow n
   const { root, pane } = mount();
   pane.render(detail());
   const timeline = root.querySelector('.sa-timeline-card');
-  assert.equal(timeline.querySelector('.sa-card-title').textContent, 'Troubleshooting');
+  assert.equal(timeline.querySelector('.sa-card-title').textContent, 'Workflow: 🕵️ Troubleshooting');
   const steps = timeline.querySelectorAll('.sa-step');
   assert.equal(steps.length, 5);
   assert.equal(timeline.querySelectorAll('.sa-step-arrow').length, 4);
@@ -178,9 +178,9 @@ test('groups attempts per phase, and per (phase, task) for per-task phases, with
   const groups = root.querySelectorAll('.sa-stage-group');
   assert.equal(groups.length, 3);
   const heads = groups.map((g) => g.querySelector('.sa-stage-head').textContent);
-  assert.match(heads[0], /investigate · 2 attempts · \$5\.44/);
-  assert.match(heads[1], /fix \/ T1 · 1 attempt · \$0\.20/);
-  assert.match(heads[2], /fix \/ T2 · 2 attempts · \$0\.39/);
+  assert.match(heads[0], /^investigate done · 2 attempts · \$5\.44/);
+  assert.match(heads[1], /^fix \/ T1 done · 1 attempt · \$0\.20/);
+  assert.match(heads[2], /^fix \/ T2 done · 2 attempts · \$0\.39/);
   assert.ok(groups[0].querySelector('.sa-stage-head').classList.contains('sa-stage-0'));
   assert.ok(groups[1].querySelector('.sa-stage-head').classList.contains('sa-stage-2'));
   assert.deepEqual(groups[0].querySelectorAll('.sa-attempt-card').map((c) => c.dataset.attemptId), ['i1', 'i2']);
@@ -592,4 +592,49 @@ test('a pending or blocked Retrospective stays recoverable across a re-render wi
   assert.equal(posts.length, 1, 'Open repeats the handoff, never the POST');
   assert.equal(opened.length, 2, 'each click opens a fresh handoff page');
   assert.ok(root.querySelectorAll('.sa-stage-group')[0].querySelector('.sa-stage-head').querySelector('.sa-retro-open'));
+});
+
+test('stage groups start folded, a click opens one, and it stays open across a poll', () => {
+  const { root, pane } = mount();
+  pane.render(detail({ attempts: [attempt({ attemptId: 'i1' }), attempt({ attemptId: 'f1', phase: 'fix', task: 'T1' })] }));
+  const lists = () => root.querySelectorAll('.sa-attempt-list');
+  const toggles = () => root.querySelectorAll('.sa-stage-toggle');
+  assert.deepEqual(lists().map((l) => l.hidden), [true, true]);
+  assert.deepEqual(toggles().map((t) => t.getAttribute('aria-expanded')), ['false', 'false']);
+  toggles()[1].click();
+  assert.deepEqual(lists().map((l) => l.hidden), [true, false]);
+  assert.equal(toggles()[1].getAttribute('aria-expanded'), 'true');
+  pane.render(detail({ attempts: [attempt({ attemptId: 'i1' }), attempt({ attemptId: 'f1', phase: 'fix', task: 'T1' })] }));
+  assert.deepEqual(lists().map((l) => l.hidden), [true, false]);
+  toggles()[1].click();
+  assert.deepEqual(lists().map((l) => l.hidden), [true, true]);
+  pane.render(detail({ jobId: 'job-2', attempts: [attempt({ attemptId: 'f1', phase: 'fix', task: 'T1' })] }));
+  assert.equal(lists()[0].hidden, true, "another job's stage starts folded");
+});
+
+test('stageState: running while live, the phase chip for a whole phase, else the latest outcome', () => {
+  const g = (attempts, task = null) => ({ phase: 'p', task, attempts });
+  assert.deepEqual(stageState(g([attempt(), attempt({ outcome: null, live: true })]), { status: 'done' }), { label: 'running', className: 'outcome-running' });
+  assert.deepEqual(stageState(g([attempt({ outcome: 'failed' })]), { status: 'done' }), { label: 'done', className: 'outcome-done' });
+  assert.deepEqual(stageState(g([attempt({ outcome: 'question' })]), { status: 'waiting' }), { label: 'needs you', className: 'status-needs-you' });
+  assert.deepEqual(stageState(g([attempt(), attempt({ outcome: 'failed' })]), { status: 'todo' }), { label: 'failed', className: 'outcome-failed' });
+  assert.deepEqual(stageState(g([attempt({ outcome: 'failed' })], 'T1'), { status: 'done' }), { label: 'failed', className: 'outcome-failed' });
+  assert.deepEqual(stageState(g([attempt({ pausedBeforeLaunch: true })]), { status: 'todo' }), { label: 'paused before launch', className: 'outcome-paused' });
+});
+
+test('Spend is the last card of the job pane', () => {
+  const { root, pane } = mount();
+  pane.render(detail({ artifacts: [{ key: 'diagnosis', label: 'diagnosis', phase: 'investigate', task: null, state: 'workspace' }] }));
+  const cards = root.children.filter((c) => c.classList?.contains('sa-card'));
+  assert.ok(cards.at(-1).classList.contains('sa-spend'));
+  assert.ok(cards.at(-2).classList.contains('sa-branches'));
+});
+
+test("artifactFileName and artifactMimeType name the artifact viewer's download", () => {
+  assert.equal(artifactFileName('docs/superpowers/jobs/x/diagnosis.md'), 'diagnosis.md');
+  assert.equal(artifactFileName('a\\b\\tasks.json'), 'tasks.json');
+  assert.equal(artifactFileName(''), 'artifact.txt');
+  assert.equal(artifactMimeType('x/DIAGNOSIS.MD'), 'text/markdown;charset=utf-8');
+  assert.equal(artifactMimeType('x/tasks.json'), 'application/json;charset=utf-8');
+  assert.equal(artifactMimeType('x/report.txt'), 'text/plain;charset=utf-8');
 });

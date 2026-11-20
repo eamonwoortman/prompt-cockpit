@@ -173,3 +173,19 @@ Artifacts: (diagnosis) (tasks) (testReport) (review:diagnosis-review:1) …
 - Running attempts show spend from a transcript scan of what is written so far (the transcript is appended live), labelled "so far".
 - **Artifacts in the project's commit history.** Today workers must commit every output (`prompts/superagent/contract.md:30-34`, validated per `results.js:7`), so diagnosis, tasks, reviews, reports and test reports land in the project's history under `docs/superpowers/jobs/{slug}/` (`workflows/troubleshooting.json:6-10`). The operator wants only the fix in the project's history. That is an engine change (artifact location, the commit validation, the contract, both built-in workflows, the reserved-namespace rule), recorded in `backlog.md` as its own later design; this spec only makes the view and the retrospective survive artifacts being deleted (C2).
 - **Retro snapshot folder pruning** (`~/.prompt-cockpit/superagent/retros/`): recorded in `backlog.md`.
+
+## Follow-up (2026-11-20, operator request)
+
+These supersede the matching items above:
+- The timeline panel's title is `Workflow: <emoji> <name>`. Every workflow name in the tab (that title, the job pane meta line, the job list and the workflow select) carries an emoji per workflow id: 💡 `feature`, 🕵️ `troubleshooting`, 🧩 anything else.
+- The Spend card is the last card of the job pane.
+- The Attempts card's stage groups fold. Each starts folded, and an opened one stays open across polls of the same job. Each header shows the stage's state:
+  - running while any attempt is live;
+  - for a whole-phase group, the timeline's done or needs-you;
+  - otherwise the latest attempt's outcome.
+- Pane widths:
+  - Splitters set the left and middle pane widths, kept in `localStorage` key `cockpit:superagentPaneWidths`.
+  - The right pane takes the rest.
+  - Until the middle splitter is moved, the middle and right panes split evenly.
+  - The middle shrinks before the right pane drops under 280 px.
+- The artifact modal has a Download button, which saves the text as loaded. It is disabled for a truncated or unreadable artifact.

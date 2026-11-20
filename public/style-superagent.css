@@ -37,18 +37,29 @@ body.view-superagent #superagentView {
 .sa-notice a { color: var(--accent); }
 .sa-error-text { color: var(--error); white-space: pre-wrap; }
 
+/* Left and middle widths come from the splitters (superagent-panes.js); the
+   middle shrinks before the right pane drops under 280px, and the right pane
+   takes the rest. With no middle width set, middle and right split evenly. */
 .sa-panes {
   display: grid;
-  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(280px, 380px);
+  grid-template-columns: var(--sa-left-w, 300px) 6px minmax(0, var(--sa-middle-w, 1fr)) 6px minmax(280px, 1fr);
   flex: 1;
   min-height: 0;
 }
+.sa-splitter {
+  cursor: col-resize;
+  background: var(--border);
+  background-clip: content-box;
+  padding: 0 2px;
+  touch-action: none;
+}
+.sa-splitter:hover, .sa-splitter:focus-visible, .sa-resizing .sa-splitter { background-color: var(--accent); outline: none; }
+.sa-resizing { cursor: col-resize; user-select: none; }
 .sa-pane {
   overflow-y: auto;
   padding: 12px 16px;
   min-width: 0;
 }
-.sa-pane + .sa-pane { border-left: 1px solid var(--border); }
 
 .sa-heading { margin: 0 0 8px; font-size: 14px; font-weight: 700; }
 .sa-subheading { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
@@ -154,7 +165,7 @@ body.view-superagent #superagentView {
 /* --- middle: the selected job (superagent-job-pane.js) --- */
 
 .sa-middle { padding: 16px 24px 32px; }
-.sa-job-pane { display: flex; flex-direction: column; gap: 14px; max-width: 1100px; }
+.sa-job-pane { display: flex; flex-direction: column; gap: 14px; }
 .sa-stage-0 { --sa-stage: var(--sa-stage-0); }
 .sa-stage-1 { --sa-stage: var(--sa-stage-1); }
 .sa-stage-2 { --sa-stage: var(--sa-stage-2); }
@@ -249,8 +260,23 @@ body.view-superagent #superagentView {
   background: color-mix(in srgb, var(--sa-stage, var(--border)) 10%, var(--panel));
   overflow-wrap: anywhere;
 }
+.sa-stage-toggle {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sa-stage-toggle::before { content: '\25B8'; display: inline-block; width: 1.1em; color: var(--muted); }
+.sa-stage-group.open .sa-stage-toggle::before { content: '\25BE'; }
+.sa-stage-toggle:hover::before { color: var(--text); }
+.sa-stage-toggle .sa-badge { margin: 0 2px; }
 .sa-stage-name { font-weight: 700; color: var(--sa-stage, var(--text)); }
 .sa-stage-facts { color: var(--muted); }
+.sa-attempt-list[hidden] { display: none; }
 .sa-attempt-list { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 0; padding: 0 0 0 13px; list-style: none; }
 .sa-attempt-card { padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
 .sa-attempt-card.live { border-color: var(--accent); }
@@ -324,5 +350,6 @@ body.view-superagent #superagentView {
   .sa-panes { display: flex; flex-direction: column; flex: none; }
   .sa-pane { overflow: visible; }
   .sa-middle { padding: 14px 16px 24px; }
-  .sa-pane + .sa-pane { border-left: none; border-top: 1px solid var(--border); }
+  .sa-pane + .sa-splitter + .sa-pane { border-top: 1px solid var(--border); }
+  .sa-splitter { display: none; }
 }

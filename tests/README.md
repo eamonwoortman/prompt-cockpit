@@ -530,3 +530,8 @@ Hand-verified only, or not verified:
 - The Retrospective route end to end (snapshot, grants, a real `sendInput`) is covered with a fake registry only and was never run against a model: no paid run was made, so the retrospective prompt has never been seen by a real session.
 - The handoff's 10 s no-ack timeout is unit-tested only. The normal handoff, a blocked popup then Open (no second POST) and the inline error were checked in a real browser with the POST intercepted.
 - `inspect()` in `public/superagent-view.js` has no client test.
+
+Follow-up (2026-11-20): workflow emoji, folded stage groups, Spend last, resizable panes, artifact Download.
+
+- Unit-tested: `workflowLabel` (`superagent-format.test.mjs`); stage groups folded by default, a click opening one and it staying open across a poll but not onto another job, `stageState`, Spend as the last card, and `artifactFileName`/`artifactMimeType` (`superagent-job-pane.test.mjs`); `readPaneWidths`'s defaults and bad stored values (`superagent-panes.test.mjs`).
+- Hand-verified only, in a browser on a seeded temp `COCKPIT_HOME` at 2000 and 800 px: the middle/right even split before any drag, a drag of the middle splitter resizing the panes and persisting `cockpit:superagentPaneWidths`, the splitters hidden in the narrow layout, and Download saving a snapshot artifact byte-identical to its stored copy (and disabled for a gone one). The splitters' keyboard and double-click reset, and a truncated (over 1 MB) artifact's disabled Download, were not exercised.

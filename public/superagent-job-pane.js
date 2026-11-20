@@ -1,6 +1,6 @@
 // The Superagent tab's middle pane: the selected job's header, description,
-// workflow timeline, spend, attempts grouped by stage, artifacts, tasks and
-// branches. superagent-view.js polls and calls render(detail) every time; the
+// workflow timeline, attempts grouped by stage (folded until opened), artifacts,
+// tasks, branches and, last, spend. superagent-view.js polls and calls render(detail) every time; the
 // pane keeps which attempt results are expanded (by attempt id, like the right
 // pane's answer drafts) and puts back the scroll position of whichever
 // ancestor scrolls (the middle pane, or #superagentView in the narrow layout),
@@ -15,7 +15,7 @@
 // while Node (tests/superagent-job-pane.test.mjs) would resolve a root-absolute
 // one against the drive root.
 import { renderMarkdown } from './markdown.js';
-import { formatDuration, formatMoney, formatTokens, linkChip, stageColorIndex, statusLabel } from './superagent-format.js';
+import { formatDuration, formatMoney, formatTokens, linkChip, stageColorIndex, statusLabel, workflowLabel } from './superagent-format.js';
 
 const FINISHED = new Set(['done', 'stopped', 'failed']);
 const STEP_MARK = { done: '✓', running: '●', waiting: '!' };
@@ -58,6 +58,18 @@ const pad = (n) => String(n).padStart(2, '0');
 function createdText(ms) {
   const d = new Date(ms);
   return `${d.getDate()} ${MONTHS[d.getMonth()]} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// The artifact viewer's Download: the repo-relative path's last segment.
+export function artifactFileName(path = '') {
+  return String(path).split(/[\\/]/).filter(Boolean).at(-1) || 'artifact.txt';
+}
+
+export function artifactMimeType(path = '') {
+  const lower = String(path).toLowerCase();
+  if (lower.endsWith('.md')) return 'text/markdown;charset=utf-8';
+  if (lower.endsWith('.json')) return 'application/json;charset=utf-8';
+  return 'text/plain;charset=utf-8';
 }
 
 // .md renders as Markdown, .json pretty-printed (as text when it does not
@@ -179,8 +191,22 @@ function costOf(a) {
   return moneySpan('sa-attempt-cost', money, unknownWhy(a));
 }
 
+// A stage group's fold header state: running while any attempt is live; a
+// whole-phase group takes the timeline's done or needs-you; otherwise (a
+// per-task group, a failed or stopped job) the latest attempt's outcome.
+export function stageState(group, phaseChip) {
+  if (group.attempts.some((a) => a.live)) return { label: 'running', className: 'outcome-running' };
+  if (group.task === null && phaseChip?.status === 'done') return { label: 'done', className: 'outcome-done' };
+  if (group.task === null && phaseChip?.status === 'waiting') return { label: 'needs you', className: 'status-needs-you' };
+  const last = group.attempts.at(-1);
+  const outcome = last ? outcomeOf(last) : { label: 'not started', kind: 'todo' };
+  return { label: outcome.label, className: `outcome-${outcome.kind}` };
+}
+
 export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () => {}, onRetrospective = () => {}, stopButton = () => null }) {
   const expanded = new Set();
+  // Stage groups start folded; one the operator opened stays open across polls.
+  const openStages = new Set();
   // jobId -> selector key -> { status: 'starting' | 'error' | 'pending', error?, name? },
   // set by the view, so a poll's re-render keeps "Starting…" and the Open link.
   const retroStates = new Map();
@@ -200,7 +226,7 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
       if (stop) head.append(stop);
     }
     const meta = [];
-    if (detail.workflow) meta.push(detail.workflow.name);
+    if (detail.workflow) meta.push(workflowLabel(detail.workflow));
     if (detail.createdAt != null) meta.push(`created ${createdText(detail.createdAt)}`);
     const inPlace = detail.repos.filter((r) => r.inPlace).map((r) => r.id);
     if (inPlace.length) meta.push(`in place: ${inPlace.join(', ')}`);
@@ -216,7 +242,7 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
   }
 
   function timeline(detail) {
-    const { box } = card(detail.workflow?.name ?? 'Workflow', 'sa-timeline-card');
+    const { box } = card(detail.workflow ? `Workflow: ${workflowLabel(detail.workflow)}` : 'Workflow', 'sa-timeline-card');
     const list = box.appendChild(el('ol', 'sa-timeline'));
     detail.phases.forEach((p, i) => {
       if (i) {
@@ -393,11 +419,16 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
     }
     const rank = (g) => order.get(g.phase) ?? Number.MAX_SAFE_INTEGER;
     for (const g of [...groups.values()].sort((x, y) => rank(x) - rank(y))) {
+      const groupKey = JSON.stringify([detail.jobId, g.phase, g.task]);
       const group = box.appendChild(el('div', 'sa-stage-group'));
       const head = group.appendChild(el('div', `sa-stage-head ${stageClass(g.phase)}`));
-      head.append(el('span', 'sa-stage-name', scopeLabel(g.phase, g.task)));
+      const toggle = head.appendChild(el('button', 'sa-stage-toggle'));
+      toggle.type = 'button';
+      toggle.append(el('span', 'sa-stage-name', scopeLabel(g.phase, g.task)));
+      const state = stageState(g, detail.phases.find((p) => p.phase === g.phase));
+      toggle.append(' ', el('span', `sa-badge ${state.className}`, state.label));
       const counted = g.attempts.filter((a) => !a.pausedBeforeLaunch).length;
-      const facts = head.appendChild(el('span', 'sa-stage-facts', ` · ${plural(counted, 'attempt')}`));
+      const facts = toggle.appendChild(el('span', 'sa-stage-facts', ` · ${plural(counted, 'attempt')}`));
       const spent = detail.spend?.byPhase.find((r) => r.phase === g.phase && (r.task ?? null) === g.task);
       if (formatMoney(spent)) {
         facts.append(' · ');
@@ -407,6 +438,19 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
       head.append(retroControl(detail.jobId, selector, 'Retrospective', "Start a retrospective session on this stage's attempts"));
       const list = group.appendChild(el('ol', 'sa-attempt-list'));
       for (const a of g.attempts) list.append(attemptCard(a, detail.jobId));
+      // Updated in place, not re-rendered, so the toggle keeps keyboard focus.
+      const show = (open) => {
+        list.hidden = !open;
+        group.classList.toggle('open', open);
+        toggle.setAttribute('aria-expanded', String(open));
+        toggle.title = open ? 'Hide the attempts' : 'Show the attempts';
+      };
+      show(openStages.has(groupKey));
+      toggle.addEventListener('click', () => {
+        if (openStages.has(groupKey)) openStages.delete(groupKey);
+        else openStages.add(groupKey);
+        show(openStages.has(groupKey));
+      });
     }
     return box;
   }
@@ -454,11 +498,11 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
       ...header(detail),
       detail.idea ? description(detail) : null,
       detail.phases.length ? timeline(detail) : null,
-      spendCard(detail.spend, stageClass),
       attemptsCard(detail, stageClass),
       detail.artifacts.length ? artifactsCard(detail, stageClass) : null,
       detail.tasks ? tasksCard(detail) : null,
       detail.repos.length ? branchesCard(detail) : null,
+      spendCard(detail.spend, stageClass),
     ].filter(Boolean);
   }
 

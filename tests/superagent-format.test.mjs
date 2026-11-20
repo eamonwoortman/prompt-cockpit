@@ -4,7 +4,7 @@ import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
 const { renderMarkdown } = await import('../public/markdown.js');
-const { linkChipLabel, linkChip, formatUsd, formatMoney, formatTokens, formatDuration, stageColorIndex, statusLabel } =
+const { linkChipLabel, linkChip, formatUsd, formatMoney, formatTokens, formatDuration, stageColorIndex, statusLabel, workflowLabel } =
   await import('../public/superagent-format.js');
 
 test('linkChipLabel takes the host and the last path segment', () => {
@@ -74,4 +74,11 @@ test('statusLabel shows a folder-changed pause as paused', () => {
   assert.equal(statusLabel({ status: 'needs-you', reason: 'question' }), 'needs you');
   assert.equal(statusLabel({ status: 'running' }), 'running');
   assert.equal(statusLabel({ status: 'odd' }), 'odd');
+});
+
+test('workflowLabel puts an emoji before the name: built-ins by id, any other workflow a puzzle piece', () => {
+  assert.equal(workflowLabel({ id: 'feature', name: 'Feature' }), '💡 Feature');
+  assert.equal(workflowLabel({ id: 'Troubleshooting', name: 'Troubleshooting' }), '🕵️ Troubleshooting');
+  assert.equal(workflowLabel({ id: 'mine', name: 'My flow' }), '🧩 My flow');
+  assert.equal(workflowLabel({ id: null, name: 'broken.json' }), '🧩 broken.json');
 });

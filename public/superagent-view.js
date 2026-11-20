@@ -15,9 +15,10 @@ import { initOperatorGate } from '/operator-auth.js';
 import { initDirBrowser } from '/dir-browser.js';
 import { initNotificationsPanel, requestBrowserNotifications, SUPERAGENT_TAB, SUPERAGENT_SELECT_MESSAGE } from '/notifications-panel.js';
 import { initHistoryPane } from '/history-pane.js';
-import { ARTIFACT_STATE, artifactErrorText, createJobPane, renderArtifactBody, renderRouterLog } from '/superagent-job-pane.js';
+import { ARTIFACT_STATE, artifactErrorText, artifactFileName, artifactMimeType, createJobPane, renderArtifactBody, renderRouterLog } from '/superagent-job-pane.js';
 import { createHandoff } from '/superagent-handoff.js';
-import { statusLabel } from '/superagent-format.js';
+import { statusLabel, workflowLabel } from '/superagent-format.js';
+import { initPaneResizers } from '/superagent-panes.js';
 
 const POLL_MS = 5_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -86,6 +87,7 @@ export function initSuperagentView() {
   const left = panes.appendChild(el('section', 'sa-pane sa-left'));
   const middle = panes.appendChild(el('section', 'sa-pane sa-middle'));
   const right = panes.appendChild(el('section', 'sa-pane sa-right'));
+  initPaneResizers(panes, { left, middle });
 
   let status = null;
   let jobs = [];
@@ -264,7 +266,7 @@ export function initSuperagentView() {
     workflowSelect.textContent = '';
     workflowNotes.textContent = '';
     for (const w of entries) {
-      const option = el('option', null, `${w.name} (${w.source})${w.valid ? '' : ' - invalid'}`);
+      const option = el('option', null, `${workflowLabel(w)} (${w.source})${w.valid ? '' : ' - invalid'}`);
       option.value = w.id ?? '';
       option.disabled = !w.valid || w.id == null;
       option.title = w.valid ? w.description : firstError(w);
@@ -408,7 +410,7 @@ export function initSuperagentView() {
       row.append(el('span', 'sa-job-title', job.title));
       const meta = el('span', 'sa-job-meta');
       meta.append(el('span', `sa-badge status-${job.status}`, statusLabel(job)));
-      if (job.workflow) meta.append(el('span', 'sa-job-workflow', job.workflow.name));
+      if (job.workflow) meta.append(el('span', 'sa-job-workflow', workflowLabel(job.workflow)));
       if (job.phaseId) meta.append(el('span', 'sa-job-phase', job.phaseId));
       row.append(meta);
       row.addEventListener('click', () => select(job.jobId));
@@ -530,7 +532,30 @@ export function initSuperagentView() {
   const viewerTitle = document.getElementById('superagentArtifactTitle');
   const viewerText = document.getElementById('superagentArtifactText');
   const viewerNote = document.getElementById('superagentArtifactNote');
+  const viewerDownload = document.getElementById('superagentArtifactDownload');
   document.getElementById('superagentArtifactClose').addEventListener('click', () => viewer.close());
+  // The artifact as last loaded into the viewer; Download saves exactly that.
+  let shownArtifact = null;
+
+  function setDownload(artifact) {
+    shownArtifact = artifact && !artifact.truncated ? artifact : null;
+    viewerDownload.disabled = !shownArtifact;
+    viewerDownload.title = shownArtifact
+      ? `Save ${artifactFileName(artifact.path)}`
+      : (artifact?.truncated ? 'Too large to download here: only the first part was read.' : 'Nothing to download.');
+  }
+
+  viewerDownload.addEventListener('click', () => {
+    if (!shownArtifact) return;
+    const url = URL.createObjectURL(new Blob([shownArtifact.text], { type: artifactMimeType(shownArtifact.path) }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = artifactFileName(shownArtifact.path);
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  });
 
   const artifactUrl = (jobId, key) => `/api/superagent/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(key)}`;
 
@@ -542,10 +567,12 @@ export function initSuperagentView() {
     viewerTitle.textContent = key;
     viewerMessage('Loading…');
     viewerNote.hidden = true;
+    setDownload(null);
     if (!viewer.open) viewer.showModal();
     try {
       const artifact = await getJson(artifactUrl(jobId, key));
       viewerTitle.textContent = `${key} · ${artifact.path}`;
+      setDownload(artifact);
       if (artifact.text) viewerText.replaceChildren(renderArtifactBody(artifact));
       else viewerMessage('Empty: the file exists but has nothing in it yet.');
       const notes = [];
