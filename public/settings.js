@@ -251,15 +251,30 @@ export function initSettings({
     persist({ hideBuiltinPeerTools: hideBuiltinPeerToolsCheckbox.checked });
   });
 
-  closeSessionButton.addEventListener('click', () => {
-    close();
-    onCloseSession();
-  });
-
-  resetSessionButton.addEventListener('click', () => {
-    close();
-    onResetSession();
-  });
+  // Both buttons end the live process, so the first click only arms them
+  // ("Click again to confirm"); it disarms itself after a few seconds.
+  function confirmOnSecondClick(button, action) {
+    const idleLabel = button.textContent;
+    let timer = null;
+    const disarm = () => {
+      clearTimeout(timer);
+      timer = null;
+      button.textContent = idleLabel;
+    };
+    button.addEventListener('click', () => {
+      if (timer === null) {
+        button.textContent = 'Click again to confirm';
+        timer = setTimeout(disarm, 4000);
+        return;
+      }
+      disarm();
+      close();
+      action();
+    });
+    button.addEventListener('blur', disarm);
+  }
+  confirmOnSecondClick(closeSessionButton, () => onCloseSession());
+  confirmOnSecondClick(resetSessionButton, () => onResetSession());
 
   function close() {
     if (modal.open) modal.close();

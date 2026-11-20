@@ -5,9 +5,9 @@
 // source of truth without importing the SDK-touching module.
 
 // All six PermissionMode values (see plan Spike B), in cycle order. Loosest
-// build-breaking modes (bypassPermissions) sit after the common ones so a
-// stray extra Shift+Tab doesn't land you somewhere dangerous by surprise.
-export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'dontAsk', 'auto'];
+// build-breaking mode (bypassPermissions) is last, so a stray extra
+// Shift+Tab never lands on it before the safer ones.
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'dontAsk', 'auto', 'bypassPermissions'];
 
 export function nextMode(current) {
   const i = PERMISSION_MODES.indexOf(current);

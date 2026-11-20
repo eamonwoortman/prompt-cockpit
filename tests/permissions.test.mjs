@@ -23,3 +23,9 @@ test('AUTO_ALLOW_MODES excludes default and plan (both need a client decision)',
   assert.equal(AUTO_ALLOW_MODES.has('acceptEdits'), true);
   assert.equal(AUTO_ALLOW_MODES.has('bypassPermissions'), true);
 });
+
+test('bypassPermissions is the last mode in the cycle, so a stray Shift+Tab never lands on it early', () => {
+  assert.equal(PERMISSION_MODES.at(-1), 'bypassPermissions');
+  assert.equal(nextMode('auto'), 'bypassPermissions');
+  assert.equal(nextMode('plan'), 'dontAsk');
+});

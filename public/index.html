@@ -88,7 +88,7 @@
   </div>
 
   <div id="streamWrap" class="session-chrome">
-    <div id="stream"></div>
+    <div id="stream" role="log" aria-live="polite" aria-relevant="additions" aria-label="Conversation"></div>
     <div id="detailPane" class="detail-pane">
       <div id="detailPaneResizeHandle" class="detail-pane-resize-handle" title="Drag to resize"></div>
       <div class="detail-pane-header">
@@ -125,7 +125,7 @@
   </div>
   <div id="copyToast">Copied</div>
   <div id="noticeToast" role="status" aria-live="polite"></div>
-  <div id="approvalBanner" class="session-chrome" hidden>
+  <div id="approvalBanner" class="session-chrome" role="alert" hidden>
     <div id="approvalPlain">
       <div id="approvalMessageRow">
         <strong id="approvalHeading"></strong>
