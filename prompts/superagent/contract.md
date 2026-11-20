@@ -63,6 +63,20 @@ A `blocked` result needs none of these purpose fields; publish your question ins
 
 Nobody is watching. `AskUserQuestion` is unavailable and any permission prompt is denied. If you cannot proceed without an answer, set `status` to `blocked`, put the question in `question`, and publish. Do not guess past a real ambiguity. Exceptions: the brainstormer asks only through `questions`, and the stand-in escalates only as described under `answer` and otherwise follows its own autonomy rules.
 
+## Long-running commands
+
+A command that hits its timeout may still be running: a tool's own `--timeout` or a killed shell does not always stop the work behind it, and the next command can queue behind it. Never start a second copy of a command that may still be running. Give the shell a timeout at least as long as the command's own. Before you publish, stop everything you started that still runs (background shells, servers, editor jobs, Play Mode); name anything you could not stop in `summary`.
+
+## How to try it
+
+A tester's "How to try it" section is for a person and reads like a QA ticket:
+
+- `Setup`: what to check out or build and how to launch it, as a person does it.
+- `Repro Steps`: a numbered list of what a person does and sees, in the product's own terms (menus, buttons, screens, landmarks), ending with an "Observe ..." step.
+- `Result`: for a bug, what happened before the fix. `Expected`: what a person should see now.
+
+Never put agent commands, script or helper names, entry points, coordinates or paths under `.superpowers/` in these steps; translate each into what a person does. When a step cannot be done reliably by hand (exact timing, a forced state), write the closest manual action and say so in that step. Steps you ran as an agent may follow under a separate `Agent repro` heading.
+
 ## Scope
 
 Do not start the next phase. Produce only the outputs named in the job card, and never push to any remote.

@@ -310,6 +310,9 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   const purposeLine = (p) => contract.split(/\r?\n/).find((l) => l.startsWith(`- \`${p}\`:`));
   for (const p of ['review', 'test']) assert.ok(purposeLine(p).includes('`severity` (`blocker`, `major` or `minor`)'), `contract ${p} line lists severities`);
   assert.ok(purposeLine('fix').includes('`reviewFindings`'), 'contract fix line names reviewFindings');
+  for (const f of ['tester.md', 'verifier-tester.md']) await has(f, '"How to try it" section for a person (see the contract)');
+  await has('verifier-tester.md', 'unit tests do not replace it', 'full test suite only when a task or the idea asks for it', 'publish `blocked` only after trying');
+  await has('contract.md', 'Never start a second copy of a command that may still be running', 'stop everything you started that still runs', '`Repro Steps`', '`Agent repro`', 'paths under `.superpowers/`');
 });
 
 const REVIEW_FINDINGS = [{ id: 'B1', severity: 'blocker', text: 'no rollback' }, { id: 'M1', severity: 'minor', text: 'nit' }];
