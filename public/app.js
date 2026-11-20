@@ -109,6 +109,7 @@ const turnChartToggleBtn = document.getElementById('turnChartToggleBtn');
 const taskPanelToggleBtn = document.getElementById('taskPanelToggleBtn');
 const detailPaneToggleBtn = document.getElementById('detailPaneToggleBtn');
 const copyToast = document.getElementById('copyToast');
+const noticeToast = document.getElementById('noticeToast');
 const statsPanel = initStatsPanel({ el: document.getElementById('statsPanel') });
 
 // Metric/exclude-cache-miss picks persist across reloads - read before
@@ -540,8 +541,12 @@ const compose = initCompose({
   isPickerOpen: isSuggestionPickerOpen,
   promptHistory,
   sendGroupEl: document.getElementById('composeSendGroup'),
+  // Returning false tells compose.js the message was NOT delivered, so it keeps the typed text.
   onSend: (text) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      showNotice('Not connected - reconnecting. Your message is still in the box; send it again in a moment.');
+      return false;
+    }
     // Cross-session delegation - `/ask <Name>: <text>`,
     // colon required, name is everything up to the first colon (trimmed).
     // Checked before the agent-prefix logic below: a delegate command must
@@ -562,7 +567,7 @@ const compose = initCompose({
     // resolve it as one of ITS OWN slash commands instead.
     if (/^\/ask\b/i.test(trimmed)) {
       alert('To send to a session, use: /ask <Name>: <text>\n(e.g. "/ask Grok: send to session Grok this text")');
-      return;
+      return false;
     }
     // Sticky agent prefix (see selectedAgentName above) - a plain
     // instruction, visible in the transcript like anything typed by hand.
@@ -1541,6 +1546,15 @@ document.addEventListener('keydown', (event) => {
 // transcript pane only, not the compose textarea's normal selection/copy.
 // showCopyToast below is the shared "copy succeeded" feedback, also used
 // by #copyLastBtn's click-to-copy.
+// Short-lived status line for "that did not happen" feedback that has no
+// natural home in the UI (e.g. a send while the socket is reconnecting).
+function showNotice(text) {
+  noticeToast.textContent = text;
+  noticeToast.classList.add('show');
+  clearTimeout(noticeToast._hideTimer);
+  noticeToast._hideTimer = setTimeout(() => noticeToast.classList.remove('show'), 3500);
+}
+
 function showCopyToast(x, y) {
   copyToast.style.left = `${x + 8}px`;
   copyToast.style.top = `${y - 8}px`;

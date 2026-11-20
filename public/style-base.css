@@ -216,6 +216,24 @@
     z-index: var(--z-toast);
   }
   #copyToast.show { opacity: 1; transform: translateY(-10px); }
+  #noticeToast {
+    position: fixed;
+    left: 50%;
+    bottom: 120px;
+    transform: translateX(-50%);
+    max-width: min(90vw, 560px);
+    pointer-events: none;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: var(--z-toast);
+  }
+  #noticeToast.show { opacity: 1; }
   #statsPanel .ctx-green, #statsPanel .ctx-yellow, #statsPanel .ctx-red { font-family: ui-monospace, monospace; }
   #statsPanel .ctx-green { color: var(--ok); }
   #statsPanel .ctx-yellow { color: var(--warn); }

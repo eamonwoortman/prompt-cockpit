@@ -55,7 +55,8 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   function send() {
     const text = textarea.value;
     if (text.trim().length === 0) return;
-    onSend(text);
+    // An explicit false means the message was not delivered (socket down, malformed command): keep the text so it is not lost.
+    if (onSend(text) === false) return;
     promptHistory?.record(text);
     historyIndex = -1;
     draftText = '';
