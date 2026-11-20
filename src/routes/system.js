@@ -196,6 +196,20 @@ export function registerSystemRoutes(router) {
     return respondJson(res, 200, { update: await updateChecker.check(tool) });
   });
 
+  // "Remind me later" from the update popup: stay quiet for 1-7 days.
+  router.post('/api/update-check/snooze', async (req, res) => {
+    const body = await readJsonBody(req);
+    const days = Number(body.days);
+    if (!UPDATE_CHECK_TOOLS.includes(body.provider)) {
+      return respondJson(res, 400, { error: `provider must be one of ${UPDATE_CHECK_TOOLS.join(', ')}` });
+    }
+    if (!Number.isInteger(days) || days < 1 || days > 7) {
+      return respondJson(res, 400, { error: 'days must be an integer from 1 to 7' });
+    }
+    await updateChecker.snooze(body.provider, days * 24 * 60 * 60 * 1000);
+    return respondJson(res, 200, { ok: true });
+  });
+
   router.get('/api/account-limits', async (req, res, url) => {
     try {
       const account = resolveClaudeSubscription(url.searchParams.get('subscription'));

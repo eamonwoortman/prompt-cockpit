@@ -4,17 +4,20 @@
 // installed version vs latest published version. Read-only: it never installs
 // anything, it only reports the command the user should run.
 //
-// Two layers of rate limiting, both in memory (reset on cockpit restart):
-//   - results are cached for CHECK_CACHE_MS so starting several sessions in a
-//     row doesn't re-spawn a CLI / hit the registry each time;
+// Two layers of rate limiting:
+//   - results are cached in memory for CHECK_CACHE_MS so starting several
+//     sessions in a row doesn't re-spawn a CLI / hit the registry each time;
 //   - an outdated result is handed out at most once per NOTIFY_INTERVAL_MS per
 //     tool, so every tab and browser together see the popup at most that often.
+//     The user can stretch that with snooze(). This quiet window is persisted
+//     in the server settings file, so it survives a cockpit restart.
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveCodexSpawnAsync } from './codex-app-server.js';
 import { runGrokCommand, parseJsonOutput } from './grok-cli.js';
+import { readServerSettings, updateServerSettings } from './server-settings.js';
 
 export const NOTIFY_INTERVAL_MS = 4 * 60 * 60 * 1000;
 export const CHECK_CACHE_MS = 30 * 60 * 1000;
@@ -110,10 +113,50 @@ const PROBES = {
   },
 };
 
-export function createUpdateChecker({ now = Date.now, probes = PROBES, deps = {} } = {}) {
+// Persists the per-tool "stay quiet until" timestamps in the server-wide
+// settings file so a cockpit restart doesn't bring the popup straight back.
+const SILENCED_KEY = 'updateSilencedUntil';
+const settingsStore = {
+  async load() {
+    const stored = (await readServerSettings())[SILENCED_KEY];
+    return stored && typeof stored === 'object' ? stored : {};
+  },
+  async save(tool, until) {
+    await updateServerSettings((settings) => {
+      const current = settings[SILENCED_KEY];
+      settings[SILENCED_KEY] = { ...(current && typeof current === 'object' ? current : {}), [tool]: until };
+    });
+  },
+};
+
+export function createUpdateChecker({ now = Date.now, probes = PROBES, deps = {}, store = settingsStore } = {}) {
   const cache = new Map(); // tool -> { at, result }
   const inFlight = new Map(); // tool -> Promise
-  const lastNotified = new Map(); // tool -> ms timestamp
+  let silencedUntil = null; // tool -> ms timestamp, loaded lazily from the store
+
+  async function silenced() {
+    if (!silencedUntil) {
+      silencedUntil = new Map();
+      try {
+        for (const [tool, until] of Object.entries(await store.load())) {
+          if (Number.isFinite(until)) silencedUntil.set(tool, until);
+        }
+      } catch {
+        // unreadable store: behave as if nothing was silenced
+      }
+    }
+    return silencedUntil;
+  }
+
+  async function silenceFor(tool, ms) {
+    const until = now() + ms;
+    (await silenced()).set(tool, until);
+    try {
+      await store.save(tool, until);
+    } catch {
+      // best-effort: the in-memory window still holds until restart
+    }
+  }
 
   async function probe(tool) {
     const cached = cache.get(tool);
@@ -136,19 +179,27 @@ export function createUpdateChecker({ now = Date.now, probes = PROBES, deps = {}
     return run;
   }
 
-  // Returns the update info to show, or null for "show nothing". Marks the
-  // tool as notified when it returns info.
+  // Returns the update info to show, or null for "show nothing". Starts the
+  // default quiet window for the tool when it returns info.
   async function check(tool) {
     if (!probes[tool]) return null;
-    const last = lastNotified.get(tool);
-    if (last !== undefined && now() - last < NOTIFY_INTERVAL_MS) return null;
+    const until = (await silenced()).get(tool);
+    if (until !== undefined && now() < until) return null;
     const result = await probe(tool);
     if (!result) return null;
-    lastNotified.set(tool, now());
+    await silenceFor(tool, NOTIFY_INTERVAL_MS);
     return result;
   }
 
-  return { check };
+  // User-requested "remind me later": stay quiet for `ms` instead of the
+  // default window. Returns false for an unknown tool.
+  async function snooze(tool, ms) {
+    if (!probes[tool]) return false;
+    await silenceFor(tool, ms);
+    return true;
+  }
+
+  return { check, snooze };
 }
 
 export const updateChecker = createUpdateChecker();

@@ -2387,6 +2387,7 @@ async function checkForToolUpdate(provider) {
     document.getElementById('updateAvailableTitle').textContent = `${update.label} update available`;
     document.getElementById('updateAvailableSummary').textContent =
       `Version ${update.latest} is out (you have ${update.current}). To update, run:`;
+    updateAvailableModal.dataset.provider = provider;
     updateAvailableCommandEl.textContent = update.command;
     document.getElementById('updateAvailableNote').textContent = update.note || '';
     document.getElementById('updateAvailableCopyBtn').textContent = 'Copy command';
@@ -2396,6 +2397,16 @@ async function checkForToolUpdate(provider) {
   }
 }
 document.getElementById('updateAvailableCloseBtn').addEventListener('click', () => updateAvailableModal.close());
+for (const [id, days] of [['updateAvailableSnooze1Btn', 1], ['updateAvailableSnooze7Btn', 7]]) {
+  document.getElementById(id).addEventListener('click', () => {
+    void fetch('/api/update-check/snooze', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: updateAvailableModal.dataset.provider, days }),
+    }).catch(() => {});
+    updateAvailableModal.close();
+  });
+}
 document.getElementById('updateAvailableCopyBtn').addEventListener('click', async (event) => {
   try {
     await navigator.clipboard.writeText(updateAvailableCommandEl.textContent);

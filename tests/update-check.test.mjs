@@ -15,11 +15,17 @@ test('isNewerVersion compares numerically, not lexically', () => {
   assert.equal(isNewerVersion('garbage', '1.0.0'), false);
 });
 
-function makeChecker(probe) {
+function memoryStore(initial = {}) {
+  const data = { ...initial };
+  return { data, load: async () => ({ ...data }), save: async (tool, until) => { data[tool] = until; } };
+}
+
+function makeChecker(probe, store = memoryStore()) {
   const clock = { t: 1_000_000 };
   let calls = 0;
   const checker = createUpdateChecker({
     now: () => clock.t,
+    store,
     probes: { codex: async () => { calls += 1; return probe(); } },
   });
   return { checker, clock, calls: () => calls };
@@ -75,6 +81,7 @@ test('each tool has its own 4h window', async () => {
   const clock = { t: 1 };
   const checker = createUpdateChecker({
     now: () => clock.t,
+    store: memoryStore(),
     probes: {
       codex: async () => OUTDATED,
       claude: async () => ({ ...OUTDATED, label: 'Claude Agent SDK' }),
@@ -82,4 +89,34 @@ test('each tool has its own 4h window', async () => {
   });
   assert.ok(await checker.check('codex'));
   assert.ok(await checker.check('claude'), 'claude not suppressed by codex popup');
+});
+
+test('the quiet window survives a restart (new checker, same store)', async () => {
+  const store = memoryStore();
+  const first = makeChecker(() => OUTDATED, store);
+  assert.ok(await first.checker.check('codex'));
+  const second = makeChecker(() => OUTDATED, store); // same clock start, fresh memory
+  assert.equal(await second.checker.check('codex'), null);
+  second.clock.t += NOTIFY_INTERVAL_MS + 1;
+  assert.ok(await second.checker.check('codex'));
+});
+
+test('snooze silences for the requested time, persists, and expires', async () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const store = memoryStore();
+  const { checker, clock } = makeChecker(() => OUTDATED, store);
+  assert.equal(await checker.snooze('codex', 7 * DAY), true);
+  assert.equal(store.data.codex, clock.t + 7 * DAY);
+  clock.t += 7 * DAY - 1;
+  assert.equal(await checker.check('codex'), null);
+  clock.t += 2;
+  assert.ok(await checker.check('codex'));
+});
+
+test('snooze of an unknown tool is rejected, and a broken store does not break checks', async () => {
+  const broken = { load: async () => { throw new Error('bad'); }, save: async () => { throw new Error('bad'); } };
+  const { checker } = makeChecker(() => OUTDATED, broken);
+  assert.equal(await checker.snooze('nope', 1000), false);
+  assert.ok(await checker.check('codex'));
+  assert.equal(await checker.check('codex'), null, 'in-memory window still applies');
 });
