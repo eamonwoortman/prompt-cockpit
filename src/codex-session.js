@@ -441,7 +441,22 @@ export function startCodexSession({
           guardResult = { blocked: true, reason: `Cockpit could not read its git guard settings: ${err.message || err}` };
         }
         if (guardResult.blocked) {
-          onMessage(guardDeniedMessage(threadId, guardResult.reason));
+          const denial = guardDeniedMessage(threadId, guardResult.reason);
+          onMessage(denial);
+          const turnId = params.turnId || activeTurnId;
+          if (turnId) {
+            // Queue the explanation before declining so Codex can use it
+            // when it processes the rejected command.
+            try {
+              await manager.request('turn/steer', {
+                threadId,
+                expectedTurnId: turnId,
+                input: [{ type: 'text', text: denial.decision_reason }],
+              }, { timeoutMs: 2000 });
+            } catch {
+              // A finished turn or unavailable RPC must still receive a denial.
+            }
+          }
           return {
             handled: true,
             result: legacyApproval ? { decision: 'denied' } : { decision: 'decline' },

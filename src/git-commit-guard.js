@@ -418,9 +418,8 @@ export async function evaluateGitGuardCommand(command, cwd) {
     : { blocked: false };
 }
 
-// Codex and Grok decline a blocked command with a bare protocol decision that
-// carries no reason, so the agent only sees a generic rejection. This is the
-// transcript notice (the existing permission_denied shape) that says why.
+// The approval decision carries no reason. This notice records the reason in
+// Cockpit's transcript, and Codex also receives its text through turn/steer.
 export function guardDeniedMessage(sessionId, reason) {
   return {
     type: 'system',

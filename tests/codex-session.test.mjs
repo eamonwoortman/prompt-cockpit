@@ -820,6 +820,13 @@ test('a command blocked by the commit guard is declined with a visible reason', 
     assert.ok(denial, 'a permission_denied notice reaches the transcript');
     assert.match(denial.decision_reason, /commit guard/i);
     assert.match(denial.decision_reason, /final commit message is not visible/);
+    assert.deepEqual(manager.calls.filter(([method]) => method === 'turn/steer'), [
+      ['turn/steer', {
+        threadId: 'thread-new',
+        expectedTurnId: 'turn-1',
+        input: [{ type: 'text', text: denial.decision_reason }],
+      }],
+    ]);
   } finally {
     handle.close();
     if (previous === undefined) delete process.env.COCKPIT_SETTINGS_FILE;
