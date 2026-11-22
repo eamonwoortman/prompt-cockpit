@@ -37,8 +37,10 @@ snapshot is missing or older than 60 seconds, serves a fresh snapshot without
 a lookup, and keeps the last good value when a refresh fails.
 `subscription-limits.test.mjs` covers the compact dropdown labels, local
 reset formatting, minute polling, hidden-screen suppression, partial failures,
-selection preservation and stale responses. Grok exposes no quota endpoint
-in the current adapter, so its token/cost tracking stays separate.
+selection preservation and stale responses. Grok's weekly pool comes
+from the agent's `_x.ai/billing` call and is stored as the shared
+`seven_day` window. Grok has no 5-hour window. Its token and cost
+tracking stays separate from that quota.
 
 `codex-live.manual.mjs` is deliberately outside that glob. Run it by hand
 after changing Codex wiring: `node tests/codex-live.manual.mjs`. It uses the

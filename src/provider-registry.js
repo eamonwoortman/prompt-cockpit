@@ -13,6 +13,7 @@ import { listCodexModels } from './codex-models.js';
 import { listClaudeModels } from './claude-models.js';
 import { fetchClaudeRateLimits, claudeAccountUsageKey, readClaudeAccountLimits } from './claude-rate-limits.js';
 import { fetchCodexRateLimits, codexAccountUsageKey } from './codex-rate-limits.js';
+import { fetchGrokRateLimits, grokAccountUsageKey } from './grok-rate-limits.js';
 import { startCodexSession } from './codex-session.js';
 import { listCodexSessions, fetchCodexSessionHistory } from './codex-history.js';
 import { isCodexAvailable } from './codex-app-server.js';
@@ -114,6 +115,10 @@ const PROVIDERS = Object.freeze({
     efforts: GROK_EFFORTS,
     models: GROK_START_MODELS,
     effortOptions: GROK_EFFORT_OPTIONS,
+    accountLimits: fetchGrokRateLimits,
+    accountLimitsKey: grokAccountUsageKey,
+    readAccountLimits: (query) => query.grokRateLimits(),
+    supportsLiveAccountLimits: (query) => typeof query?.grokRateLimits === 'function',
     rewind: async (row, turnIndex, { dryRun } = {}) => {
       const points = await row.handle.listRewindPoints();
       const promptIndex = resolveGrokPromptIndex(points, turnIndex);

@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { spawnGrokAgent, killGrokProcess } from './grok-acp.js';
+import { grokBillingToPanel } from './grok-rate-limits.js';
 import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction } from './grok-messages.js';
 import { createGrokExtensions } from './grok-extensions.js';
 import { commandHasGitPush, evaluateGitGuardCommand, guardDeniedMessage, shellCommandFromToolInput } from './git-commit-guard.js';
@@ -581,6 +582,12 @@ export function startGrokSession({
         // the live ACP call; set_config_option rejects these ids.
         await connection.client.request('session/set_mode', { sessionId, modeId: next });
         currentEffort = next;
+      },
+      grokRateLimits: async () => {
+        await ready;
+        if (closed || !connection) throw new Error('grok session is not ready');
+        const result = await connection.client.request('_x.ai/billing', {});
+        return grokBillingToPanel(result);
       },
       setMaxThinkingTokens: unsupported('setMaxThinkingTokens'),
       supportedCommands: () => grokExtensions.supportedCommands(),

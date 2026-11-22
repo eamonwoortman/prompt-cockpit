@@ -60,7 +60,7 @@ export function fakeWs() {
 // getMcpServerStatus's authUrl-merge logic has something to merge -
 // omitted (the default) mimics grok-session.js's handle, which has no such
 // method at all (session-registry.js's typeof guard is what this is for).
-export function fakeStartSession({ rejectModes = new Set(), usageExperimental, codexRateLimits, mcpStatus, reloadPluginsResult, withMcpAuthPending = false } = {}) {
+export function fakeStartSession({ rejectModes = new Set(), usageExperimental, codexRateLimits, grokRateLimits, mcpStatus, reloadPluginsResult, withMcpAuthPending = false } = {}) {
   let callbacks;
   let mode = 'default';
   const resolvers = new Map();
@@ -191,6 +191,9 @@ export function fakeStartSession({ rejectModes = new Set(), usageExperimental, c
           : {}),
         ...(codexRateLimits
           ? { codexRateLimits: (...args) => { impl.codexRateLimitsCalls = (impl.codexRateLimitsCalls || 0) + 1; return codexRateLimits(...args); } }
+          : {}),
+        ...(grokRateLimits
+          ? { grokRateLimits: (...args) => { impl.grokRateLimitsCalls = (impl.grokRateLimitsCalls || 0) + 1; return grokRateLimits(...args); } }
           : {}),
       },
     };

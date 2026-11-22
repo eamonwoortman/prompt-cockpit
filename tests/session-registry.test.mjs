@@ -249,6 +249,27 @@ test('Codex token usage updates populate the context meter from the latest conte
   assert.equal(last.context.autoCompact.enabled, false);
 });
 
+test('a Grok turn fetches the weekly pool and broadcasts it without a 5-hour window', async () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession({
+    grokRateLimits: async () => ({
+      seven_day: { utilization: 1, resets_at: Date.parse('2026-11-28T23:08:31.604947+00:00') },
+    }),
+  });
+  const row = registry.createSession({ cwd: '/tmp', provider: 'grok', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  startSessionImpl.emitMessage({ type: 'result', num_turns: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const last = ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1);
+  assert.equal(last.rateLimits.seven_day.utilization, 1);
+  assert.equal(Object.hasOwn(last.rateLimits, 'five_hour'), false);
+  assert.equal(startSessionImpl.grokRateLimitsCalls, 1);
+  assert.deepEqual(row.rateLimits, last.rateLimits);
+});
+
 test('a Codex turn fetches native account rate limits and broadcasts the shared stats shape', async () => {
   registry._reset();
   const startSessionImpl = fakeStartSession({

@@ -68,6 +68,7 @@ test('descriptors own launch, history, and capability metadata', () => {
       efforts: ['low', 'medium', 'high', 'xhigh'],
       models: grok.models,
       effortOptions: grok.effortOptions,
+      accountLimits: true,
     },
   });
 

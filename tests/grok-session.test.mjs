@@ -7,7 +7,7 @@ function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-function fakeConnect({ failInit = false, sessionId = 'grok-sess-1', hangPrompt = null, promptResult = { stopReason: 'end_turn' } } = {}) {
+function fakeConnect({ failInit = false, sessionId = 'grok-sess-1', hangPrompt = null, promptResult = { stopReason: 'end_turn' }, billingResult = null } = {}) {
   const proc = new EventEmitter();
   const requests = [];
   const permissionHandler = { fn: null };
@@ -34,6 +34,7 @@ function fakeConnect({ failInit = false, sessionId = 'grok-sess-1', hangPrompt =
         };
       }
       if (method === 'session/prompt') return promptResult;
+      if (method === '_x.ai/billing') return billingResult;
       if (method === '_x.ai/rewind/points') return { rewind_points: [{ prompt_index: 0 }, { prompt_index: 2 }] };
       if (method === '_x.ai/rewind/execute') return { success: true, target_prompt_index: params.target_prompt_index };
       if (method === 'session/set_model' || method === '_x.ai/session/set_model') return { modelId: params.modelId };
@@ -84,6 +85,23 @@ function startFake(overrides = {}, connectOpts = {}) {
   });
   return { session, messages, states, errors, approvals, fake };
 }
+
+test('query.grokRateLimits reads the weekly pool and does not invent a 5-hour window', async () => {
+  const billingResult = {
+    config: {
+      creditUsagePercent: 1,
+      currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', end: '2026-11-28T23:08:31.604947+00:00' },
+    },
+    subscription_tier: 'SuperGrok',
+  };
+  const { session, fake } = startFake({}, { billingResult });
+  const limits = await session.query.grokRateLimits();
+  assert.equal(fake.requests.some((request) => request.method === '_x.ai/billing'), true);
+  assert.deepEqual(limits, {
+    seven_day: { utilization: 1, resets_at: Date.parse('2026-11-28T23:08:31.604947+00:00') },
+  });
+  assert.equal(Object.hasOwn(limits, 'five_hour'), false);
+});
 
 test('startGrokSession inits, creates a session, and emits system/init', async () => {
   const { messages, states, errors, fake } = startFake();

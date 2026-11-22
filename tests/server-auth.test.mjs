@@ -142,7 +142,7 @@ test('launcher quota endpoints require the operator token and fetch missing or e
   Date.now = () => time;
   t.after(() => { Date.now = originalNow; });
   try {
-    for (const provider of ['claude', 'codex']) {
+    for (const provider of ['claude', 'codex', 'grok']) {
       const endpoint = `${ORIGIN}/api/providers/${provider}/limits`;
       const denied = await fetch(endpoint, { headers: { 'x-cockpit-operator': '' } });
       assert.equal(denied.status, 401);
@@ -170,9 +170,6 @@ test('launcher quota endpoints require the operator token and fetch missing or e
       assert.deepEqual(await failed.json(), snapshot, 'a failed refresh keeps the last good snapshot');
       assert.equal(reads, 2, 'an expired snapshot triggers one lookup');
     }
-    const grok = await fetch(`${ORIGIN}/api/providers/grok/limits`);
-    assert.equal(grok.status, 200);
-    assert.deepEqual(await grok.json(), { rateLimits: null });
   } finally { registry._reset(); }
 });
 
