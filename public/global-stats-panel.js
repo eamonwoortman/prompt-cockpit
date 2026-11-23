@@ -44,6 +44,7 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton, getSu
     const weeksShown = heatmapWeeksShown();
     bodyEl.append(
       renderHeatmap(stats, weeksShown),
+      renderTokenUsage(stats),
       renderOverview(stats),
       renderModelTable(stats),
       renderWeekCostSection(),
@@ -183,6 +184,16 @@ function renderHeatmap(stats, weeksShown) {
 
   const legend = document.createElement('div');
   legend.className = 'stats-heatmap-legend';
+  const intensity = document.createElement('span');
+  intensity.className = 'stats-heatmap-intensity';
+  intensity.innerHTML = '<span>Less</span>' + [0, 1, 2, 3, 4].map((l) => `<div class="stats-heatmap-cell level-${l}"></div>`).join('') + '<span>More</span>';
+  legend.append(renderProviderLegend(), intensity);
+  wrap.append(scroller, legend);
+
+  return wrap;
+}
+
+function renderProviderLegend() {
   const providers = document.createElement('span');
   providers.className = 'stats-provider-legend';
   for (const { id, label } of STATS_PROVIDERS) {
@@ -193,13 +204,7 @@ function renderHeatmap(stats, weeksShown) {
     item.append(swatch, document.createTextNode(label));
     providers.append(item);
   }
-  const intensity = document.createElement('span');
-  intensity.className = 'stats-heatmap-intensity';
-  intensity.innerHTML = '<span>Less</span>' + [0, 1, 2, 3, 4].map((l) => `<div class="stats-heatmap-cell level-${l}"></div>`).join('') + '<span>More</span>';
-  legend.append(providers, intensity);
-  wrap.append(scroller, legend);
-
-  return wrap;
+  return providers;
 }
 
 const STATS_PROVIDERS = [
@@ -207,12 +212,90 @@ const STATS_PROVIDERS = [
   { id: 'grok', label: 'Grok' },
   { id: 'codex', label: 'Codex' },
 ];
-const PROVIDER_COLORS = {
-  claude: '#5b8cff',
-  grok: '#5ec98d',
-  codex: '#ff6b6b',
-};
 const LEVEL_MIX_PCT = [0, 25, 50, 75, 100];
+
+function renderTokenUsage(stats) {
+  const section = document.createElement('div');
+  section.className = 'stats-section stats-token-usage';
+  const heading = document.createElement('strong');
+  heading.textContent = 'Daily token usage by LLM';
+  const note = document.createElement('p');
+  note.className = 'stats-note';
+  section.append(heading, note);
+
+  const usage = stats.dailyTokensByProvider || {};
+  const dates = Object.keys(usage).sort();
+  if (!dates.length) {
+    note.textContent = 'No dated token usage in this range.';
+    return section;
+  }
+  note.textContent = 'Input, output, cache reads and cache writes.';
+
+  const dayMs = 86400000;
+  const first = Date.parse(dates[0]);
+  const last = Date.parse(dates.at(-1));
+  const days = (last - first) / dayMs + 1;
+  const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' });
+  let peak = 1;
+  for (const byProvider of Object.values(usage)) {
+    for (const { id } of STATS_PROVIDERS) peak = Math.max(peak, byProvider[id] || 0);
+  }
+  const stepSize = 10 ** Math.max(0, Math.floor(Math.log10(peak / 4)));
+  const step = Math.ceil(peak / 4 / stepSize) * stepSize;
+  const yMax = step * 4;
+
+  const left = 55;
+  const right = 513;
+  const top = 14;
+  const bottom = 162;
+  const dayWidth = (right - left) / days;
+  const barWidth = Math.min(12, dayWidth * 0.9 / STATS_PROVIDERS.length);
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 525 190');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `Daily tokens by Claude, Grok and Codex, from ${dateFormat.format(first)} to ${dateFormat.format(last)}`);
+
+  function draw(tag, attributes, content, parent = svg) {
+    const node = document.createElementNS(svg.namespaceURI, tag);
+    for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
+    if (content) node.textContent = content;
+    parent.append(node);
+    return node;
+  }
+  for (let i = 0; i <= 4; i += 1) {
+    const y = bottom - (bottom - top) * i / 4;
+    draw('line', { x1: left, x2: right, y1: y, y2: y });
+    draw('text', { x: left - 8, y, 'text-anchor': 'end', 'dominant-baseline': 'middle' }, formatCount(step * i));
+  }
+  for (const date of dates) {
+    const timestamp = Date.parse(date);
+    const x = left + ((timestamp - first) / dayMs + 0.5) * dayWidth;
+    const counts = STATS_PROVIDERS.map(({ id }) => usage[date][id] || 0);
+    counts.forEach((tokens, i) => {
+      if (!tokens) return;
+      const height = (bottom - top) * tokens / yMax;
+      draw('rect', {
+        x: x + (i - counts.length / 2) * barWidth,
+        y: bottom - height,
+        width: barWidth,
+        height,
+        fill: `var(--stats-${STATS_PROVIDERS[i].id})`,
+      });
+    });
+    const hitArea = draw('rect', { x: x - dayWidth / 2, y: top, width: dayWidth, height: bottom - top, fill: 'transparent' });
+    const detail = STATS_PROVIDERS.map(({ label }, i) => `${label} ${counts[i].toLocaleString()}`);
+    draw('title', {}, `${dateFormat.format(timestamp)} · ${detail.join(' · ')} tokens`, hitArea);
+  }
+  const labels = days === 1
+    ? [[(left + right) / 2, first, 'middle']]
+    : [[left, first, 'start'], [right, last, 'end']];
+  if (days > 2) labels.splice(1, 0, [(left + right) / 2, first + Math.floor((days - 1) / 2) * dayMs, 'middle']);
+  for (const [x, timestamp, anchor] of labels) {
+    draw('text', { x, y: 181, 'text-anchor': anchor }, dateFormat.format(timestamp));
+  }
+  section.append(svg, renderProviderLegend());
+  return section;
+}
 
 function levelFor(count) {
   if (count <= 0) return 0;
@@ -231,7 +314,6 @@ function paintHeatmapCell(cell, level, byProvider) {
   if (providers.length === 1) {
     const id = providers[0].id;
     cell.classList.add(`provider-${id}`);
-    cell.style.setProperty('--cell-color', PROVIDER_COLORS[id]);
     return;
   }
   if (providers.length < 2 || level <= 0) return;
@@ -240,7 +322,7 @@ function paintHeatmapCell(cell, level, byProvider) {
   const stops = providers.map(({ id }, i) => {
     const start = (i / n) * 100;
     const end = ((i + 1) / n) * 100;
-    return `color-mix(in srgb, ${PROVIDER_COLORS[id]} ${mix}%, var(--panel)) ${start}% ${end}%`;
+    return `color-mix(in srgb, var(--stats-${id}) ${mix}%, var(--panel)) ${start}% ${end}%`;
   });
   cell.style.background = `linear-gradient(90deg, ${stops.join(', ')})`;
   cell.style.borderColor = 'transparent';

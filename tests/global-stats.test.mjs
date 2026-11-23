@@ -56,6 +56,7 @@ test('aggregateGlobalStats sums tokens, picks the favorite model, and counts act
   assert.equal(stats.perProvider.claude.inputTokens, 125);
   assert.equal(stats.perProvider.grok.sessions, 0);
   assert.equal(Object.values(stats.dailyByProvider).reduce((n, day) => n + (day.claude || 0), 0), 3);
+  assert.deepEqual(Object.values(stats.dailyTokensByProvider), [{ claude: 210 }, { claude: 10 }]);
 });
 
 test('aggregateGlobalStats splits heatmap days and cost across providers', () => {
@@ -83,6 +84,7 @@ test('aggregateGlobalStats splits heatmap days and cost across providers', () =>
   const mixedDay = Object.values(stats.dailyByProvider).find((day) => (day.claude || 0) + (day.grok || 0) + (day.codex || 0) === 3);
   assert.ok(mixedDay);
   assert.deepEqual(mixedDay, { claude: 1, grok: 1, codex: 1 });
+  assert.deepEqual(Object.values(stats.dailyTokensByProvider), [{ claude: 120, grok: 58 }]);
   assert.equal(stats.perProvider.claude.sessions, 1);
   assert.equal(stats.perProvider.grok.sessions, 1);
   assert.equal(stats.perProvider.codex.sessions, 1);

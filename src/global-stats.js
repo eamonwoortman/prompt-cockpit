@@ -101,6 +101,7 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
 
   const dailyCounts = new Map(); // dayKey -> assistant-message count
   const dailyByProvider = new Map(); // dayKey -> { claude, grok, codex }
+  const dailyTokensByProvider = new Map();
   const perProvider = Object.fromEntries(STATS_PROVIDERS.map((id) => [id, emptyProviderTotals()]));
   const modelTokens = new Map(); // model -> input+output tokens (favorite-model ranking only)
   // model -> {inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,
@@ -118,6 +119,7 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
   let longestSessionMs = 0;
 
   for (const { rows, firstTs, lastTs, provider } of sessionScans) {
+    const knownProvider = STATS_PROVIDERS.includes(provider);
     const inRangeRows = cutoff ? rows.filter((r) => r.ts && r.ts >= cutoff) : rows;
     if (inRangeRows.length === 0) continue;
     sessionsInRange += 1;
@@ -147,10 +149,10 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
     if (rangeFirstTs != null && rangeLastTs != null) longestSessionMs = Math.max(longestSessionMs, rangeLastTs - rangeFirstTs);
 
     for (const row of inRangeRows) {
-      if (row.ts) {
-        const key = dayKey(row.ts);
+      const key = row.ts == null ? null : dayKey(row.ts);
+      if (key) {
         dailyCounts.set(key, (dailyCounts.get(key) || 0) + 1);
-        if (provider && perProvider[provider]) {
+        if (knownProvider) {
           const byP = dailyByProvider.get(key) || {};
           byP[provider] = (byP[provider] || 0) + 1;
           dailyByProvider.set(key, byP);
@@ -163,6 +165,12 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
       const cc = u.cache_creation || {};
       const cacheWrite = (cc.ephemeral_5m_input_tokens || 0) + (cc.ephemeral_1h_input_tokens || 0)
         + (!u.cache_creation && u.cache_creation_input_tokens ? u.cache_creation_input_tokens : 0);
+      const tokens = input + output + cacheRead + cacheWrite;
+      if (key && knownProvider && tokens > 0) {
+        const byProvider = dailyTokensByProvider.get(key) || {};
+        byProvider[provider] = (byProvider[provider] || 0) + tokens;
+        dailyTokensByProvider.set(key, byProvider);
+      }
       totalInput += input;
       totalOutput += output;
       totalCacheRead += cacheRead;
@@ -218,6 +226,7 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
   return {
     dailyCounts: Object.fromEntries(dailyCounts),
     dailyByProvider: Object.fromEntries(dailyByProvider),
+    dailyTokensByProvider: Object.fromEntries(dailyTokensByProvider),
     perProvider,
     favoriteModel,
     totalTokens: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
