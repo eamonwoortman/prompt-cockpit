@@ -70,8 +70,8 @@ requests are combined, so another session's fresh value prevents an upstream
 request. The launcher polls every minute while visible. A refresh reuses a live
 session's CLI for that account when one exists and otherwise starts a short
 zero-turn CLI (no model request), so quota shows even before an account's
-first turn or right after a server restart. Grok's current
-adapter provides token/cost usage but no subscription quota endpoint.
+first turn or right after a server restart. Grok reports a weekly usage
+pool (no 5-hour window), shown on the 7d quota chip.
 
 `COCKPIT_SETTINGS_FILE` can point to a different settings file. See
 [`cockpit-settings.example.json`](cockpit-settings.example.json) for a complete
@@ -97,7 +97,7 @@ Settings (gear) covers MCP servers, plugins, permission rules, and UI prefs. On 
 
 ## Status
 
-MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`). Codex is a full third provider as of 0.1.7: rewind, native MCP and plugin controls, live model discovery, and plan quota all work, and its remaining gaps (thinking budget, auto-continue, project-scoped always-allow) are ones the CLI itself does not offer. 0.2.1 adds multiple Claude accounts and Claude/Codex quota in the launcher. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
+MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`). Codex is a full third provider as of 0.1.7: rewind, native MCP and plugin controls, live model discovery, and plan quota all work, and its remaining gaps (thinking budget, project-scoped always-allow) are ones the CLI itself does not offer. 0.2.1 adds multiple Claude accounts and Claude/Codex quota in the launcher. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
 
 See `tests/README.md` for automated vs hand-verified coverage, and `backlog.md` for open follow-ups.
 

@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.2]
+- Root folder guard: Claude, Codex and Grok sessions can no longer create a
+  folder at the root of a Windows drive; the denial reason goes back to the
+  agent so it can retry elsewhere
+- Codex: live command output streams into the detail pane
+- Codex: /compact now works (the Compact button was a no-op)
+- Codex: retryable errors and async question messages show in the transcript
+- Codex: sessions resume after a usage limit resets; Git guard denial reasons
+  reach the active turn
+- Grok: weekly usage pool shown in the launcher and sessions (7d chip)
+- Grok: the cockpit MCP server is passed to Grok sessions, so ask_session
+  works there; a JSON-RPC Internal error keeps its real cause (e.g. 402)
+- Sessions that end show readable text (e.g. exhausted balance) instead of a
+  stack
+- ask_session: only true cycles are refused; asks queue behind busy targets
+  and are released when the caller disconnects
+- Update check: launcher dialog when a newer Claude, Grok or Codex CLI is
+  available, with a copy button and 1 day / 1 week snooze that survives restart
+- Git guard: wrapped commits (powershell -Command, bash -c) are validated;
+  blocks explain why
+- Compose: typed text stays in the box when a send is not delivered
+- UI: bypassPermissions is last in the mode cycle; Reset and Close session
+  need a second click; approval banner and transcript have ARIA roles
+- UI: Compact, Copy reply and Export .md moved to the agents bar row; header
+  shows the Prompt Cockpit logo
+- Pricing: gpt-6.2-sol and gpt-6.2-astra added; verified dates refreshed
+- Dependencies: Claude Agent SDK 0.3.330
+
 ## [0.3.1]
 - Chain: the full transcript goes to the new session as a private temp file
   (tool results capped); the first message is a pointer plus the last
