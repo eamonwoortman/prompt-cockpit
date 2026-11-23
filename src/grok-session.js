@@ -8,6 +8,7 @@ import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermi
 import { createGrokExtensions } from './grok-extensions.js';
 import { commandHasGitPush, evaluateGitGuardCommand, guardDeniedMessage, shellCommandFromToolInput } from './git-commit-guard.js';
 import { createResultEpochTracker } from './result-epoch.js';
+import { rootFolderGuard } from './root-folder-guard.js';
 
 // Read at load rather than hardcoded: a "keep in sync" comment here drifted
 // silently for two releases before anyone noticed.
@@ -253,6 +254,14 @@ export function startGrokSession({
     const commandTool = toolCall.kind === 'execute'
       || /^(bash|shell|exec|command|terminal)$/i.test(toolCall.toolName || '')
       || Boolean(command);
+    if (commandTool && command) {
+      const rootDenial = await rootFolderGuard(command, toolCall.rawInput?.cwd || cwd);
+      if (rootDenial) {
+        onMessage({ ...guardDeniedMessage(sessionId, rootDenial), decision_reason: rootDenial });
+        const optionId = pickPermissionOption(options, false);
+        return { outcome: optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' } };
+      }
+    }
     if (commandTool && command && commandHasGitPush(command)) {
       if (!onApprovalRequest) return { outcome: { outcome: 'cancelled' } };
       return new Promise((resolve) => {

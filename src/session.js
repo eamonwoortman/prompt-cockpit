@@ -10,6 +10,7 @@ import {
   validateCommitCommand,
 } from './git-commit-guard.js';
 import { createResultEpochTracker } from './result-epoch.js';
+import { rootFolderGuard } from './root-folder-guard.js';
 import { claudeSubscriptionEnv } from './claude-subscriptions.js';
 import { createCockpitToolsServer, COCKPIT_TOOLS_SERVER } from './cockpit-tools.js';
 
@@ -280,6 +281,8 @@ export function startSession({ cwd, additionalDirectories, resume, model, effort
             hooks: [
               async (hookInput) => {
                 const command = hookInput.tool_input?.command;
+                const rootDenial = await rootFolderGuard(command, hookInput.cwd || cwd);
+                if (rootDenial) return { continue: true, hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: rootDenial } };
                 if (commandHasGitPush(command)) {
                   const requestId = randomUUID();
                   const allowPush = await new Promise((resolve) => {

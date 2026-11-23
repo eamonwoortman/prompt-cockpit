@@ -8,6 +8,7 @@ import { getCodexAppServerManager } from './codex-app-server.js';
 import { codexNotificationToMessages } from './codex-messages.js';
 import { createResultEpochTracker } from './result-epoch.js';
 import { commandHasGitPush, evaluateGitGuardCommand, guardDeniedMessage, shellCommandFromToolInput } from './git-commit-guard.js';
+import { rootFolderGuard } from './root-folder-guard.js';
 
 function unsupported(name) {
   return async () => { throw new Error(`${name} is not supported on Codex sessions yet`); };
@@ -401,6 +402,15 @@ export function startCodexSession({
     if (commandApproval) {
       const command = shellCommandFromToolInput(params);
       if (command) {
+        const rootDenial = await rootFolderGuard(command, typeof params.cwd === 'string' ? params.cwd : cwd);
+        if (rootDenial) {
+          onMessage({ ...guardDeniedMessage(threadId, rootDenial), decision_reason: rootDenial });
+          const turnId = params.turnId || activeTurnId;
+          if (turnId) {
+            try { await manager.request('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text: rootDenial }] }, { timeoutMs: 2000 }); } catch { /* Still deny if steering fails. */ }
+          }
+          return { handled: true, result: legacyApproval ? { decision: 'denied' } : { decision: 'decline' } };
+        }
         let gitPushApproved = false;
         if (commandHasGitPush(command)) {
           if (!onApprovalRequest) {
