@@ -320,6 +320,12 @@ export function codexNotificationToMessages(method, params, sessionId, {
     return codexItemToMessages(item, sessionId, { model, phase: 'started' });
   }
   if (method === 'item/completed') {
+    // Async questions are delivered as completed agent messages, not as
+    // requestUserInput approvals, and may have no streamed text deltas.
+    if (params.item?.type === 'agentMessage' && params.item.delivery === 'async' && Array.isArray(params.item.questions)) {
+      const text = params.item.text || textParts(params.item.content) || params.item.questions.map((q) => [q.title, ...(q.options || []).map((o) => `- ${typeof o === 'string' ? o : o.label}`)].filter(Boolean).join('\n')).join('\n\n');
+      return text ? [assistantMessage(sessionId, [{ type: 'text', text }], model)] : [];
+    }
     // User input is already echoed by pushInput(), while agent text and
     // reasoning arrive through delta notifications. Re-emitting their final
     // item here duplicates the whole turn in a live transcript. Tool items do

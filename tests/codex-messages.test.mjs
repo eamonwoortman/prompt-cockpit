@@ -34,6 +34,13 @@ test('streamed Codex text and reasoning deltas use the shared transcript shape',
   }, 'thread-1'), []);
 });
 
+test('asynchronous question messages appear in the transcript', () => {
+  const messages = codexNotificationToMessages('item/completed', {
+    item: { type: 'agentMessage', delivery: 'async', questions: [{ title: 'Which?', options: ['One', 'Two'] }] },
+  }, 'thread-1');
+  assert.equal(messages[0].message.content[0].text, 'Which?\n- One\n- Two');
+});
+
 test('completed command and file-change items become tool use/result pairs', () => {
   const command = codexItemToMessages({
     id: 'cmd-1', type: 'commandExecution', command: 'npm test', cwd: '/repo',
