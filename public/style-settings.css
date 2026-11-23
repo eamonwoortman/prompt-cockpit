@@ -1,6 +1,6 @@
 
   .settings-body { display: flex; flex-direction: column; gap: 16px; overflow: hidden; }
-  .settings-tabs { display: flex; flex: 0 0 auto; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  .settings-tabs { display: flex; flex-wrap: wrap; flex: 0 0 auto; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
   .settings-tab {
     background: none;
     border: 1px solid transparent;
@@ -8,14 +8,14 @@
     border-radius: 6px;
     padding: 5px 10px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 0.8125rem;
     font-family: inherit;
   }
   .settings-tab:hover { color: var(--text); }
   .settings-tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
   .settings-tab-content { flex: 1; min-height: 0; overflow-y: auto; }
   .settings-tab-panel { display: flex; flex-direction: column; gap: 16px; }
-  .settings-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .settings-row { display: flex; align-items: center; gap: 10px; font-size: 0.8125rem; }
   .hint {
     display: inline-flex;
     align-items: center;
@@ -25,7 +25,7 @@
     border-radius: 50%;
     border: 1px solid var(--border);
     color: var(--muted);
-    font-size: 10px;
+    font-size: 0.625rem;
     line-height: 1;
     cursor: help;
     flex: 0 0 auto;
@@ -38,19 +38,48 @@
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: 6px;
-    font-size: 13px;
+    font-size: 0.8125rem;
   }
   .settings-danger {
     justify-content: space-between;
     padding-top: 12px;
     border-top: 1px solid var(--border);
   }
-  .settings-danger p { margin: 2px 0 0; color: var(--muted); font-size: 12px; max-width: 380px; }
+  .settings-danger p { margin: 2px 0 0; color: var(--muted); font-size: 0.75rem; max-width: 380px; }
 
   .settings-section { display: flex; flex-direction: column; gap: 6px; }
   .settings-section-header { display: flex; align-items: center; justify-content: space-between; }
-  .settings-section-header strong { font-size: 13px; }
-  .settings-section-header .btn { font-size: 12px; padding: 3px 8px; background: none; }
+  .settings-section-header strong { font-size: 0.8125rem; }
+  .settings-section-header .btn { font-size: 0.75rem; padding: 3px 8px; background: none; }
+  .appearance-settings { gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+  .appearance-settings .settings-section-header { flex-wrap: wrap; gap: 8px; }
+  .appearance-controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+    gap: 12px;
+    font-size: 0.8125rem;
+  }
+  .appearance-controls label { display: flex; flex-direction: column; justify-content: space-between; gap: 4px; }
+  .appearance-controls select {
+    min-width: 0;
+    width: 100%;
+    padding: 5px 8px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+  }
+  .appearance-preview {
+    max-width: 42ch;
+    padding: 8px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: var(--reading-size);
+    line-height: var(--reading-line-height);
+  }
+  .appearance-preview code { font-family: var(--mono-font); }
   .settings-list {
     list-style: none;
     margin: 0;
@@ -74,7 +103,7 @@
   .stats-heatmap { overflow-x: auto; padding-bottom: 4px; }
   .stats-heatmap-header { display: flex; }
   .stats-heatmap-corner { width: 24px; flex: 0 0 auto; }
-  .stats-heatmap-months { position: relative; height: 12px; font-size: 10px; color: var(--muted); }
+  .stats-heatmap-months { position: relative; height: 12px; font-size: 0.625rem; color: var(--muted); }
   .stats-heatmap-months span { position: absolute; top: 0; white-space: nowrap; }
   .stats-heatmap-body { display: flex; }
   .stats-heatmap-weekdays {
@@ -83,7 +112,7 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
-    font-size: 10px;
+    font-size: 0.625rem;
     color: var(--muted);
     position: sticky;
     left: 0;
@@ -106,7 +135,7 @@
   .stats-heatmap-cell.provider-claude { --cell-color: var(--stats-claude); }
   .stats-heatmap-cell.provider-grok { --cell-color: var(--stats-grok); }
   .stats-heatmap-cell.provider-codex { --cell-color: var(--stats-codex); }
-  .stats-heatmap-legend { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  .stats-heatmap-legend { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 0.6875rem; color: var(--muted); }
   .stats-provider-legend, .stats-heatmap-intensity, .stats-provider-item { display: flex; align-items: center; gap: 4px; }
   .stats-provider-legend { gap: 10px; }
   .stats-swatch {
@@ -124,15 +153,20 @@
   .stats-week-cost { display: flex; flex-direction: column; gap: 4px; }
   .stats-overview { display: flex; flex-direction: column; gap: 4px; margin-top: 16px; }
   .stats-section { margin-top: 20px; }
-  .stats-note { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+  .stats-token-usage > strong { font-size: 0.8125rem; }
+  .stats-token-usage svg { display: block; width: 100%; margin: 6px 0; }
+  .stats-token-usage svg line { stroke: var(--border); }
+  .stats-token-usage svg text { fill: var(--muted); font-size: 0.75rem; }
+  .stats-token-usage .stats-provider-legend { color: var(--muted); font-size: 0.75rem; }
+  .stats-note { color: var(--muted); font-size: 0.75rem; margin: 4px 0 0; }
   span.stats-note { display: inline; margin: 0; }
-  .stats-model-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+  .stats-model-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; margin-top: 6px; }
   .stats-model-table th, .stats-model-table td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--border); }
-  .stats-model-table th:first-child, .stats-model-table td:first-child { text-align: left; font-family: ui-monospace, monospace; }
-  .stats-model-table th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .stats-model-table th:first-child, .stats-model-table td:first-child { text-align: left; font-family: var(--mono-font); }
+  .stats-model-table th { color: var(--muted); font-weight: 500; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.02em; }
   .stats-account-limits {
-    font-family: ui-monospace, monospace;
-    font-size: 12px;
+    font-family: var(--mono-font);
+    font-size: 0.75rem;
     white-space: pre-wrap;
     background: var(--panel);
     border: 1px solid var(--border);
@@ -141,7 +175,7 @@
     margin: 6px 0 0;
     line-height: 1.5;
   }
-  .settings-list .cmd-desc { color: var(--muted); font-size: 12px; }
+  .settings-list .cmd-desc { color: var(--muted); font-size: 0.75rem; }
   .mcp-server-row {
     padding: 5px 8px;
     border-radius: 4px;
@@ -151,8 +185,8 @@
     gap: 3px;
   }
   .mcp-server-top { display: flex; align-items: center; gap: 8px; }
-  .mcp-server-top .cmd-name { font-family: ui-monospace, monospace; }
-  .mcp-server-top .mcp-status { flex: 1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .mcp-server-top .cmd-name { font-family: var(--mono-font); }
+  .mcp-server-top .mcp-status { flex: 1; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.02em; }
   .mcp-status-connected { color: var(--success); }
   .mcp-status-failed { color: var(--error); }
 
@@ -174,7 +208,7 @@
   #customFoldersList:empty::after {
     content: 'No extra folders added.';
     color: var(--muted);
-    font-size: 12px;
+    font-size: 0.75rem;
     padding: 4px 8px;
   }
   .mcp-status-needs-auth { color: var(--warning); }
@@ -187,7 +221,7 @@
     border-radius: 6px;
     padding: 2px 7px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: 0.6875rem;
   }
   .mcp-reconnect-btn:hover { color: var(--text); border-color: var(--accent); }
   .mcp-reconnect-btn:disabled { opacity: 0.6; cursor: default; }
@@ -198,7 +232,7 @@
     white-space: nowrap;
   }
   .mcp-auth-link:hover { background: var(--warning); color: var(--bg); }
-  .mcp-error { color: var(--error); font-size: 11px; }
-  .mcp-note { color: var(--muted); font-size: 11px; }
-  .settings-warning { color: var(--warning); font-size: 12px; }
+  .mcp-error { color: var(--error); font-size: 0.6875rem; }
+  .mcp-note { color: var(--muted); font-size: 0.6875rem; }
+  .settings-warning { color: var(--warning); font-size: 0.75rem; }
 

@@ -459,6 +459,61 @@
         </div>
 
         <div class="settings-tab-panel" data-settings-tab-panel="display" role="tabpanel" hidden>
+          <section class="settings-section appearance-settings" aria-labelledby="appearanceTitle">
+            <div class="settings-section-header">
+              <strong id="appearanceTitle">Appearance</strong>
+              <button type="button" class="btn" data-appearance-reset title="Restore default appearance settings">Default</button>
+            </div>
+            <div class="appearance-controls">
+              <label>Interface font
+                <select data-appearance="interfaceFont">
+                  <option value="system">System</option>
+                  <option value="sans">Arial</option>
+                  <option value="serif">Georgia</option>
+                  <option value="mono">System monospace</option>
+                </select>
+              </label>
+              <label>Monospace font
+                <select data-appearance="monoFont">
+                  <option value="system">System</option>
+                  <option value="consolas">Consolas</option>
+                  <option value="cascadia">Cascadia Code</option>
+                  <option value="courier">Courier New</option>
+                </select>
+              </label>
+              <label>Interface text scale
+                <select data-appearance="textScale">
+                  <option value="90">90%</option>
+                  <option value="100">100%</option>
+                  <option value="110">110%</option>
+                  <option value="125">125%</option>
+                  <option value="150">150%</option>
+                </select>
+              </label>
+              <label>Transcript and prompt size
+                <select data-appearance="readingSize">
+                  <option value="12">12 px</option>
+                  <option value="14">14 px</option>
+                  <option value="16">16 px</option>
+                  <option value="18">18 px</option>
+                  <option value="20">20 px</option>
+                  <option value="24">24 px</option>
+                </select>
+              </label>
+              <label>Transcript and prompt line spacing
+                <select data-appearance="lineSpacing">
+                  <option value="1.25">Tight</option>
+                  <option value="1.4">Standard</option>
+                  <option value="1.6">Relaxed</option>
+                  <option value="1.8">Wide</option>
+                </select>
+              </label>
+            </div>
+            <div class="appearance-preview">
+              Transcript preview with <code>git status</code> as sample code.
+              This sample wraps so you can see the space between lines.
+            </div>
+          </section>
           <label class="settings-row">
             <input type="checkbox" id="autoCollapsePreviousGroupBtn" />
             <span>Auto-collapse the previous tool call group when a new one starts</span>

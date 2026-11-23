@@ -5,7 +5,7 @@
     padding: 10px 16px;
     background: var(--warn-bg);
     border-top: 1px solid var(--warn-border);
-    font-size: 13px;
+    font-size: 0.8125rem;
     max-height: 40vh;
     min-height: 0;
     flex: 0 1 auto;
@@ -39,7 +39,7 @@
   }
   #approvalQueueCount {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 0.75rem;
     font-weight: 500;
     white-space: nowrap;
   }
@@ -49,7 +49,7 @@
     white-space: pre-wrap;
     word-break: break-word;
     margin: 0;
-    font-size: 12px;
+    font-size: 0.75rem;
     min-width: 0;
   }
   #approvalPlain pre.plan-detail { max-height: 240px; }
@@ -65,7 +65,7 @@
     border-radius: 6px;
     border: none;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 0.8125rem;
     background: var(--ok);
     color: #10281c;
     font-family: inherit;
@@ -75,7 +75,7 @@
     border-radius: 6px;
     border: none;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 0.8125rem;
     background: var(--error);
     color: #2b0d0d;
     font-family: inherit;
@@ -84,7 +84,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 12px;
+    font-size: 0.75rem;
     color: var(--muted);
     min-width: 0;
     max-width: 100%;
@@ -94,7 +94,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 16em;
-    font-family: ui-monospace, monospace;
+    font-family: var(--mono-font);
   }
   #planReviewControls {
     display: flex;
@@ -104,7 +104,7 @@
   #planFeedbackText, #planNoteText {
     width: 100%;
     font-family: inherit;
-    font-size: 12px;
+    font-size: 0.75rem;
     padding: 6px 8px;
     border-radius: 6px;
     border: 1px solid var(--border);
@@ -124,13 +124,13 @@
     background: var(--panel);
     color: var(--text);
     cursor: pointer;
-    font-size: 13px;
+    font-size: 0.8125rem;
     font-family: inherit;
     text-align: left;
   }
   #questionForm .q-option:hover { border-color: var(--accent); }
   #questionForm .q-option.selected { background: var(--accent); border-color: var(--accent); color: white; }
-  #questionForm .q-option-desc { display: block; font-size: 11px; color: var(--muted); margin-top: 1px; }
+  #questionForm .q-option-desc { display: block; font-size: 0.6875rem; color: var(--muted); margin-top: 1px; }
   #questionForm .q-option.selected .q-option-desc { color: rgba(255,255,255,0.8); }
   #questionForm .q-other {
     padding: 5px 8px;
@@ -138,7 +138,7 @@
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
-    font-size: 13px;
+    font-size: 0.8125rem;
     font-family: inherit;
     min-width: 160px;
   }
@@ -183,7 +183,7 @@
   }
   #agentsList button:hover { background: var(--accent); }
   #agentsList button:hover .cmd-desc { color: white; }
-  #agentsList .cmd-name { font-family: ui-monospace, monospace; white-space: nowrap; }
-  #agentsList .cmd-desc { color: var(--muted); font-size: 12px; }
+  #agentsList .cmd-name { font-family: var(--mono-font); white-space: nowrap; }
+  #agentsList .cmd-desc { color: var(--muted); font-size: 0.75rem; }
   #agentsList .cmd-name.selected::after { content: ' \2713'; }
 

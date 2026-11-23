@@ -3,7 +3,7 @@
     padding: 6px 16px;
   }
   #queuePanel .controls {
-    font-size: 11px;
+    font-size: 0.6875rem;
     color: var(--muted);
     margin-bottom: 4px;
   }
@@ -24,22 +24,22 @@
     align-items: center;
     gap: 6px;
     padding: 2px 0;
-    font-size: 12px;
+    font-size: 0.75rem;
   }
   .queue-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .queue-row .btn { padding: 2px 6px; font-size: 11px; color: var(--text); }
+  .queue-row .btn { padding: 2px 6px; font-size: 0.6875rem; color: var(--text); }
   .task-row {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 2px 0;
-    font-size: 12px;
+    font-size: 0.75rem;
   }
   .task-status {
     width: 12px;
     flex-shrink: 0;
     text-align: center;
-    font-size: 12px;
+    font-size: 0.75rem;
     line-height: 1;
     color: var(--muted);
   }
@@ -59,21 +59,21 @@
   .task-subject { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .task-subject-done { color: var(--muted); text-decoration: line-through; }
   .task-owner {
-    font-size: 10px;
+    font-size: 0.625rem;
     color: var(--muted);
     border: 1px solid var(--border);
     border-radius: 4px;
     padding: 0 4px;
   }
-  .task-blocked { font-size: 10px; color: var(--error); }
-  .task-empty { font-size: 11px; color: var(--muted); }
+  .task-blocked { font-size: 0.625rem; color: var(--error); }
+  .task-empty { font-size: 0.6875rem; color: var(--muted); }
 
   #turnChartPanel .controls {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-bottom: 4px;
-    font-size: 11px;
+    font-size: 0.6875rem;
     color: var(--muted);
   }
   #turnChartMetric {
@@ -82,7 +82,7 @@
     color: var(--text);
     border-radius: 4px;
     padding: 2px 6px;
-    font-size: 11px;
+    font-size: 0.6875rem;
   }
   .turn-chart-body {
     display: flex;
@@ -94,7 +94,7 @@
     width: 2.6rem;
     flex: none;
     color: var(--muted);
-    font-size: 9px;
+    font-size: 0.5625rem;
     line-height: 1;
     pointer-events: none;
   }

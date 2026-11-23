@@ -4,8 +4,8 @@
     margin: 40px auto;
     padding: 0 16px;
   }
-  #launcher h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 24px 0 8px; }
-  #launcherForm .subscription-error { color: var(--danger, #c0392b); font-size: 12px; margin-left: 8px; }
+  #launcher h2 { font-size: 0.9375rem; color: var(--muted); font-weight: 600; margin: 24px 0 8px; }
+  #launcherForm .subscription-error { color: var(--danger, #c0392b); font-size: 0.75rem; margin-left: 8px; }
   #launcher .cwd-row { display: flex; align-items: center; gap: 8px; }
   #launcher input[type=text] {
     flex: 1;
@@ -14,7 +14,7 @@
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: 6px;
-    font-size: 14px;
+    font-size: 0.875rem;
   }
   /* Two red flashes when Start is clicked with no folder picked. */
   @keyframes cwd-missing-blink {
@@ -30,7 +30,7 @@
   #cwdInput.cwd-missing {
     animation: cwd-missing-blink 280ms ease-in-out 2;
   }
-  #browseBtn, #startBtn { width: 96px; text-align: center; padding: 8px 14px; font-size: 14px; }
+  #browseBtn, #startBtn { width: 96px; text-align: center; padding: 8px 14px; font-size: 0.875rem; }
   #startBtn { margin-top: 8px; }
   #launcher .start-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 6px; }
   #startTargetSelect {
@@ -41,7 +41,7 @@
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: 6px;
-    font-size: 15px;
+    font-size: 0.9375rem;
   }
   #startNameInput,
   #startModelSelect,
@@ -54,7 +54,7 @@
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: 6px;
-    font-size: 13px;
+    font-size: 0.8125rem;
   }
   #startNameInput { flex: 1; min-width: 0; }
   #startModelSelect { width: 8.5rem; }
@@ -67,7 +67,7 @@
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: 6px;
-    font-size: 13px;
+    font-size: 0.8125rem;
     text-align: center;
     text-align-last: center;
   }
@@ -82,7 +82,7 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     margin-bottom: 6px;
-    font-size: 13px;
+    font-size: 0.8125rem;
   }
   #resumeList li:hover { border-color: var(--accent); }
   #resumeList .resume-info {
@@ -96,6 +96,6 @@
     font: inherit;
     padding: 0;
   }
-  #resumeList .cwd { color: var(--muted); font-size: 12px; }
-  #resumeList .resume-time { color: var(--muted); font-size: 11px; }
+  #resumeList .cwd { color: var(--muted); font-size: 0.75rem; }
+  #resumeList .resume-time { color: var(--muted); font-size: 0.6875rem; }
 

@@ -4,6 +4,23 @@
 // Close session lives in this modal, not the header's always-visible row,
 // since it permanently ends the live process.
 const STORAGE_KEY = 'cockpit:settings';
+const INTERFACE_FONTS = {
+  sans: 'Arial, sans-serif',
+  serif: 'Georgia, serif',
+  mono: 'ui-monospace, monospace',
+};
+const MONOSPACE_FONTS = {
+  consolas: 'Consolas, ui-monospace, monospace',
+  cascadia: '"Cascadia Code", ui-monospace, monospace',
+  courier: '"Courier New", ui-monospace, monospace',
+};
+const APPEARANCE_DEFAULTS = {
+  interfaceFont: 'system',
+  monoFont: 'system',
+  textScale: '100',
+  readingSize: '14',
+  lineSpacing: '1.4',
+};
 // customFolders: [{ id, label, path }, ...] - the "@" picker's virtual
 // folders beyond "Local folder" (file-picker.js). Used to be a single
 // screenshotDir string; loadSettings() below migrates that one-time.
@@ -129,6 +146,8 @@ export function initSettings({
   function persist(patch) {
     Object.assign(settings, patchSettings(patch));
   }
+
+  initAppearance(modal, settings.appearance, (appearance) => persist({ appearance }));
 
   autoCollapseCheckbox.checked = settings.autoCollapsePreviousGroup;
   turnChartCheckbox.checked = settings.turnChartEnabled;
@@ -305,6 +324,39 @@ export function initSettings({
     setDetailPaneEnabled,
     isPendingTurnsBadgeEnabled: () => settings.pendingTurnsBadgeEnabled,
   };
+}
+
+function initAppearance(modal, saved, onChange) {
+  const controls = [...modal.querySelectorAll('[data-appearance]')];
+  if (!controls.length) return;
+
+  function render(values) {
+    for (const control of controls) {
+      const key = control.dataset.appearance;
+      control.value = values?.[key] ?? APPEARANCE_DEFAULTS[key];
+      if (control.selectedIndex === -1) control.value = APPEARANCE_DEFAULTS[key];
+    }
+    return apply();
+  }
+
+  function apply() {
+    const values = Object.fromEntries(controls.map((control) => [control.dataset.appearance, control.value]));
+    const style = document.documentElement.style;
+    style.setProperty('--interface-font', INTERFACE_FONTS[values.interfaceFont] ?? '');
+    style.setProperty('--mono-font', MONOSPACE_FONTS[values.monoFont] ?? '');
+    style.setProperty('--text-scale', `${values.textScale}%`);
+    style.setProperty('--reading-size', `${values.readingSize}px`);
+    style.setProperty('--reading-line-height', values.lineSpacing);
+    return values;
+  }
+
+  render(saved);
+  for (const control of controls) {
+    control.addEventListener('change', () => onChange(apply()));
+  }
+  modal.querySelector('[data-appearance-reset]').addEventListener('click', () => {
+    onChange(render(APPEARANCE_DEFAULTS));
+  });
 }
 
 // Lets the modal be repositioned by dragging its header. Settings has a
