@@ -291,6 +291,25 @@ test('a Codex turn fetches native account rate limits and broadcasts the shared 
   assert.equal(startSessionImpl.codexRateLimitsCalls, 1);
 });
 
+test('Codex auto-continue schedules when quota arrives after a rejected turn', async () => {
+  registry._reset();
+  let resolveLimits;
+  const limits = new Promise((resolve) => { resolveLimits = resolve; });
+  const impl = fakeStartSession({ codexRateLimits: () => limits });
+  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', autoContinue: true, startSessionImpl: impl });
+  impl.emitMessage({ type: 'result', is_error: true, codex_error_info: 'usageLimitExceeded', error: 'limit' });
+  assert.equal(row.rateLimitHit.resetsAt, null);
+  assert.ok(row.autoContinueTimer, 'retry quota lookup while reset is unknown');
+  const reset = Date.now() + 3600_000;
+  resolveLimits({ five_hour: { utilization: 100, resets_at: reset } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(row.rateLimitHit.resetsAt, reset + 60_000);
+  assert.ok(row.autoContinueTimer, 'resume timer is armed after quota arrives');
+  impl.emitMessage({ type: 'result', is_error: false });
+  assert.equal(row.autoContinueTimer, null, 'successful turn cancels the pending resume');
+  registry._reset();
+});
+
 test('a Codex rate-limit failure backs off the account, then a replacement handle can refresh it', async () => {
   registry._reset();
   const failing = fakeStartSession({

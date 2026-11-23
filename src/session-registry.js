@@ -232,6 +232,14 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     row.unsubscribeAccountLimits = accountUsageCache.subscribe(providerDescriptor.accountLimitsKey({ subscription: row.subscription }), ({ rateLimits }) => {
       if (sessions.get(id) !== row) return;
       row.rateLimits = rateLimits;
+      if (row.rateLimitHit?.rateLimitType === 'provider_error_text') {
+        const reset = exhaustedWindowReset(rateLimits);
+        if (reset && row.rateLimitHit.resetsAt !== reset + AUTO_CONTINUE_BUFFER_MS) {
+          row.rateLimitHit.resetsAt = reset + AUTO_CONTINUE_BUFFER_MS;
+          if (row.autoContinue) scheduleAutoContinue(id);
+          broadcastSummary(id);
+        }
+      }
       broadcastUsage(id);
     }, read);
   }
@@ -990,12 +998,14 @@ function handleMessage(id, message) {
   if (row.provider !== 'claude' && message.type === 'result') {
     const text = message.is_error ? String(message.error || message.result || '') : '';
     if (isRateLimitFailure({ code: message.codex_error_info, text })) {
-      row.rateLimitHit = { resetsAt: exhaustedWindowReset(row.rateLimits), rateLimitType: 'provider_error_text' };
+      const reset = exhaustedWindowReset(row.rateLimits);
+      row.rateLimitHit = { resetsAt: reset ? reset + AUTO_CONTINUE_BUFFER_MS : null, rateLimitType: 'provider_error_text' };
       onRateLimitHit(id, { detail: message.codex_error_info ? `${message.codex_error_info}: ${text}` : text });
       broadcastSummary(id);
     } else if (!message.is_error && row.rateLimitHit?.rateLimitType === 'provider_error_text') {
       row.rateLimitHit = null;
       row.chainOffer = false;
+      clearAutoContinueTimer(row);
       clearChainWatch(row);
       broadcastSummary(id);
     }
@@ -1316,13 +1326,22 @@ function nextWallClockInstant(targetHour, targetMinute, tz) {
 
 // Arms (or re-arms) the timer that pushes "Continue" the moment the limit
 // resets. Re-entrant: safe to call again on a later rate_limit_event or a
-// mid-wait checkbox toggle, always clearing any prior timer first. No
-// resetsAt means there's nothing to schedule against - autoContinue stays
-// armed for next time, it just can't fire on this hit.
+// mid-wait checkbox toggle, always clearing any prior timer first. Provider
+// errors with an unknown reset retry the quota lookup until one is available.
 function scheduleAutoContinue(id) {
   const row = sessions.get(id);
-  if (!row || !row.rateLimitHit || !row.rateLimitHit.resetsAt) return;
+  if (!row || !row.rateLimitHit) return;
   clearAutoContinueTimer(row);
+  if (!row.rateLimitHit.resetsAt) {
+    if (row.rateLimitHit.rateLimitType === 'provider_error_text') {
+      row.autoContinueTimer = setTimeout(async () => {
+        row.autoContinueTimer = null;
+        await refreshRateLimits(id);
+        if (sessions.get(id) === row && row.autoContinue && row.rateLimitHit && !row.autoContinueTimer) scheduleAutoContinue(id);
+      }, 60_000);
+    }
+    return;
+  }
   const delay = Math.max(0, row.rateLimitHit.resetsAt - Date.now());
   row.autoContinueTimer = setTimeout(() => {
     row.autoContinueTimer = null;
