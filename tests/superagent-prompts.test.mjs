@@ -335,7 +335,8 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   assert.ok(contract.includes('review, response, verify and report files are outputs'));
   for (const n of ['Outputs are never committed', 'never stage anything under `.superpowers/`', 'If your card has `artifactsCommitted: true`', 'unless your card says `commitTests: true`']) assert.ok(contract.includes(n), `contract: ${n}`);
   for (const f of ['fixer.md', 'implementer.md']) await has(f, "`tasks/<task>-tests/` under your card's `artifactRoot`", 'step 5 commits only the fix');
-  for (const f of ['task-reviewer.md', 'fix-reviewer.md', 'tester.md', 'verifier-tester.md']) await has(f, 'put the saved tests back first');
+  for (const f of ['task-reviewer.md', 'fix-reviewer.md', 'tester.md', 'verifier-tester.md']) await has(f, 'put the saved tests back first', 'The one exception: putting the saved tests back and removing them again.');
+  await has('fix-reviewer.md', 'as it is, plus the saved tests');
   await has('contract.md', "first copies the saved tests from `tasks/<task>-tests/` under your card's `artifactRoot`");
   for (const f of ['fix-reviewer.md', 'task-reviewer.md']) await has(f, 'a fix commit that adds or changes a test is a blocker');
   const purposeLine = (p) => contract.split(/\r?\n/).find((l) => l.startsWith(`- \`${p}\`:`));

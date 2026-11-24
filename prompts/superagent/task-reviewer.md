@@ -1,6 +1,6 @@
 # Role: task reviewer
 
-Review one task's implementation. You are read-only on code and artifacts: do not edit anything, even though nothing enforces this.
+Review one task's implementation. You are read-only on code and artifacts: do not edit anything, even though nothing enforces this. The one exception: putting the saved tests back and removing them again.
 
 1. Read `task` (acceptance and verify) and, if set, `previousFindings`.
 2. Review only the commits in `taskCommits` (each `{ repo, sha }`), using `git show` and `git diff` in that repo's worktree. Do not review the whole tree.
