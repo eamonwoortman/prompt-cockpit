@@ -533,6 +533,24 @@ async function resolveCommits(commits, { job, git }) {
   return { errors, resolved };
 }
 
+// The files a commit changes: a merge against its first parent, a root commit
+// in full. null when git cannot list them.
+async function commitFiles(sha, { cwd, git }) {
+  const res = await git(['diff-tree', '-z', '-r', '--root', '--diff-merges=first-parent', '--no-commit-id', '--name-only', sha], { cwd });
+  return res.code === 0 ? res.stdout.split('\0').filter(Boolean) : null;
+}
+
+function forbiddenPathErrors(files, job, suffix = '') {
+  const errors = [];
+  const superagent = files.find((file) => file.startsWith('.superpowers/'));
+  if (superagent) errors.push(`commit includes superagent files: ${superagent}${suffix}`);
+  if (job.commitTests === false) {
+    const test = files.find((file) => isTestPath(file, job.testPaths));
+    if (test) errors.push(`commit includes test files: ${test}${suffix}`);
+  }
+  return errors;
+}
+
 // A listed commit may not carry superagent files, nor test files unless the job commits tests.
 export async function commitPathErrors(commits, { job, git }) {
   const errors = [];
@@ -542,17 +560,32 @@ export async function commitPathErrors(commits, { job, git }) {
       errors.push(`repo ${repoId} has no worktree to check commit ${sha}`);
       continue;
     }
-    const res = await git(['diff-tree', '-z', '--no-commit-id', '--name-only', '-r', sha], { cwd: repo.worktree });
-    if (res.code !== 0) {
-      errors.push(`could not list the files of commit ${sha} in ${repoId}`);
+    const files = await commitFiles(sha, { cwd: repo.worktree, git });
+    if (!files) errors.push(`could not list the files of commit ${sha} in ${repoId}`);
+    else errors.push(...forbiddenPathErrors(files, job));
+  }
+  return errors;
+}
+
+// The same rule for every other commit on the job branch since the base: a
+// follow-up commit does not take an earlier one off the branch.
+export async function branchPathErrors(listed, { job, git }) {
+  const errors = [];
+  for (const repo of job.repos) {
+    if (!repo.worktree || !repo.baseSha) {
+      errors.push(`repo ${repo.id} has no worktree or base commit to check the job branch`);
       continue;
     }
-    const files = res.stdout.split('\0').filter(Boolean);
-    const superagent = files.find((file) => file.startsWith('.superpowers/'));
-    if (superagent) errors.push(`commit includes superagent files: ${superagent}`);
-    if (job.commitTests === false) {
-      const test = files.find((file) => isTestPath(file, job.testPaths));
-      if (test) errors.push(`commit includes test files: ${test}`);
+    const range = await git(['rev-list', '--reverse', `${repo.baseSha}..refs/heads/${job.branch}`], { cwd: repo.worktree });
+    if (range.code !== 0) {
+      errors.push(`could not list the commits of the job branch in ${repo.id}`);
+      continue;
+    }
+    for (const sha of range.stdout.split(/\r?\n/).filter(Boolean)) {
+      if (listed.some((c) => c.repo === repo.id && c.sha === sha)) continue;
+      const files = await commitFiles(sha, { cwd: repo.worktree, git });
+      if (!files) errors.push(`could not list the files of commit ${sha} in ${repo.id}`);
+      else errors.push(...forbiddenPathErrors(files, job, ` (commit ${sha.slice(0, 7)} in ${repo.id}, already on the branch)`));
     }
   }
   return errors;
@@ -598,10 +631,7 @@ async function outputErrors({ phase, job, commits, git, attempt }) {
     : (phase?.outputs ?? []).map((key) => ({ key, rel: paths[key] }));
   const changed = new Map();
   const filesIn = async (sha) => {
-    if (!changed.has(sha)) {
-      const res = await git(['diff-tree', '--no-commit-id', '--name-only', '-r', sha], { cwd: primary.worktree });
-      changed.set(sha, res.code === 0 ? res.stdout.split(/\r?\n/) : []);
-    }
+    if (!changed.has(sha)) changed.set(sha, (await commitFiles(sha, { cwd: primary.worktree, git })) ?? []);
     return changed.get(sha);
   };
   const primaryShas = commits.filter((c) => c.repo === primary.id).map((c) => c.sha);
@@ -705,7 +735,7 @@ export async function validateResult(value, { expected, phase, job, git = defaul
 
   const { errors: commitErrors, resolved } = await resolveCommits(schema.commits, { job, git });
   if (commitErrors.length) return { ok: false, errors: commitErrors };
-  const pathErrors = await commitPathErrors(resolved, { job, git });
+  const pathErrors = [...(await commitPathErrors(resolved, { job, git })), ...(await branchPathErrors(resolved, { job, git }))];
   if (pathErrors.length) return { ok: false, errors: pathErrors };
 
   let outputs = {};

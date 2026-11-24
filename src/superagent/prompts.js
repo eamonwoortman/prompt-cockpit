@@ -209,11 +209,19 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
   };
 }
 
+function commitPathHint(error) {
+  const tests = error.startsWith('commit includes test files: ');
+  if (!tests && !error.startsWith('commit includes superagent files: ')) return '';
+  const rewrite = 'A later commit does not take that commit off the branch: rewrite it (`git commit --amend`, or `git reset --soft` to before it), then re-commit by explicit path.';
+  return tests ? `${rewrite} What counts as a test comes from \`testPaths\` on your card; if a path is matched wrongly, say so in your result rather than renaming files.\n` : `${rewrite}\n`;
+}
+
+// `attempt.ledger` is true for a job whose artifacts live in the ledger.
 export function nudgeText(kind, attempt) {
   if (kind === 'invalid-result') {
     const error = attempt.error || 'no reason given';
     if (attempt.readOnly) return `Your result was rejected: ${error}\nReply with only the corrected result JSON object as your final message.`;
-    return `Your \`result.json\` in ${attempt.dir} was rejected: ${error}\nFix that, write any output you change, then publish \`result.json\` again via \`result.json.tmp\` and rename.`;
+    return `Your \`result.json\` in ${attempt.dir} was rejected: ${error}\n${commitPathHint(error)}Fix that, ${attempt.ledger ? 'write' : 'commit'} any output you change, then publish \`result.json\` again via \`result.json.tmp\` and rename.`;
   }
   if (attempt.readOnly) return 'No result was received. Reply with only the result JSON object as your final message.';
   if (kind === 'turn-cap') {

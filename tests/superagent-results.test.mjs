@@ -1171,3 +1171,86 @@ test('a legacy job (no commitTests recorded) still commits tests', async () => {
   assert.deepEqual(f.job.testPaths, []);
   assert.deepEqual(await commitPathErrors([{ repo: 'primary', sha }], { job: f.job, git: defaultGit }), []);
 });
+
+const NO_TESTS = { artifactRoot: 'ledger', commitTests: false, testPaths: defaultConfig().testPaths };
+const onBranch = (sha, repo = 'primary') => ` (commit ${sha.slice(0, 7)} in ${repo}, already on the branch)`;
+
+async function ledgerAuthor(created = NO_TESTS) {
+  const f = await fixture({ commitSpec: false, created });
+  await writeAt(f.worktree, artifactPaths(f.job).spec, '# Hello design\n');
+  const author = (commits) => f.check(f.goodResult({ evidence: { commits } }), { attempt: { purpose: 'author' } });
+  return { ...f, author };
+}
+
+test('an unlisted commit on the branch that adds a test file fails a later result', async () => {
+  const f = await ledgerAuthor();
+  const testSha = await f.commit('Tests/Editor/FooTests.cs', 'x\n');
+  const clean = await f.commit('src/foo.js', 'x\n');
+  const v = await f.author([clean]);
+  assert.deepEqual(v, { ok: false, errors: [`commit includes test files: Tests/Editor/FooTests.cs${onBranch(testSha)}`] });
+});
+
+test('an unlisted commit on the branch that adds superagent files fails a later result', async () => {
+  const rel = '.superpowers/superagent/x/artifacts/a.md';
+  const f = await fixture();
+  const bad = await commitSuperagentFile(f.worktree, rel);
+  const clean = await f.commit('src/foo.js', 'x\n');
+  const v = await f.check(f.goodResult({ evidence: { commits: [f.specSha, clean] } }));
+  assert.deepEqual(v, { ok: false, errors: [`commit includes superagent files: ${rel}${onBranch(bad)}`] });
+});
+
+test('a follow-up commit deleting the test does not clear the branch; rewriting the commit does', async () => {
+  const f = await ledgerAuthor();
+  const rel = 'Tests/Editor/FooTests.cs';
+  await writeAt(f.worktree, 'src/foo.js', 'x\n');
+  await writeAt(f.worktree, rel, 'x\n');
+  git(f.worktree, 'add', '--', 'src/foo.js', rel);
+  git(f.worktree, 'commit', '-q', '-m', 'fix with test');
+  const mixed = git(f.worktree, 'rev-parse', 'HEAD');
+  git(f.worktree, 'rm', '-q', '--cached', '--', rel);
+  git(f.worktree, 'commit', '-q', '-m', 'drop test');
+  const dropped = git(f.worktree, 'rev-parse', 'HEAD');
+  const v = await f.author([dropped]);
+  assert.equal(v.ok, false);
+  assert.deepEqual(v.errors, [`commit includes test files: ${rel}`, `commit includes test files: ${rel}${onBranch(mixed)}`]);
+
+  git(f.worktree, 'reset', '-q', '--soft', f.baseSha);
+  git(f.worktree, 'commit', '-q', '-m', 'fix');
+  const rewritten = git(f.worktree, 'rev-parse', 'HEAD');
+  const ok = await f.author([rewritten]);
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+});
+
+test('a merge commit is checked against its first parent', async () => {
+  const f = await ledgerAuthor();
+  const rel = 'Tests/Editor/FooTests.cs';
+  const branch = git(f.worktree, 'rev-parse', '--abbrev-ref', 'HEAD');
+  git(f.worktree, 'switch', '-q', '-c', 'side');
+  await f.commit('src/side.js', 'x\n');
+  git(f.worktree, 'switch', '-q', branch);
+  await f.commit('src/main.js', 'x\n');
+  git(f.worktree, 'merge', '-q', '--no-ff', '--no-commit', 'side');
+  await writeAt(f.worktree, rel, 'x\n');
+  git(f.worktree, 'add', '--', rel);
+  git(f.worktree, 'commit', '-q', '-m', 'merge side');
+  const merge = git(f.worktree, 'rev-parse', 'HEAD');
+  const clean = await f.commit('src/after.js', 'x\n');
+  assert.deepEqual(await f.author([clean]), { ok: false, errors: [`commit includes test files: ${rel}${onBranch(merge)}`] });
+  assert.deepEqual(await f.author([merge]), { ok: false, errors: [`commit includes test files: ${rel}`] });
+});
+
+test('a legacy job (commitTests absent) passes with tests committed on the branch', async () => {
+  const f = await fixture();
+  await f.commit('Tests/Editor/FooTests.cs', 'x\n');
+  const clean = await f.commit('src/foo.js', 'x\n');
+  const v = await f.check(f.goodResult({ evidence: { commits: [f.specSha, clean] } }));
+  assert.equal(v.ok, true, JSON.stringify(v.errors));
+});
+
+test('a listed offending commit is reported once, before unlisted ones', async () => {
+  const f = await ledgerAuthor();
+  const first = await f.commit('Tests/Editor/ATests.cs', 'x\n');
+  const listed = await f.commit('Tests/Editor/BTests.cs', 'x\n');
+  const v = await f.author([listed]);
+  assert.deepEqual(v, { ok: false, errors: ['commit includes test files: Tests/Editor/BTests.cs', `commit includes test files: Tests/Editor/ATests.cs${onBranch(first)}`] });
+});

@@ -99,12 +99,25 @@ test('a recovery card carries the previous attempt\'s failure reason and readabl
 
 test('the invalid-result nudge carries the validator\'s error; the turn-cap nudge lets a nearly finished worker finish', async () => {
   const { attempt: a } = await fixture();
-  const n = nudgeText('invalid-result', { dir: a.dir, error: 'tasks[0].id must be 1-12 letters' });
+  const n = nudgeText('invalid-result', { dir: a.dir, ledger: true, error: 'tasks[0].id must be 1-12 letters' });
   assert.ok(n.includes(a.dir) && n.includes('was rejected: tasks[0].id must be 1-12 letters') && n.includes('result.json.tmp'));
   assert.match(nudgeText('invalid-result', { dir: a.dir, readOnly: true, error: 'bad status' }), /^Your result was rejected: bad status\n.*final message/);
   assert.match(nudgeText('turn-cap', a), /If only writing your outputs remains.*status: done/);
   assert.ok(n.includes('write any output you change'));
   assert.ok(!/commit/.test(n));
+  const legacy = nudgeText('invalid-result', { dir: a.dir, error: 'tasks[0].id must be 1-12 letters' });
+  assert.ok(legacy.includes('commit any output you change') && !legacy.includes('write any output'));
+});
+
+test('a commit-path rejection tells the worker to rewrite the commit; a test-path one points at testPaths', () => {
+  const rewrite = ['`git commit --amend`', '`git reset --soft`', 'by explicit path', 'does not take'];
+  const test = nudgeText('invalid-result', { dir: '/d', ledger: true, error: 'commit includes test files: Tests/FooTests.cs (commit abc1234 in primary, already on the branch)' });
+  for (const s of [...rewrite, '`testPaths`', 'rather than renaming']) assert.ok(test.includes(s), s);
+  const superagent = nudgeText('invalid-result', { dir: '/d', ledger: true, error: 'commit includes superagent files: .superpowers/x.md' });
+  for (const s of rewrite) assert.ok(superagent.includes(s), s);
+  assert.ok(!superagent.includes('testPaths'));
+  const other = nudgeText('invalid-result', { dir: '/d', ledger: true, error: 'summary must be a non-empty string' });
+  assert.ok(!other.includes('--amend') && !other.includes('testPaths'));
 });
 
 test('the job card inputs and outputs follow the current phase', async () => {

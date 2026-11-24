@@ -281,7 +281,7 @@ export function createRunner({
       live.promptSeq = row.eventLog.nextSeq - 1;
       live.sawResult = false;
       try {
-        await registry.sendInput(row.id, nudgeText(kind, { dir: live.dir, readOnly: live.readOnly, error: rejected?.detail ?? null }));
+        await registry.sendInput(row.id, nudgeText(kind, { dir: live.dir, readOnly: live.readOnly, ledger: store.get(live.jobId)?.artifactRoot === 'ledger', error: rejected?.detail ?? null }));
       } catch (err) {
         // Row gone: the removal path owns the attempt. Row still there: the
         // stall deadline ends it.
