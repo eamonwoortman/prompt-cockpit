@@ -346,11 +346,23 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   assert.ok(contract.includes('Purposes'));
   for (const p of ['author', 'review', 'fix', 'verify', 'implement', 'task-review', 'test']) assert.ok(contract.includes(`\`${p}\``), `contract: ${p}`);
   assert.ok(contract.includes('review, response, verify and report files are outputs'));
-  for (const n of ['Outputs are never committed', 'never stage anything under `.superpowers/`', 'If your card has `artifactsCommitted: true`', 'unless your card says `commitTests: true`']) assert.ok(contract.includes(n), `contract: ${n}`);
-  for (const f of ['fixer.md', 'implementer.md']) await has(f, "`tasks/<task>-tests/` under your card's `artifactRoot`", 'step 5 commits only the fix');
+  for (const n of ['Unless your card has `artifactsCommitted: true`, outputs are never committed', 'never stage anything under `.superpowers/`', 'If your card has `artifactsCommitted: true`', 'unless your card says `commitTests: true`']) assert.ok(contract.includes(n), `contract: ${n}`);
+  for (const f of ['fixer.md', 'implementer.md']) await has(f, "`tasks/<task>-tests/<repoId>/<repo-relative path>` under your card's `artifactRoot` (`<repoId>` is that repo's `id` on the card", 'step 5 commits only the fix', 'under `## Tests that need updating` (its path and why)');
+  await has('implementer.md', 'record the `verify` run in the task report');
+  assert.ok(!(await read('implementer.md')).includes('record both runs'), 'implementer has no red run to record');
+  await has('fixer.md', 'record both runs in the task report');
+  await has('task-reviewer.md', 'red-then-green only where the report records a failing run first');
+  for (const f of ['task-reviewer.md', 'fix-reviewer.md']) await has(f, 'An updated test listed under `## Tests that need updating` in the task report, saved and not committed, is not a blocker.');
+  for (const f of ['tester.md', 'verifier-tester.md']) await has(f, 'copy every entry under `## Tests that need updating` in the task reports', 'into the test report under the same heading');
+  for (const f of ['task-reviewer.md', 'fix-reviewer.md', 'tester.md', 'verifier-tester.md']) {
+    await has(f, 'from `tasks/<task>-tests/<repoId>/` into that repo');
+    const closing = (await read(f)).split(/\r?\n/).find((l) => l.startsWith('Do not edit files outside your listed outputs'));
+    assert.ok(closing.includes('except putting the saved tests back and removing them again'), `${f}: closing line carries the put-back exception`);
+  }
+  assert.ok(!(await read('fix-reviewer.md')).includes('says.)'), 'fix-reviewer: no stray ".)"');
   for (const f of ['task-reviewer.md', 'fix-reviewer.md', 'tester.md', 'verifier-tester.md']) await has(f, 'put the saved tests back first', 'The one exception: putting the saved tests back and removing them again.');
   await has('fix-reviewer.md', 'as it is, plus the saved tests');
-  await has('contract.md', "first copies the saved tests from `tasks/<task>-tests/` under your card's `artifactRoot`");
+  await has('contract.md', "first copies the saved tests from `tasks/<task>-tests/<repoId>/` under your card's `artifactRoot`", 'back to the same repo-relative paths in that repo');
   for (const f of ['fix-reviewer.md', 'task-reviewer.md']) await has(f, 'a fix commit that adds or changes a test is a blocker');
   const purposeLine = (p) => contract.split(/\r?\n/).find((l) => l.startsWith(`- \`${p}\`:`));
   for (const p of ['review', 'test']) assert.ok(purposeLine(p).includes('`severity` (`blocker`, `major` or `minor`)'), `contract ${p} line lists severities`);

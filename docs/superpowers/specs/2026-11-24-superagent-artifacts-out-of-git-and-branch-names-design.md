@@ -18,7 +18,7 @@ The 171558 branch was rebuilt by hand to match: `e098cabd1b3` holds only the `Fa
 
 1. **Artifacts live in the job's ledger, not in git.** Every artifact a job writes (workflow artifacts, review, response, verify and report files) is a file under the job's ledger folder in the primary worktree, `.superpowers/superagent/<jobId>/artifacts/`, which is already git-ignored (worktree jobs: `.superpowers/superagent/.gitignore` with `*`, `worktree.js:128-130`; in-place jobs: the `info/exclude` line, `inplace.js:102-117`, verified with `check-ignore`).
 2. **Validation no longer requires an artifact commit.** A required output must exist and be non-empty when the result is judged; the engine records its SHA-256 on `attempt-ended` so a later change is detectable. `evidence.commits` is only for code.
-3. **No artifact can slip into a commit.** A listed commit that touches any path under `.superpowers/` is an invalid result (`commit includes superagent files: <path>`).
+3. **No artifact can slip into a commit.** A listed commit that touches any path under `.superpowers/` is an invalid result (`commit includes superagent files: <path>`), and so is any other commit on the job branch since the base (the same text plus ` (commit <sha7> in <repoId>, already on the branch)`), so a follow-up commit does not hide one.
 4. **Tests are evidence, not deliverables.** Unless the job commits tests (see C), a worker saves each test it wrote, with its red and green runs, as an artifact and removes it from the repo before committing; a listed commit that touches a test path is an invalid result.
 5. **Rename at accept.** Accept takes an optional final branch name, pre-filled in the view from a per-project, per-workflow template, and renames the job branch in every repo before `job-accepted` is appended.
 
@@ -46,7 +46,7 @@ The 171558 branch was rebuilt by hand to match: `e098cabd1b3` holds only the `Fa
 - `reviseErrors` (528-554): keep "exists and non-empty"; drop the uncommitted-changes check for ledger jobs.
 - `taskEvidenceErrors` (444-466): the primary commit is no longer allowed "because the primary repo carries the report file"; a task needs at least one commit in one of its repos, as today (459), and the verify check (462).
 - Author and review purposes no longer need any commit (the artifact was their only change). `evidence.commits` may be empty or absent for them.
-- New check, for every job: each listed commit, `git diff-tree --no-commit-id --name-only -r <sha>`, must not touch `.superpowers/`.
+- New check, for every job: each listed commit, `git diff-tree -z -r --root --diff-merges=first-parent --no-commit-id --name-only <sha>` (a merge against its first parent), must not touch `.superpowers/`; the same check runs on every other commit in `<baseSha>..refs/heads/<branch>` of each repo, for every purpose. The invalid-result nudge then says to rewrite the offending commit (`git commit --amend` or `git reset --soft`), since a follow-up commit does not take it off the branch.
 - `tasksFileErrors` (610-620), `loadTasksStep` (`index.js:321-339`) and the headings check (`results.js:633-649`) already read the worktree file; they get the ledger path from `artifactPaths(job)` with no other change.
 
 **Readers.** No change beyond the paths: the job card passes paths (`prompts.js:163-207`); reviewer prompts say "read `target`"; `artifacts.js` reads the worktree file (the ledger is inside the primary worktree, so real-path containment holds) and falls back to the snapshot; accounting snapshots, retrospectives and `archiveLedger` (which now also carries the artifacts) are unchanged.
@@ -55,7 +55,7 @@ The 171558 branch was rebuilt by hand to match: `e098cabd1b3` holds only the `Fa
 
 ### B. Final branch name at accept
 
-**Template.** `config.json` gains `branchTemplates`, under `defaults` and `projects[<path>]`, keyed by workflow id (compared with `sameWorkflowId`), e.g.
+**Template.** `config.json` gains `branchTemplates`, under `defaults` and `projects[<path>]`, keyed by workflow id (compared case-insensitively; keys are lower-cased per layer before the merge, so a later layer's `Troubleshooting` replaces the built-in `troubleshooting`), e.g.
 
 ```json
 "projects": { "C:\\workspace\\git\\FallGuys": { "branchTemplates": { "troubleshooting": "bugfix/{ticket}-{description}" } } }
@@ -82,12 +82,12 @@ Placeholders: `{ticket}` (the first work-item number in the idea: a `_workitems/
 
 **Workers** (when `commitTests` is false):
 
-- `fixer.md` and `implementer.md`: write the failing test first and run it red, as today; make the fix and run it green; then copy each test file you created or changed to `tasks/<task>-tests/` under the artifact root (keeping its repo-relative path), record both runs in the task report, restore the test files in the repo to their state at the start of the attempt (delete new ones, `git restore` changed ones, by explicit path), and commit only the fix.
-- `fix-reviewer.md` and `task-reviewer.md`: judge red-then-green from the report's recorded runs and the saved test under `tasks/<task>-tests/`; a fix commit that adds or changes a test is a blocker.
+- `fixer.md` and `implementer.md`: write the failing test first and run it red, as today; make the fix and run it green; then copy each test file you created or changed to `tasks/<task>-tests/<repoId>/<repo-relative path>` under the artifact root (`<repoId>` is the repo's id on the card, so a test from an additional repo is put back into that repo), record both runs in the task report (the implementer only its `verify` run), restore the test files in the repo to their state at the start of the attempt (delete new ones, `git restore` changed ones, by explicit path), and commit only the fix. A change that makes an existing test fail or stop compiling updates that test, saves it like any changed test and lists it in the task report under `## Tests that need updating` (path and why); the tester and verifier-tester copy that list into the test report under the same heading, so the user sees it at ready-to-try.
+- `fix-reviewer.md` and `task-reviewer.md`: judge red-then-green from the report's recorded runs and the saved test under `tasks/<task>-tests/<repoId>/`; a fix commit that adds or changes a test is a blocker; a listed, uncommitted update under `## Tests that need updating` is not.
 - `contract.md` "Outputs": tests are not committed unless your card says `commitTests: true`.
 - When `commitTests` is true, today's prompts apply (the test is committed with the fix), except that artifacts are still never committed.
 
-**Engine.** For a job with `commitTests` false, each listed commit is checked with `git diff-tree --no-commit-id --name-only -r <sha>` against `testPaths`; a match is an invalid result, `commit includes test files: <path>`. A test the globs do not match is only covered by the prompt rule; the report names it.
+**Engine.** For a job with `commitTests` false, each listed commit, and every other commit on the job branch since the base, is checked with the same `diff-tree` as the `.superpowers/` check against `testPaths`; a match is an invalid result, `commit includes test files: <path>` (with the commit named for an unlisted one). A test the globs do not match is only covered by the prompt rule; the report names it.
 
 ## Compatibility
 
