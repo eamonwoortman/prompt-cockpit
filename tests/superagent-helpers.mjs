@@ -238,7 +238,15 @@ export function scriptedWorker({ factory, handlers }) {
 
   factory.registry.sendInput = async (id, text) => {
     await original(id, text);
-    if (!String(text).startsWith(CARD_HEADING)) return;
+    if (!String(text).startsWith(CARD_HEADING)) {
+      // A rejection nudge: this worker ignores it and ends its turn unchanged.
+      if (/^Your (`result\.json`|result) .*was rejected: /.test(String(text))) {
+        const impl = factory.impls.get(id);
+        impl.emitMessage({ type: 'result', subtype: 'success' });
+        impl.emitState('idle');
+      }
+      return;
+    }
     const card = parseCard(text);
     const entry = { card, body: null };
     log.push(entry);

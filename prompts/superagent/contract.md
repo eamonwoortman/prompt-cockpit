@@ -85,6 +85,8 @@ Do not start the next phase. Produce only the outputs named in the job card, and
 
 If the job card has a recovery note, an earlier attempt was interrupted. Follow the note: check each worktree's git status and log before repeating work, and continue from `handoff.md` in `previousAttemptDir` if it exists.
 
+If the job card has `previousFailure`, the previous attempt failed for that `reason`, and `detail` is the error it was given (for example the validator's rejection of its `result.json`). The previous attempt's own `result.json` may still say `done`; trust `previousFailure` over it, and fix the cause first.
+
 If the job card's `handoff` is set, read that file first and continue from the state it describes; check the worktrees' git status before trusting it.
 
 If the job card has a `retryNote`, the job was stuck and the user retried it with that note. It is the user's instruction for this attempt: it overrides the handoff, the previous attempt's plan and your own judgement where they conflict.

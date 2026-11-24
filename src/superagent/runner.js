@@ -4,8 +4,9 @@
 // Spec: docs/superpowers/specs/2026-11-03-superagent-design.md.
 // - Worker contract (completion detection): an attempt is finished when its
 //   turn has ended (row idle, nothing queued, a `result` seen since the last
-//   prompt) and result.json is read. A missing result gets one nudge; a second
-//   miss fails the attempt (turn-cap, invalid-result or no-result). No worker
+//   prompt) and result.json is read. A missing or rejected result gets one
+//   nudge (a rejected one with the validator's error); a second miss fails the
+//   attempt (turn-cap, invalid-result or no-result). No worker
 //   progress for limits.stallMinutes fails it as stalled; only PROGRESS_TYPES
 //   count as progress, so telemetry (rate-limit, status) cannot keep a dead
 //   worker alive.
@@ -55,7 +56,13 @@ import { defaultGit } from './worktree.js';
 
 export const PROGRESS_TYPES = new Set(['assistant', 'user', 'result']);
 
-const failed = (reason, detail) => ({ outcome: 'failed', reason, signature: failureSignature(reason, detail) });
+export const FAILURE_DETAIL_CHARS = 500;
+// The signature is normalised for repeated-error matching; `detail` keeps the
+// readable text so the router and the next attempt can see what went wrong.
+const failed = (reason, detail) => {
+  const text = String(detail ?? '').trim();
+  return { outcome: 'failed', reason, signature: failureSignature(reason, detail), ...(text && { detail: text.slice(0, FAILURE_DETAIL_CHARS) }) };
+};
 const messageOf = (err) => String(err?.message ?? err);
 const TOKEN_KEYS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'];
 const sumTokens = (totals) => (totals && TOKEN_KEYS.every((k) => Number.isFinite(totals[k])) ? TOKEN_KEYS.reduce((sum, k) => sum + totals[k], 0) : null);
@@ -260,8 +267,8 @@ export function createRunner({
     });
   }
 
-  async function nudge(live) {
-    const kind = live.lastResultSubtype === 'error_max_turns' ? 'turn-cap' : 'result';
+  async function nudge(live, rejected = null) {
+    const kind = rejected ? 'invalid-result' : live.lastResultSubtype === 'error_max_turns' ? 'turn-cap' : 'result';
     live.nudge = kind;
     try {
       await store.append(live.jobId, { type: 'attempt-nudged', attemptId: live.attemptId, kind });
@@ -273,7 +280,7 @@ export function createRunner({
       live.promptSeq = row.eventLog.nextSeq - 1;
       live.sawResult = false;
       try {
-        await registry.sendInput(row.id, nudgeText(kind, { dir: live.dir, readOnly: live.readOnly }));
+        await registry.sendInput(row.id, nudgeText(kind, { dir: live.dir, readOnly: live.readOnly, error: rejected?.detail ?? null }));
       } catch (err) {
         // Row gone: the removal path owns the attempt. Row still there: the
         // stall deadline ends it.
@@ -287,7 +294,7 @@ export function createRunner({
     await materialize(live);
     const verdict = await judge(live, store.get(live.jobId), contextOf(live));
     if (verdict.payload) return finish(live, verdict.payload);
-    if (verdict.invalid) return finish(live, verdict.invalid);
+    if (verdict.invalid) return live.nudge === null ? nudge(live, verdict.invalid) : finish(live, verdict.invalid);
     if (live.nudge === null) return nudge(live);
     if (live.sawMaxTurns) return finish(live, failed('turn-cap', 'turn limit reached'));
     if (verdict.read.state === 'unparseable') return finish(live, failed('invalid-result', verdict.read.error));

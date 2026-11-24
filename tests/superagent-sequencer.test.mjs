@@ -569,7 +569,7 @@ const decided = (forAttemptId, action, over = {}) => ({
   model: 'claude-haiku-5-5', request: { estimatedTokens: 900, truncated: [] }, usage: null, latencyMs: 10, ...over,
 });
 const routeOf = (over) => ({
-  type: 'route', task: null, round: null, alternate: null, previousDir: '/d', status: null, summary: null, question: null, ...over,
+  type: 'route', task: null, round: null, alternate: null, previousDir: '/d', status: null, summary: null, question: null, detail: null, ...over,
 });
 
 test('route: an eligible failure with no decision returns route', () => {
@@ -578,6 +578,12 @@ test('route: an eligible failure with no decision returns route', () => {
     forAttemptId: 'a1', phase: 'spec', role: 'spec-writer', purpose: 'author', model: 'claude-opus-5-5', lastModel: 'claude-opus-5-5',
     reason: 'invalid-result', signature: 'invalid-result|x', attemptsUsed: 1, attemptsLeft: 2,
   }));
+});
+
+test('route: the failed attempt\'s readable detail reaches the route action', () => {
+  const detail = 'tasks[0].id must be 1-12 letters, digits or hyphens, starting with a letter or digit: "fix-carry-init"';
+  const job = build(...authorFail('a1', 'invalid-result', { detail }));
+  assert.equal(nextAction(job, routing()).detail, detail);
 });
 
 test('route: lastModel is the failed attempt\'s own model, not the role default', () => {

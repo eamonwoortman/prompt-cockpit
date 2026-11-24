@@ -316,6 +316,7 @@ function routeOrApply(job, ctx, { last, role, launchArgs, stuck }) {
       summary: last.summary,
       question: last.question,
       signature: last.signature,
+      detail: last.detail ?? null,
       attemptsUsed: used,
       attemptsLeft: attemptCap(job.limits, task) - used,
     };

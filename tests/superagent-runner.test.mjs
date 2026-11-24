@@ -620,6 +620,73 @@ test('hitting maxTurns asks for handoff.md and ends as turn-cap', async () => {
   } finally { registry._reset(); }
 });
 
+test('a rejected result is nudged once with the validator\'s error, and a corrected result is accepted', async () => {
+  registry._reset();
+  try {
+    const { store, job, events, ended } = await setup();
+    const { registry: reg, impls } = sessionFactory(registry);
+    const runner = createRunner({ registry: reg, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    registry.addSessionRemovedListener(runner.onSessionRemoved);
+    await runner.launch(job, launchAction());
+    const attempt = lastAttempt(store, job.jobId);
+    const impl = impls.get(attempt.sessionId);
+    await writeValidResult(job, attempt, { status: 'finished' });
+    endTurn(impl);
+    await runner.review(job);
+    assert.deepEqual((await events()).filter((e) => e.type === 'attempt-nudged').map((e) => e.kind), ['invalid-result']);
+    assert.equal(impl.lastInput, nudgeText('invalid-result', { dir: attempt.dir, error: 'status must be one of done|blocked|failed' }));
+    assert.match(impl.lastInput, /was rejected: status must be one of done\|blocked\|failed/);
+    assert.deepEqual(await ended(), [], 'the attempt stays live after the nudge');
+    await writeValidResult(job, attempt);
+    endTurn(impl);
+    await runner.review(job);
+    await runner.drain();
+    assert.deepEqual((await ended()).map((e) => e.outcome), ['done']);
+  } finally { registry._reset(); }
+});
+
+test('a result still rejected after the nudge ends invalid-result with its readable detail', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended } = await setup();
+    const { registry: reg, impls } = sessionFactory(registry);
+    const runner = createRunner({ registry: reg, store, results, now: () => T0, idImpl: ids(), logImpl: quiet });
+    registry.addSessionRemovedListener(runner.onSessionRemoved);
+    await runner.launch(job, launchAction());
+    const attempt = lastAttempt(store, job.jobId);
+    const impl = impls.get(attempt.sessionId);
+    await writeValidResult(job, attempt, { status: 'finished' });
+    endTurn(impl);
+    await runner.review(job);
+    endTurn(impl);
+    await runner.review(job);
+    await runner.drain();
+    const ends = await ended();
+    assert.equal(ends.length, 1);
+    assert.deepEqual([ends[0].outcome, ends[0].reason, ends[0].detail], ['failed', 'invalid-result', 'status must be one of done|blocked|failed']);
+    assert.equal(lastAttempt(store, job.jobId).detail, 'status must be one of done|blocked|failed');
+  } finally { registry._reset(); }
+});
+
+test('a rejected stand-in reply is nudged with the error, then fails invalid-result', async () => {
+  registry._reset();
+  try {
+    const { store, job, ended, events, factory, runner } = await standInSetup();
+    await runner.launch(job, standInAction());
+    const attempt = lastAttempt(store, job.jobId);
+    const impl = factory.impls.get(attempt.sessionId);
+    reply(impl, JSON.stringify(answerBody({ status: 'finished' })));
+    await runner.review(job);
+    assert.deepEqual((await events()).filter((e) => e.type === 'attempt-nudged').map((e) => e.kind), ['invalid-result']);
+    assert.equal(impl.lastInput, nudgeText('invalid-result', { dir: attempt.dir, readOnly: true, error: 'status must be one of done|blocked|failed' }));
+    reply(impl, JSON.stringify(answerBody({ status: 'finished' })));
+    await runner.review(job);
+    await runner.drain();
+    const ends = await ended();
+    assert.deepEqual([ends.length, ends[0].reason], [1, 'invalid-result']);
+  } finally { registry._reset(); }
+});
+
 test('a silent attempt is closed as stalled after stallMinutes', async () => {
   registry._reset();
   try {
@@ -880,9 +947,16 @@ async function runLive(g, action, makeResult) {
   assert.ok(launched.attemptId, JSON.stringify(launched));
   const attempt = lastAttempt(g.store, g.jobId);
   await g.publish(attempt, await makeResult(attempt));
-  endTurn(impls.get(attempt.sessionId));
+  const impl = impls.get(attempt.sessionId);
+  endTurn(impl);
   await runner.review(g.store.get(g.jobId));
   await runner.drain();
+  // A rejected result is nudged once; this worker ignores the nudge.
+  if (lastAttempt(g.store, g.jobId).nudges.some((n) => n.kind === 'invalid-result')) {
+    endTurn(impl);
+    await runner.review(g.store.get(g.jobId));
+    await runner.drain();
+  }
   return lastAttempt(g.store, g.jobId);
 }
 

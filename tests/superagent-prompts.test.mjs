@@ -84,6 +84,25 @@ test('the job card carries every field and the recovery note only on retries', a
   const rc = parseCard((await buildWorkerPrompt({ role: 'spec-writer', job: retry.job, phase: retry.phase, attempt: retry.attempt, projectDir: retry.emptyDir })).card);
   assert.equal(rc.recoveryNote, RECOVERY_NOTE);
   assert.equal(rc.previousAttemptDir, a1Dir);
+  assert.equal('previousFailure' in rc, false, 'an unfinished previous attempt has no failure to report');
+});
+
+test('a recovery card carries the previous attempt\'s failure reason and readable detail', async () => {
+  const { phase } = await fixture();
+  const detail = 'tasks[0].id must be 1-12 letters, digits or hyphens, starting with a letter or digit: "fix-carry-init"';
+  const startedA1 = { type: 'attempt-started', attemptId: 'a1', phase: phase.phase, task: null, role: phase.role, model: 'm', n: 1, dir: '/d/a1' };
+  const endedA1 = { type: 'attempt-ended', attemptId: 'a1', outcome: 'failed', reason: 'invalid-result', signature: 'invalid-result|x', detail };
+  const retry = await fixture({ recovery: true, previousAttemptId: 'a1' }, [startedA1, endedA1]);
+  const rc = parseCard((await buildWorkerPrompt({ role: 'spec-writer', job: retry.job, phase: retry.phase, attempt: retry.attempt, projectDir: retry.emptyDir })).card);
+  assert.deepEqual(rc.previousFailure, { reason: 'invalid-result', detail });
+});
+
+test('the invalid-result nudge carries the validator\'s error; the turn-cap nudge lets a nearly finished worker finish', async () => {
+  const { attempt: a } = await fixture();
+  const n = nudgeText('invalid-result', { dir: a.dir, error: 'tasks[0].id must be 1-12 letters' });
+  assert.ok(n.includes(a.dir) && n.includes('was rejected: tasks[0].id must be 1-12 letters') && n.includes('result.json.tmp'));
+  assert.match(nudgeText('invalid-result', { dir: a.dir, readOnly: true, error: 'bad status' }), /^Your result was rejected: bad status\n.*final message/);
+  assert.match(nudgeText('turn-cap', a), /If only writing and committing your outputs remains.*status: done/);
 });
 
 test('the job card inputs and outputs follow the current phase', async () => {
@@ -291,6 +310,9 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   await has('implementer.md', 'evidence.checks', 'exit code', 'check `git status` and `git log` before repeating work');
   await has('task-reviewer.md', 'taskCommits', 'git show', 'read-only');
   await has('tester.md', 'effectiveTasks', 'How to try it', 'status: failed', '`repo`', 'never edit code');
+  for (const f of ['tester.md', 'verifier-tester.md']) await has(f, '"How to try it" section for a person (see the contract)');
+  await has('verifier-tester.md', 'unit tests do not replace it', 'full test suite only when a task or the idea asks for it', 'publish `blocked` only after trying');
+  await has('contract.md', 'Never start a second copy of a command that may still be running', 'stop everything you started that still runs', '`Repro Steps`', '`Agent repro`', 'paths under `.superpowers/`');
   await has('verifier.md', 'contested', 'verified', 'read-only');
   for (const f of ['planner', 'spec-reviewer', 'plan-reviewer', 'implementer', 'task-reviewer', 'tester', 'verifier', 'spec-writer']) await has(`${f}.md`, 'Do not edit files outside your listed outputs and the code your task owns');
   for (const f of ['spec-reviewer.md', 'plan-reviewer.md', 'task-reviewer.md']) await has(f, '"disposition": "open"');
@@ -310,9 +332,6 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   const purposeLine = (p) => contract.split(/\r?\n/).find((l) => l.startsWith(`- \`${p}\`:`));
   for (const p of ['review', 'test']) assert.ok(purposeLine(p).includes('`severity` (`blocker`, `major` or `minor`)'), `contract ${p} line lists severities`);
   assert.ok(purposeLine('fix').includes('`reviewFindings`'), 'contract fix line names reviewFindings');
-  for (const f of ['tester.md', 'verifier-tester.md']) await has(f, '"How to try it" section for a person (see the contract)');
-  await has('verifier-tester.md', 'unit tests do not replace it', 'full test suite only when a task or the idea asks for it', 'publish `blocked` only after trying');
-  await has('contract.md', 'Never start a second copy of a command that may still be running', 'stop everything you started that still runs', '`Repro Steps`', '`Agent repro`', 'paths under `.superpowers/`');
 });
 
 const REVIEW_FINDINGS = [{ id: 'B1', severity: 'blocker', text: 'no rollback' }, { id: 'M1', severity: 'minor', text: 'nit' }];

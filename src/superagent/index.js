@@ -455,6 +455,7 @@ export function createSuperagent({
         summary: action.summary,
         question: action.question,
         signature: action.signature,
+        detail: action.detail ?? null,
         attemptsUsed: action.attemptsUsed,
         attemptsLeft: action.attemptsLeft,
         allowed,
