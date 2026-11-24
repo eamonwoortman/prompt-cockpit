@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { tempDir, initRepo, provisionedEvents } from './superagent-helpers.mjs';
-import { slugify, createWorktree } from '../src/superagent/worktree.js';
+import { slugify, createWorktree, defaultGit } from '../src/superagent/worktree.js';
 import { deriveJob } from '../src/superagent/store.js';
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import {
-  ANSWER_TAGS, BRAINSTORM_BATCH, BRIEF_HEADINGS, RESULT_FILE, artifactPaths, attemptDir, headingErrors, ledgerArtifactRoot, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
+  ANSWER_TAGS, BRAINSTORM_BATCH, BRIEF_HEADINGS, RESULT_FILE, artifactPaths, attemptDir, commitPathErrors, headingErrors, ledgerArtifactRoot, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
 } from '../src/superagent/results.js';
 
 const JOB_ID = '12345678-aaaa-bbbb-cccc-000000000000';
@@ -23,6 +24,12 @@ async function commitFile(cwd, rel, content, message) {
   git(cwd, 'add', '--', rel);
   git(cwd, 'commit', '-q', '-m', message);
   return git(cwd, 'rev-parse', 'HEAD');
+}
+
+async function writeAt(cwd, rel, content) {
+  const abs = path.join(cwd, ...rel.split('/'));
+  await fs.mkdir(path.dirname(abs), { recursive: true });
+  await fs.writeFile(abs, content);
 }
 
 async function writeResult(dir, value) {
@@ -649,10 +656,11 @@ test('a planner fix that leaves a cyclic tasks.json is invalid-result (review-ph
   assert.equal(valid.ok, true, JSON.stringify(valid.errors));
 });
 
-async function implementFixture() {
-  const f = await fixture({ pipeline: MILESTONE_2_PIPELINE, extraRepos: ['lib'] });
+async function implementFixture({ created } = {}) {
+  const ledger = created?.artifactRoot === 'ledger';
+  const f = await fixture({ pipeline: MILESTONE_2_PIPELINE, extraRepos: ['lib'], commitSpec: !ledger, created });
   const report = reviewPaths(f.job, { taskId: 'T1' }).report;
-  const reportSha = await f.commit(report, '# T1 report\n');
+  const reportSha = ledger ? (await writeAt(f.worktree, report, '# T1 report\n'), null) : await f.commit(report, '# T1 report\n');
   const primary = (sha) => ({ repo: 'primary', sha });
   const lib = (sha) => ({ repo: 'lib', sha });
   const result = (commits, checks = [{ cmd: 'npm test', exit: 0 }], over = {}) => f.goodResult({
@@ -1017,4 +1025,98 @@ test('reviewPaths uses the ledger root for a ledger job', () => {
   assert.equal(paths.report, `${root}/tasks/T1-report.md`);
   const legacy = reviewPaths(deriveJob(provisionedEvents()), { phase: 'spec-review', round: 2, taskId: 'T1' });
   assert.equal(legacy.review, 'docs/superpowers/jobs/add-hello/reviews/spec-review-r2.md');
+});
+
+const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+const LEDGER = { artifactRoot: 'ledger' };
+
+test('ledger author output passes uncommitted with no commits', async () => {
+  const f = await fixture({ commitSpec: false, created: LEDGER });
+  const rel = artifactPaths(f.job).spec;
+  assert.ok(rel.startsWith(`${ledgerArtifactRoot(JOB_ID)}/`), rel);
+  await writeAt(f.worktree, rel, '# Hello design\n');
+  for (const evidence of [{ checks: [] }, undefined]) {
+    const v = await f.check(f.goodResult({ evidence }), { attempt: { purpose: 'author' } });
+    assert.equal(v.ok, true, JSON.stringify(v.errors));
+    assert.deepEqual(v.result.outputs, { [rel]: sha256('# Hello design\n') });
+    assert.deepEqual(v.result.commits, []);
+  }
+});
+
+test('ledger author output still must exist and be non-empty', async () => {
+  const f = await fixture({ commitSpec: false, created: LEDGER });
+  const rel = artifactPaths(f.job).spec;
+  const missing = await f.check(f.goodResult({ evidence: {} }), { attempt: { purpose: 'author' } });
+  assert.deepEqual(missing, { ok: false, errors: [`missing output: ${rel}`] });
+  await writeAt(f.worktree, rel, '');
+  const empty = await f.check(f.goodResult({ evidence: {} }), { attempt: { purpose: 'author' } });
+  assert.deepEqual(empty, { ok: false, errors: [`empty output: ${rel}`] });
+});
+
+test('a legacy job records output hashes too; a result without outputs records none', async () => {
+  const f = await fixture();
+  const ok = await f.check(f.goodResult());
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  assert.deepEqual(ok.result.outputs, { [artifactPaths(f.job).spec]: sha256('# Hello design\n') });
+  const failed = await f.check(f.goodResult({ status: 'failed' }));
+  assert.equal(failed.ok, true, JSON.stringify(failed.errors));
+  assert.deepEqual(failed.result.outputs, {});
+});
+
+test('review fix with no commits passes for a ledger job', async () => {
+  const f = await reviewFixture({ commitSpec: false, created: LEDGER });
+  await writeAt(f.worktree, artifactPaths(f.job).spec, '# Hello design\n');
+  await writeAt(f.worktree, f.paths.response, '# response\n');
+  const declined = { findings: [finding('F1', 'major', 'declined: not needed')] };
+  const v = await f.check(f.result(f.paths.response, null, declined), f.as({ purpose: 'fix', reviewFindings: ['F1'] }));
+  assert.equal(v.ok, true, JSON.stringify(v.errors));
+  assert.deepEqual(v.result.outputs, { [f.paths.response]: sha256('# response\n') });
+});
+
+test('primary-only commit no longer passes for a non-primary task', async () => {
+  const f = await implementFixture({ created: LEDGER });
+  const codeSha = await f.commitIn('primary', 'src/hello.js');
+  const v = await f.check(f.result([f.primary(codeSha)]), f.as({ repos: ['lib'] }));
+  assert.equal(v.ok, false);
+  assert.deepEqual(v.errors, [
+    'evidence.commits[0]: repo "primary" is not one of the task\'s repos (lib)',
+    'evidence.commits must include a commit in one of the task\'s repos (lib)',
+  ]);
+  const libSha = await f.commitIn('lib', 'lib.js');
+  const ok = await f.check(f.result([f.lib(libSha)]), f.as({ repos: ['lib'] }));
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  assert.deepEqual(ok.result.outputs, { [f.report]: sha256('# T1 report\n') });
+});
+
+async function commitSuperagentFile(worktree, rel) {
+  await writeAt(worktree, rel, 'x\n');
+  git(worktree, 'add', '-f', '--', rel);
+  git(worktree, 'commit', '-q', '-m', 'superagent file');
+  return git(worktree, 'rev-parse', 'HEAD');
+}
+
+test('rejects a commit that touches .superpowers', async () => {
+  const rel = '.superpowers/superagent/x/artifacts/a.md';
+  const legacy = await fixture();
+  const ls = await commitSuperagentFile(legacy.worktree, rel);
+  const vl = await legacy.check(legacy.goodResult({ evidence: { commits: [legacy.specSha, ls] } }));
+  assert.deepEqual(vl, { ok: false, errors: [`commit includes superagent files: ${rel}`] });
+
+  const ledger = await fixture({ commitSpec: false, created: LEDGER });
+  await writeAt(ledger.worktree, artifactPaths(ledger.job).spec, '# Hello design\n');
+  const ds = await commitSuperagentFile(ledger.worktree, rel);
+  const vd = await ledger.check(ledger.goodResult({ evidence: { commits: [ds] } }), { attempt: { purpose: 'author' } });
+  assert.deepEqual(vd, { ok: false, errors: [`commit includes superagent files: ${rel}`] });
+});
+
+test('commitPathErrors names the first superagent path of each commit and passes clean commits', async () => {
+  const f = await fixture();
+  const files = ['.superpowers/superagent/x/a.md', '.superpowers/superagent/x/b.md', 'src/c.js'];
+  for (const rel of files) await writeAt(f.worktree, rel, `${rel}\n`);
+  git(f.worktree, 'add', '-f', '--', ...files);
+  git(f.worktree, 'commit', '-q', '-m', 'mixed');
+  const mixed = git(f.worktree, 'rev-parse', 'HEAD');
+  const commits = [{ repo: 'primary', sha: f.specSha }, { repo: 'primary', sha: mixed }];
+  assert.deepEqual(await commitPathErrors(commits, { job: f.job, git: defaultGit }), ['commit includes superagent files: .superpowers/superagent/x/a.md']);
+  assert.deepEqual(await commitPathErrors([commits[0]], { job: f.job, git: defaultGit }), []);
 });

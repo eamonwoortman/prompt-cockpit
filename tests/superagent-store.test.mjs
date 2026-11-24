@@ -368,6 +368,14 @@ test('attempt-ended carries brainstorm fields and tokens', () => {
   assert.deepEqual([a2.questions, a2.answers, a2.escalated, a2.tokens], [null, null, null, null]);
 });
 
+test('attempt-ended keeps outputs', () => {
+  const outputs = { 'docs/spec.md': 'ab'.repeat(32) };
+  const job = deriveJob(m2(started('a1', 'spec'), ended('a1', 'done', { outputs }), started('a2', 'spec'), ended('a2')));
+  const [a1, a2] = job.attempts;
+  assert.deepEqual(a1.outputs, outputs);
+  assert.deepEqual(a2.outputs, {});
+});
+
 test('a brainstorm phase advances only on an ask with no questions', () => {
   const pipeline = defaultConfig().pipeline;
   const run = (...more) => deriveJob(stamp([jobCreated({ pipeline }), { type: 'job-provisioned' }, ...more]));

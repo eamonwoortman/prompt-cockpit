@@ -230,6 +230,7 @@ export function createRunner({
         summary: r.summary,
         artifacts: r.artifacts,
         commits: r.commits ?? [],
+        outputs: r.outputs ?? {},
         question: r.question ?? null,
         verdict: r.verdict ?? null,
         findings: r.findings ?? null,

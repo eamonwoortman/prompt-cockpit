@@ -9,12 +9,15 @@
 // and revise outputs and implement evidence, selected by the optional
 // `attempt` passed to validateResult. Plan 5 decisions 4 and 11 add the
 // brainstorm's `ask` and `answer` purposes and the brief headings check.
+// A ledger job's outputs are never committed: they only have to exist, their
+// SHA-256 is recorded, and no listed commit may touch `.superpowers/`.
 //
 // Everything in result.json is untrusted worker output. Identity is compared
 // field by field against the attempt that was launched, so a result copied
 // forward from an earlier attempt never counts. Commit shas must be plain hex
 // before they reach git (no option injection), and every commit must be on
 // the job branch but not reachable from the repo's base commit.
+import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { isSafeSessionId } from '../safe-id.js';
@@ -442,9 +445,9 @@ const isTaskWork = (attempt) => attempt.purpose === 'implement' || (attempt.purp
 const normalizeCmd = (cmd) => cmd.trim().replace(/\s+/g, ' ');
 
 // Decision 17. Runs only on well-formed evidence, so commit indexes line up
-// with evidence.commits. The primary repo carries the report file, so a
-// primary commit is always allowed but only counts as code evidence when the
-// task lists primary.
+// with evidence.commits. In a legacy job the primary repo carries the report
+// file, so a primary commit is always allowed but only counts as code
+// evidence when the task lists primary.
 function taskEvidenceErrors(value, { attempt, job, commits }) {
   if (value.status !== 'done') return [];
   const { taskDef } = attempt;
@@ -453,10 +456,10 @@ function taskEvidenceErrors(value, { attempt, job, commits }) {
   }
   if (commits.length === 0) return ['evidence.commits must list at least one commit'];
   const errors = [];
-  const primary = primaryRepo(job).id;
+  const reportRepo = job.artifactRoot === 'ledger' ? null : primaryRepo(job).id;
   const repos = taskDef.repos;
   commits.forEach(({ repo }, i) => {
-    if (repo !== primary && !repos.includes(repo)) {
+    if (repo !== reportRepo && !repos.includes(repo)) {
       errors.push(`evidence.commits[${i}]: repo ${JSON.stringify(repo)} is not one of the task's repos (${repos.join(', ')})`);
     }
   });
@@ -529,8 +532,33 @@ async function resolveCommits(commits, { job, git }) {
   return { errors, resolved };
 }
 
+// Spec A: a listed commit may not carry superagent files.
+export async function commitPathErrors(commits, { job, git }) {
+  const errors = [];
+  for (const { repo: repoId, sha } of commits) {
+    const repo = job.repos.find((r) => r.id === repoId);
+    if (!repo?.worktree) {
+      errors.push(`repo ${repoId} has no worktree to check commit ${sha}`);
+      continue;
+    }
+    const res = await git(['diff-tree', '--no-commit-id', '--name-only', '-r', sha], { cwd: repo.worktree });
+    if (res.code !== 0) {
+      errors.push(`could not list the files of commit ${sha} in ${repoId}`);
+      continue;
+    }
+    for (const file of res.stdout.split(/\r?\n/)) {
+      if (file.startsWith('.superpowers/')) {
+        errors.push(`commit includes superagent files: ${file}`);
+        break;
+      }
+    }
+  }
+  return errors;
+}
+
 // Decision 16: the author may decline every finding, so the revised artifacts
-// need only exist, be non-empty and be clean; no commit has to touch them.
+// need only exist, be non-empty and (in a legacy job) be clean; no commit has
+// to touch them.
 async function reviseErrors({ phase, job, git }) {
   const errors = [];
   const primary = primaryRepo(job);
@@ -550,6 +578,7 @@ async function reviseErrors({ phase, job, git }) {
       errors.push(`empty revised output: ${rel}`);
       continue;
     }
+    if (job.artifactRoot === 'ledger') continue;
     const status = await git(['status', '--porcelain', '--', rel], { cwd: primary.worktree });
     if (status.code !== 0) errors.push(`could not check revised output status: ${rel}`);
     else if (status.stdout.trim() !== '') errors.push(`revised output has uncommitted changes: ${rel}`);
@@ -559,6 +588,7 @@ async function reviseErrors({ phase, job, git }) {
 
 async function outputErrors({ phase, job, commits, git, attempt }) {
   const errors = [];
+  const outputs = {};
   const primary = primaryRepo(job);
   const paths = artifactPaths(job);
   const required = attempt
@@ -578,14 +608,17 @@ async function outputErrors({ phase, job, commits, git, attempt }) {
       errors.push(`unknown output ${JSON.stringify(key)}`);
       continue;
     }
+    const abs = path.join(primary.worktree, ...rel.split('/'));
     let info;
     try {
-      info = await stat(path.join(primary.worktree, ...rel.split('/')));
+      info = await stat(abs);
     } catch {
       errors.push(`missing output: ${rel}`);
     }
     if (info && !info.isFile()) errors.push(`output is not a file: ${rel}`);
     else if (info && info.size === 0) errors.push(`empty output: ${rel}`);
+    else if (info) outputs[rel] = createHash('sha256').update(await readFile(abs)).digest('hex');
+    if (job.artifactRoot === 'ledger') continue;
     let committed = false;
     for (const sha of primaryShas) {
       if ((await filesIn(sha)).includes(rel)) {
@@ -606,7 +639,7 @@ async function outputErrors({ phase, job, commits, git, attempt }) {
   const publishesTasks = (attempt?.purpose === 'author' && (phase?.outputs ?? []).includes('tasks'))
     || (reviewFix && reviseOutputs(job, phase).includes(paths.tasks));
   if (publishesTasks && errors.length === 0) errors.push(...(await tasksFileErrors(job)));
-  return errors;
+  return { errors, outputs };
 }
 
 // Decision 5: a tasks.json that would deadlock the implement phase is refused
@@ -670,10 +703,14 @@ export async function validateResult(value, { expected, phase, job, git = defaul
 
   const { errors: commitErrors, resolved } = await resolveCommits(schema.commits, { job, git });
   if (commitErrors.length) return { ok: false, errors: commitErrors };
+  const pathErrors = await commitPathErrors(resolved, { job, git });
+  if (pathErrors.length) return { ok: false, errors: pathErrors };
 
+  let outputs = {};
   if (value.status === 'done' && !asksQuestions(value, attempt)) {
-    const missing = await outputErrors({ phase, job, commits: resolved, git, attempt });
-    if (missing.length) return { ok: false, errors: missing };
+    const checked = await outputErrors({ phase, job, commits: resolved, git, attempt });
+    if (checked.errors.length) return { ok: false, errors: checked.errors };
+    outputs = checked.outputs;
     const key = headingsTarget(job, phase, attempt);
     const headings = key ? await artifactHeadingErrors(job, key) : [];
     if (headings.length) return { ok: false, errors: headings };
@@ -681,7 +718,7 @@ export async function validateResult(value, { expected, phase, job, git = defaul
 
   return {
     ok: true,
-    result: { ...structuredClone(value), summary: truncateSummary(value.summary), question: value.question ?? null, commits: resolved },
+    result: { ...structuredClone(value), summary: truncateSummary(value.summary), question: value.question ?? null, commits: resolved, outputs },
   };
 }
 
