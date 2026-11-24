@@ -102,25 +102,35 @@ function clockText(ms) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// The router log: one small card per decision, newest last as persisted.
-// `attempts` names the scope each decision routed.
+const ROUTER_ACTION = {
+  retry: ['Retry', 'Run the step again on the same model.'],
+  'retry-alternate': ['Retry on alternate model', "Run the step again on the role's alternate model."],
+  'retry-handoff': ['Retry from handoff', "Run the step again, continuing from the failed attempt's handoff.md."],
+  escalate: ['Escalate to you', 'Stop retrying and ask you.'],
+};
+
+// The router log: one card per decision, newest last as persisted: the action
+// and time, the attempt it routed (from `attempts`), the router's reason, then
+// model and cost.
 export function renderRouterLog(router, attempts = []) {
   const list = el('ul', 'sa-list sa-router-log');
   for (const d of router?.decisions ?? []) {
     const item = el('li', 'sa-router-card');
     const head = item.appendChild(el('div', 'sa-router-head'));
-    head.append(el('span', `sa-badge router-${d.ok ? 'ok' : 'error'}`, d.ok ? d.action : 'error'));
+    const [label, explain] = d.ok ? ROUTER_ACTION[d.action] ?? [d.action, ''] : ['Router error', 'The router call failed, so the step was escalated.'];
+    const badge = head.appendChild(el('span', `sa-badge router-${d.ok ? d.action : 'error'}`, label));
+    if (explain) badge.title = explain;
+    if (d.at != null) head.append(el('span', 'sa-router-time', clockText(d.at)));
     const a = attempts.find((x) => x.attemptId === d.forAttemptId);
     const scope = a
       ? `${scopeLabel(a.phase, a.task)} · attempt ${a.n}${a.outcome ? ` ${a.outcome}` : ''}`
       : `attempt ${String(d.forAttemptId).slice(0, 8)}`;
-    head.append(el('span', 'sa-router-scope', scope));
-    const facts = head.appendChild(el('span', 'sa-router-facts'));
-    if (d.model) facts.append(el('span', null, shortModel(d.model)));
-    facts.append(moneySpan('sa-router-cost', d.cost ?? { usd: null, complete: false }, 'This decision has no recorded cost.'));
-    if (d.at != null) facts.append(el('span', null, clockText(d.at)));
+    item.append(el('div', 'sa-router-scope', `After ${scope}`));
     const note = d.ok ? d.note : `error: ${d.error ?? 'unknown'}`;
     if (note) item.appendChild(el('div', 'sa-router-note sa-markdown markdown-body')).append(markdown(note));
+    const facts = item.appendChild(el('div', 'sa-router-facts'));
+    if (d.model) facts.append(`${shortModel(d.model)} · `);
+    facts.append('cost ', moneySpan('sa-router-cost', d.cost ?? { usd: null, complete: false }, 'This decision has no recorded cost.'));
     list.append(item);
   }
   if (!list.children.length) list.append(el('li', 'sa-placeholder', 'No decisions yet.'));

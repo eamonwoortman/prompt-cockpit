@@ -484,7 +484,7 @@ test('Inspect is disabled without a transcript unless the attempt is live, and c
   assert.deepEqual(inspected, ['ok', 'live']);
 });
 
-test('the router log is one card per decision: action badge, scope, model, cost, time and note; no cost shows not available', () => {
+test('the router log is one card per decision: action label, time, scope, note, model and cost; no cost shows not available', () => {
   const at = new Date(2026, 10, 19, 14, 5).getTime();
   const router = {
     decisions: [
@@ -497,13 +497,14 @@ test('the router log is one card per decision: action badge, scope, model, cost,
   const list = renderRouterLog(router, attempts);
   const cards = list.querySelectorAll('.sa-router-card');
   assert.equal(cards.length, 3);
-  assert.equal(cards[0].querySelector('.sa-badge').textContent, 'retry');
+  assert.equal(cards[0].querySelector('.sa-badge').textContent, 'Retry');
   const first = cards[0].textContent;
-  for (const part of ['fix / T1 · attempt 2 failed', 'haiku-5-5', '$0.01', '14:05', 'transient']) assert.ok(first.includes(part), `${part} in ${first}`);
+  for (const part of ['After fix / T1 · attempt 2 failed', 'haiku-5-5', 'cost $0.01', '14:05', 'transient']) assert.ok(first.includes(part), `${part} in ${first}`);
   assert.equal(cards[0].querySelectorAll('.sa-link-chip').length, 1);
-  assert.ok(cards[1].textContent.includes('not available'));
+  assert.equal(cards[1].querySelector('.sa-badge').textContent, 'Escalate to you');
+  assert.ok(cards[1].textContent.includes('cost not available'));
   assert.ok(!cards[1].textContent.includes('$0'));
-  assert.equal(cards[2].querySelector('.sa-badge').textContent, 'error');
+  assert.equal(cards[2].querySelector('.sa-badge').textContent, 'Router error');
   assert.ok(cards[2].textContent.includes('attempt zzzzzzzz'));
   assert.ok(cards[2].textContent.includes('error: timeout <b>x</b>'));
   assert.equal(renderRouterLog({ decisions: [] }).querySelectorAll('.sa-placeholder').length, 1);

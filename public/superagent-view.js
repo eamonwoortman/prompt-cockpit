@@ -674,7 +674,7 @@ export function initSuperagentView() {
   const rightError = right.appendChild(el('div', 'sa-error'));
   rightError.hidden = true;
   const needsYouBox = right.appendChild(el('div'));
-  const routerBox = right.appendChild(el('div'));
+  const routerBox = right.appendChild(el('div', 'sa-router'));
   let needsYouShown = null;
 
   function renderNotifyControl() {
@@ -804,11 +804,13 @@ export function initSuperagentView() {
     if (status?.router === 'off') box.append(el('div', 'sa-muted', 'Router off: no apiKeyHelper'));
     const router = detail?.router;
     if (router && (status?.router !== 'off' || router.decisions.length)) {
-      const limit = router.maxInputTokens ?? '?';
-      box.append(el('div', null, `${router.model ?? '—'} · ${router.calls} call${router.calls === 1 ? '' : 's'}`));
-      box.append(el('div', 'sa-muted', `Last request: ${router.lastRequestTokens ?? '—'} / ${limit} tokens`));
-      const log = renderRouterLog(router, detail.attempts);
-      box.append(log);
+      box.append(el('p', 'sa-note', 'Decides what happens after a step fails: retry it or ask you.'));
+      const facts = box.appendChild(el('dl', 'sa-router-summary'));
+      const fact = (term, value) => facts.append(el('dt', null, term), el('dd', null, value));
+      fact('Model', router.model ?? '—');
+      fact('Calls', String(router.calls));
+      fact('Last request', `${router.lastRequestTokens ?? '—'} of ${router.maxInputTokens ?? '?'} tokens allowed`);
+      box.append(renderRouterLog(router, detail.attempts));
     }
     routerBox.append(box);
   }

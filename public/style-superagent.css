@@ -337,11 +337,20 @@ body.view-superagent #superagentView {
 .sa-notify { margin-bottom: 10px; }
 .sa-needs-you { display: flex; flex-direction: column; gap: 6px; }
 .sa-reason { font-weight: 600; color: var(--warn); }
-.sa-router-log li { font-size: 12px; }
-.sa-router-card { padding: 8px; margin-bottom: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; }
-.sa-router-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; }
-.sa-router-facts { display: inline-flex; gap: 8px; color: var(--muted); margin-left: auto; }
-.sa-router-note { margin-top: 4px; max-width: none; }
+.sa-router { margin-top: 20px; padding-top: 2px; border-top: 1px solid var(--border); }
+.sa-router .sa-note { margin: 0 0 8px; }
+.sa-router-summary { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 12px; font-size: 12px; }
+.sa-router-summary dt { color: var(--muted); }
+.sa-router-summary dd { margin: 0; overflow-wrap: anywhere; }
+.sa-router-log { display: flex; flex-direction: column; gap: 8px; }
+.sa-router-log > li.sa-router-card { padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; }
+.sa-router-head { display: flex; align-items: center; gap: 8px; }
+.sa-router-time { margin-left: auto; color: var(--muted); font-size: 12px; }
+.sa-router-scope { margin-top: 6px; font-size: 12px; font-weight: 600; }
+.sa-router-note { margin-top: 4px; max-width: none; font-size: 13px; }
+.sa-router-facts { margin-top: 8px; color: var(--muted); font-size: 11px; }
+.sa-badge.router-retry, .sa-badge.router-retry-alternate, .sa-badge.router-retry-handoff { color: var(--accent); }
+.sa-badge.router-escalate { color: var(--warn); }
 .sa-badge.router-error { color: var(--error); }
 
 #superagentArtifactModal .modal-box { width: min(1100px, 94vw); }
