@@ -867,7 +867,7 @@ export function createSuperagent({
     return wanted;
   }
 
-  async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null, workflow = null, inPlace = [] }) {
+  async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null, workflow = null, inPlace = [], commitTests }) {
     const origin = path.resolve(primaryPath);
     const resolved = config.resolve(origin);
     const { pipeline, models, recorded } = await resolvePipeline(resolved, { fixture, workflow }, origin);
@@ -880,14 +880,14 @@ export function createSuperagent({
     const marked = folders.map((repo) => ({ ...repo, inPlace: inPlaceSet.has(repo.origin) }));
     reserve(jobId, marked.map((repo) => ({ key: normaliseTop(repo.origin, platform), folder: repo.origin, inPlace: repo.inPlace })));
     try {
-      return await admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved });
+      return await admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests });
     } finally {
       if (store.get(jobId)) releaseIfFinished(jobId);
       else release(jobId);
     }
   }
 
-  async function admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved }) {
+  async function admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests }) {
     const checked = await checkRepos(jobId, marked, { slug, branch });
     const repos = marked.map(({ inPlace, ...repo }, i) => ({
       ...repo,
@@ -914,6 +914,8 @@ export function createSuperagent({
       router: { allowlist: resolved.routerModelAllowlist, maxInputTokens: resolved.routerMaxInputTokens, maxOutputTokens: resolved.routerMaxOutputTokens },
       workerPermissionMode: resolved.workerPermissionMode,
       copyLocalClaudeSettings: resolved.copyLocalClaudeSettings,
+      commitTests: commitTests ?? resolved.commitTests,
+      testPaths: resolved.testPaths,
     };
     provisioningNow.add(jobId);
     known.add(jobId);

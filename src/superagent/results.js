@@ -23,6 +23,7 @@ import path from 'node:path';
 import { isSafeSessionId } from '../safe-id.js';
 import { failureSignature } from './sequencer.js';
 import { defaultGit } from './worktree.js';
+import { isTestPath } from './test-paths.js';
 
 export const RESULT_FILE = 'result.json';
 export const BRAINSTORM_BATCH = 5;
@@ -532,7 +533,7 @@ async function resolveCommits(commits, { job, git }) {
   return { errors, resolved };
 }
 
-// Spec A: a listed commit may not carry superagent files.
+// A listed commit may not carry superagent files, nor test files unless the job commits tests.
 export async function commitPathErrors(commits, { job, git }) {
   const errors = [];
   for (const { repo: repoId, sha } of commits) {
@@ -541,16 +542,17 @@ export async function commitPathErrors(commits, { job, git }) {
       errors.push(`repo ${repoId} has no worktree to check commit ${sha}`);
       continue;
     }
-    const res = await git(['diff-tree', '--no-commit-id', '--name-only', '-r', sha], { cwd: repo.worktree });
+    const res = await git(['diff-tree', '-z', '--no-commit-id', '--name-only', '-r', sha], { cwd: repo.worktree });
     if (res.code !== 0) {
       errors.push(`could not list the files of commit ${sha} in ${repoId}`);
       continue;
     }
-    for (const file of res.stdout.split(/\r?\n/)) {
-      if (file.startsWith('.superpowers/')) {
-        errors.push(`commit includes superagent files: ${file}`);
-        break;
-      }
+    const files = res.stdout.split('\0').filter(Boolean);
+    const superagent = files.find((file) => file.startsWith('.superpowers/'));
+    if (superagent) errors.push(`commit includes superagent files: ${superagent}`);
+    if (job.commitTests === false) {
+      const test = files.find((file) => isTestPath(file, job.testPaths));
+      if (test) errors.push(`commit includes test files: ${test}`);
     }
   }
   return errors;

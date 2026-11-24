@@ -325,3 +325,31 @@ test('a brainstorm phase must be first and unique', () => {
     assert.ok(validateDefaults(d).errors.some((e) => e.path === 'pipeline' && e.message === message));
   }
 });
+
+test('commitTests and testPaths default, validate and resolve per project', async () => {
+  const d = defaultConfig();
+  assert.equal(d.commitTests, false);
+  assert.ok(Array.isArray(d.testPaths) && d.testPaths.length === 10);
+  assert.deepEqual(validateDefaults(d), { errors: [], warnings: [] });
+  for (const bad of ['yes', 1, null]) {
+    assert.ok(hasError(validateDefaults({ ...defaultConfig(), commitTests: bad }), 'commitTests'), String(bad));
+  }
+  assert.equal(validateDefaults({ ...defaultConfig(), commitTests: 'x' }).errors.find((e) => e.path === 'commitTests').message, 'commitTests must be a boolean');
+  for (const bad of [[], 'a', [''], [1], null]) {
+    const r = validateDefaults({ ...defaultConfig(), testPaths: bad });
+    assert.equal(r.errors.find((e) => e.path === 'testPaths')?.message, 'testPaths must be a non-empty array of glob strings', JSON.stringify(bad));
+  }
+  const dir = await tempDir('sa-config-');
+  const repo = path.join(dir, 'repo');
+  const filePath = path.join(dir, 'config.json');
+  await fs.writeFile(filePath, JSON.stringify({
+    defaults: { testPaths: ['a/**'] },
+    projects: { [repo]: { commitTests: true } },
+  }));
+  const cfg = createSuperagentConfig({ filePath });
+  await cfg.load();
+  assert.equal(cfg.resolve(null).commitTests, false);
+  assert.equal(cfg.resolve(repo).commitTests, true);
+  assert.deepEqual(cfg.resolve(repo).testPaths, ['a/**']);
+  await assert.rejects(cfg.save({ defaults: { commitTests: 'yes' } }), (err) => err.code === 'ERR_INVALID_CONFIG');
+});

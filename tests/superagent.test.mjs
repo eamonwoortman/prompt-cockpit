@@ -1479,3 +1479,19 @@ test('an answer or accept for a needs-you the job has left is refused and append
     await h.sa.stop();
   } finally { registry._reset(); }
 });
+
+test('createJob records commitTests and testPaths: the option beats the config default, absent takes the resolved value', async () => {
+  try {
+    const h = await harness({ configJson: { defaults: { commitTests: false, testPaths: ['custom/**'] } } });
+    const opted = await create(h, { commitTests: true });
+    const plain = await create(h, { title: 'Other thing', idea: 'Other.', primaryRepo: h.repo });
+    const a = h.events(opted.jobId)[0];
+    const b = h.events(plain.jobId)[0];
+    assert.equal(a.commitTests, true);
+    assert.deepEqual(a.testPaths, ['custom/**']);
+    assert.equal(b.commitTests, false);
+    assert.deepEqual(b.testPaths, ['custom/**']);
+    assert.equal(h.store.get(opted.jobId).commitTests, true);
+    assert.deepEqual(h.store.get(plain.jobId).testPaths, ['custom/**']);
+  } finally { registry._reset(); }
+});

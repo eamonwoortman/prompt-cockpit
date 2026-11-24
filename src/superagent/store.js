@@ -80,6 +80,8 @@ export function deriveJob(events) {
     router: structuredClone(first.router ?? routerDefaults()),
     workerPermissionMode: first.workerPermissionMode,
     copyLocalClaudeSettings: first.copyLocalClaudeSettings,
+    commitTests: first.commitTests ?? true,
+    testPaths: structuredClone(first.testPaths ?? []),
     state: 'provisioning',
     reason: null,
     detail: null,

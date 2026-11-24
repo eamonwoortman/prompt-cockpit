@@ -96,6 +96,11 @@ export function defaultConfig() {
     budget: { perJobUsd: null, perJobTokens: null },
     workerPermissionMode: 'auto',
     copyLocalClaudeSettings: true,
+    commitTests: false,
+    testPaths: [
+      '**/test/**', '**/tests/**', '**/Test/**', '**/Tests/**', '**/__tests__/**',
+      '**/*.test.*', '**/*.spec.*', '**/*_test.*', '**/*Test.cs', '**/*Tests.cs',
+    ],
     additionalRepos: [],
   };
 }
@@ -265,6 +270,10 @@ function checkScalars(d, errors) {
     errors.push({ path: 'routerMaxOutputTokens', message: `routerMaxOutputTokens must be at most ${ROUTER_MAX_OUTPUT_TOKENS_CAP}` });
   }
   if (!isPositiveInt(d.maxConcurrentSessions)) errors.push({ path: 'maxConcurrentSessions', message: 'must be a positive integer' });
+  if (typeof d.commitTests !== 'boolean') errors.push({ path: 'commitTests', message: 'commitTests must be a boolean' });
+  if (!Array.isArray(d.testPaths) || d.testPaths.length === 0 || !d.testPaths.every(isNonEmptyString)) {
+    errors.push({ path: 'testPaths', message: 'testPaths must be a non-empty array of glob strings' });
+  }
   if (!isPlainObject(d.limits)) {
     errors.push({ path: 'limits', message: 'limits must be an object' });
     return;

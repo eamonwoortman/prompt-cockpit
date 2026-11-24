@@ -207,6 +207,10 @@ export function initSuperagentView() {
     loadWorkflows();
   })));
   const primaryInPlace = inPlaceToggle(false);
+  const commitTestsLabel = el('label', 'sa-check');
+  const commitTestsInput = el('input');
+  commitTestsInput.type = 'checkbox';
+  commitTestsLabel.append(commitTestsInput, el('span', null, 'Commit tests'));
   primaryInput.addEventListener('change', () => loadWorkflows());
 
   function renderExtraFolders() {
@@ -353,6 +357,7 @@ export function initSuperagentView() {
     field('Title', titleInput),
     field('Primary folder', primaryRow),
     primaryInPlace.box,
+    commitTestsLabel,
     field('Workflow', workflowSelect),
     workflowHint,
     workflowNotes,
@@ -382,6 +387,7 @@ export function initSuperagentView() {
       additionalRepos: extraFolders.map((f) => f.path),
       inPlace: [...(primaryInPlace.input.checked ? [primaryRepo] : []), ...extraFolders.filter((f) => f.inPlace).map((f) => f.path)],
       workflow: workflowSelect.value,
+      ...(commitTestsInput.checked && { commitTests: true }),
     };
     try {
       const job = await postJson('/api/superagent/jobs', payload);

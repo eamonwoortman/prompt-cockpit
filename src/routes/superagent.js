@@ -61,6 +61,9 @@ function validateCreate(body) {
   if (body.inPlace !== undefined && (!Array.isArray(body.inPlace) || body.inPlace.some((p) => typeof p !== 'string'))) {
     return { code: 'ERR_INVALID_REQUEST', error: 'inPlace must be a list of folder paths' };
   }
+  if (body.commitTests !== undefined && typeof body.commitTests !== 'boolean') {
+    return { code: 'ERR_INVALID_REQUEST', error: 'commitTests must be true or false' };
+  }
   if (typeof body.idea !== 'string' || !body.idea.trim()) return { error: 'an idea is required' };
   if (body.additionalRepos !== undefined && !Array.isArray(body.additionalRepos)) return { error: 'additionalRepos must be a list of folders' };
   for (const folder of [body.primaryRepo, ...(body.additionalRepos ?? [])]) {
@@ -267,6 +270,7 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
         fixture: null,
         workflow: body.workflow?.trim() || null,
         inPlace: body.inPlace ?? [],
+        ...(body.commitTests !== undefined && { commitTests: body.commitTests }),
       }));
       return respondJson(res, 200, jobSummary(job));
     } catch (err) {

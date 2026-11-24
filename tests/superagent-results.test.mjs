@@ -1120,3 +1120,54 @@ test('commitPathErrors names the first superagent path of each commit and passes
   assert.deepEqual(await commitPathErrors(commits, { job: f.job, git: defaultGit }), ['commit includes superagent files: .superpowers/superagent/x/a.md']);
   assert.deepEqual(await commitPathErrors([commits[0]], { job: f.job, git: defaultGit }), []);
 });
+
+test('rejects a commit with a non-ASCII .superpowers path', async () => {
+  const f = await fixture();
+  const rel = '.superpowers/superagent/x/artifacts/\u00e9.md';
+  const sha = await commitSuperagentFile(f.worktree, rel);
+  assert.deepEqual(await commitPathErrors([{ repo: 'primary', sha }], { job: f.job, git: defaultGit }), [`commit includes superagent files: ${rel}`]);
+});
+
+test('a job that does not commit tests rejects a commit with a test file', async () => {
+  const rel = 'Tests/Editor/FooTests.cs';
+  const noTests = { artifactRoot: 'ledger', commitTests: false, testPaths: defaultConfig().testPaths };
+  const f = await fixture({ commitSpec: false, created: noTests });
+  await writeAt(f.worktree, rel, 'x\n');
+  await writeAt(f.worktree, `${rel}.meta`, 'm\n');
+  git(f.worktree, 'add', '--', rel, `${rel}.meta`);
+  git(f.worktree, 'commit', '-q', '-m', 'with tests');
+  const sha = git(f.worktree, 'rev-parse', 'HEAD');
+  const errs = await commitPathErrors([{ repo: 'primary', sha }], { job: f.job, git: defaultGit });
+  assert.deepEqual(errs, [`commit includes test files: ${rel}`]);
+
+  const opted = await fixture({ commitSpec: false, created: { ...noTests, commitTests: true } });
+  await writeAt(opted.worktree, rel, 'x\n');
+  git(opted.worktree, 'add', '--', rel);
+  git(opted.worktree, 'commit', '-q', '-m', 'with tests');
+  const osha = git(opted.worktree, 'rev-parse', 'HEAD');
+  assert.deepEqual(await commitPathErrors([{ repo: 'primary', sha: osha }], { job: opted.job, git: defaultGit }), []);
+});
+
+test('validateResult rejects a test file in a listed commit when tests are not committed', async () => {
+  const rel = 'src/app.test.js';
+  const f = await fixture({ commitSpec: false, created: { artifactRoot: 'ledger', commitTests: false, testPaths: ['**/*.test.*'] } });
+  await writeAt(f.worktree, artifactPaths(f.job).spec, '# Hello design\n');
+  await writeAt(f.worktree, rel, 'x\n');
+  git(f.worktree, 'add', '--', rel);
+  git(f.worktree, 'commit', '-q', '-m', 'with tests');
+  const sha = git(f.worktree, 'rev-parse', 'HEAD');
+  const v = await f.check(f.goodResult({ evidence: { commits: [sha] } }), { attempt: { purpose: 'author' } });
+  assert.deepEqual(v, { ok: false, errors: [`commit includes test files: ${rel}`] });
+});
+
+test('a legacy job (no commitTests recorded) still commits tests', async () => {
+  const f = await fixture();
+  const rel = 'Tests/Editor/FooTests.cs';
+  await writeAt(f.worktree, rel, 'x\n');
+  git(f.worktree, 'add', '--', rel);
+  git(f.worktree, 'commit', '-q', '-m', 'with tests');
+  const sha = git(f.worktree, 'rev-parse', 'HEAD');
+  assert.equal(f.job.commitTests, true);
+  assert.deepEqual(f.job.testPaths, []);
+  assert.deepEqual(await commitPathErrors([{ repo: 'primary', sha }], { job: f.job, git: defaultGit }), []);
+});

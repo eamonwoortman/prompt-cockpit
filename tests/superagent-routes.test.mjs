@@ -832,3 +832,20 @@ test('retrospective goes through the host gate', async (t) => {
   assert.deepEqual(w.transcriptCalls, []);
   assert.deepEqual(w.registry.created, []);
 });
+
+test('POST /api/superagent/jobs validates and passes commitTests through', async (t) => {
+  const calls = [];
+  const api = await serve(t, { host: fakeHost({ supervisor: { createJob: async (args) => { calls.push(args); return job(); } } }) });
+  const repo = process.cwd();
+  for (const commitTests of ['yes', 1, null, {}]) {
+    const res = await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: repo, commitTests } });
+    assert.equal(res.status, 400, JSON.stringify(commitTests));
+    assert.equal(res.body.code, 'ERR_INVALID_REQUEST');
+    assert.equal(res.body.error, 'commitTests must be true or false');
+  }
+  assert.deepEqual(calls, []);
+  assert.equal((await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: repo, commitTests: true } })).status, 200);
+  assert.equal(calls[0].commitTests, true);
+  await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: repo } });
+  assert.equal(calls[1].commitTests, undefined);
+});
