@@ -334,7 +334,9 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   for (const p of ['author', 'review', 'fix', 'verify', 'implement', 'task-review', 'test']) assert.ok(contract.includes(`\`${p}\``), `contract: ${p}`);
   assert.ok(contract.includes('review, response, verify and report files are outputs'));
   for (const n of ['Outputs are never committed', 'never stage anything under `.superpowers/`', 'If your card has `artifactsCommitted: true`', 'unless your card says `commitTests: true`']) assert.ok(contract.includes(n), `contract: ${n}`);
-  for (const f of ['fixer.md', 'implementer.md']) await has(f, 'tasks/<task>-tests/', 'commit only the fix');
+  for (const f of ['fixer.md', 'implementer.md']) await has(f, "`tasks/<task>-tests/` under your card's `artifactRoot`", 'step 5 commits only the fix');
+  for (const f of ['task-reviewer.md', 'fix-reviewer.md', 'tester.md', 'verifier-tester.md']) await has(f, 'put the saved tests back first');
+  await has('contract.md', "first copies the saved tests from `tasks/<task>-tests/` under your card's `artifactRoot`");
   for (const f of ['fix-reviewer.md', 'task-reviewer.md']) await has(f, 'a fix commit that adds or changes a test is a blocker');
   const purposeLine = (p) => contract.split(/\r?\n/).find((l) => l.startsWith(`- \`${p}\`:`));
   for (const p of ['review', 'test']) assert.ok(purposeLine(p).includes('`severity` (`blocker`, `major` or `minor`)'), `contract ${p} line lists severities`);
@@ -365,8 +367,10 @@ test('a ledger job card carries commitTests and testPaths, not artifactsCommitte
   assert.equal(ledger.commitTests, false);
   assert.deepEqual(ledger.testPaths, ['**/tests/**']);
   assert.ok(!('artifactsCommitted' in ledger));
+  assert.equal(ledger.artifactRoot, '.superpowers/superagent/j1/artifacts');
   const legacy = await build({});
   assert.equal(legacy.artifactsCommitted, true);
+  assert.ok(!('artifactRoot' in legacy));
   assert.equal(legacy.commitTests, true);
   assert.deepEqual(legacy.testPaths, []);
 });

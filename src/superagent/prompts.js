@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { artifactPaths, reviewPaths, requiredOutputs, reviseOutputs as reviseSet, BRAINSTORM_BATCH } from './results.js';
+import { artifactPaths, ledgerArtifactRoot, reviewPaths, requiredOutputs, reviseOutputs as reviseSet, BRAINSTORM_BATCH } from './results.js';
 import { brainstormLog, DEFAULT_REVIEW_ROUNDS } from './sequencer.js';
 import { ROLE_NAME, resolvePromptPath, templatesDir } from './workflows.js';
 
@@ -188,7 +188,7 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
     })),
     inputs,
     outputs,
-    ...(job.artifactRoot !== 'ledger' ? { artifactsCommitted: true } : {}),
+    ...(job.artifactRoot === 'ledger' ? { artifactRoot: ledgerArtifactRoot(job.jobId) } : { artifactsCommitted: true }),
     commitTests: job.commitTests,
     testPaths: job.testPaths,
     attemptDir: attempt.dir,
