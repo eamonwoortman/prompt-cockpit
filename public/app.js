@@ -897,7 +897,6 @@ async function setAutoContinue(enabled) {
 // process for it, same as closing a terminal.
 async function closeSession() {
   if (!sessionId) return;
-  if (!confirm('Close this session? Its transcript stays on disk (resumable later), but this live process ends now.')) return;
   intentionalClose = true;
   await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE', headers: authHeaders() });
   sessionListPane.refreshCount();
@@ -910,7 +909,6 @@ async function closeSession() {
 // stuck or off-topic session, without re-typing the launcher picks.
 async function resetSession() {
   if (!sessionId) return;
-  if (!confirm('Reset this session? Ends the current live process and starts a new one in the same folder with the same settings. The old transcript stays on disk (resumable later).')) return;
   intentionalClose = true;
   try {
     const res = await fetch(`/api/sessions/${sessionId}/reset`, {
