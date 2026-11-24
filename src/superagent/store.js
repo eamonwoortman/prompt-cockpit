@@ -19,7 +19,8 @@ import path from 'node:path';
 import { writeJsonAtomic } from '../json-store.js';
 import { isSafeSessionId } from '../safe-id.js';
 import { defaultConfig, defaultSuperagentRoot } from './config.js';
-import { LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
+import { ledgerArtifactRoot } from './results.js';
+import { LEDGER_LEGACY_ARTIFACTS, LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
 
 export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored', 'job-retried', 'job-renamed'];
 
@@ -35,6 +36,13 @@ function routerDefaults() {
 // flagged. The event log itself is never rewritten.
 export function legacyPipeline(pipeline) {
   return pipeline.map((p) => (p.kind === 'author' && p.phase === 'test' ? { ...p, test: true } : p));
+}
+
+function resolveArtifacts(first, legacy) {
+  if (first.artifactRoot !== 'ledger') return legacy ? substituteArtifacts(LEGACY_ARTIFACTS, { slug: first.slug, date: first.createdDate }) : structuredClone(first.artifacts ?? {});
+  const base = legacy ? LEDGER_LEGACY_ARTIFACTS : first.artifacts ?? {};
+  const root = ledgerArtifactRoot(first.jobId);
+  return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, `${root}/${value}`]));
 }
 
 export function deriveJob(events) {
@@ -63,7 +71,8 @@ export function deriveJob(events) {
       settingsCopy: null,
     })),
     workflow: legacy ? null : structuredClone(first.workflow),
-    artifacts: legacy ? substituteArtifacts(LEGACY_ARTIFACTS, { slug: first.slug, date: first.createdDate }) : structuredClone(first.artifacts ?? {}),
+    artifactRoot: first.artifactRoot === 'ledger' ? 'ledger' : null,
+    artifacts: resolveArtifacts(first, legacy),
     prompts: structuredClone(first.prompts ?? {}),
     pipeline: legacy ? legacyPipeline(pipeline) : pipeline,
     models: structuredClone(first.models ?? {}),

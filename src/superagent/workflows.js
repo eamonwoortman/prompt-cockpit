@@ -38,6 +38,8 @@ export const LEGACY_ARTIFACTS = Object.freeze({
   testReport: 'docs/superpowers/jobs/{slug}/test-report.md',
 });
 
+export const LEDGER_LEGACY_ARTIFACTS = Object.freeze({ brief: 'brief.md', spec: 'spec.md', plan: 'plan.md', tasks: 'tasks.json', testReport: 'test-report.md' });
+
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === 'string' && v.length > 0;
 // The id pattern ignores case, so precedence, duplicates and lookups do too.

@@ -8,7 +8,7 @@ import { slugify, createWorktree } from '../src/superagent/worktree.js';
 import { deriveJob } from '../src/superagent/store.js';
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import {
-  ANSWER_TAGS, BRAINSTORM_BATCH, BRIEF_HEADINGS, RESULT_FILE, artifactPaths, attemptDir, headingErrors, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
+  ANSWER_TAGS, BRAINSTORM_BATCH, BRIEF_HEADINGS, RESULT_FILE, artifactPaths, attemptDir, headingErrors, ledgerArtifactRoot, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
 } from '../src/superagent/results.js';
 
 const JOB_ID = '12345678-aaaa-bbbb-cccc-000000000000';
@@ -1006,4 +1006,15 @@ test('only the first author phase taking the brief has its output checked', asyn
   ]);
   const second = await publish('plan', 'plan');
   assert.equal(second.ok, true, JSON.stringify(second.errors));
+});
+
+test('reviewPaths uses the ledger root for a ledger job', () => {
+  const ledgerJob = deriveJob(provisionedEvents({ artifactRoot: 'ledger' }));
+  const root = ledgerArtifactRoot(ledgerJob.jobId);
+  assert.equal(root, `.superpowers/superagent/${ledgerJob.jobId}/artifacts`);
+  const paths = reviewPaths(ledgerJob, { phase: 'spec-review', round: 2, taskId: 'T1' });
+  assert.equal(paths.review, `${root}/reviews/spec-review-r2.md`);
+  assert.equal(paths.report, `${root}/tasks/T1-report.md`);
+  const legacy = reviewPaths(deriveJob(provisionedEvents()), { phase: 'spec-review', round: 2, taskId: 'T1' });
+  assert.equal(legacy.review, 'docs/superpowers/jobs/add-hello/reviews/spec-review-r2.md');
 });

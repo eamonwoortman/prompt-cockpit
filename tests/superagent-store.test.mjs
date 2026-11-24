@@ -499,3 +499,17 @@ test('job-renamed changes the title only; slug and branch keep the created title
   assert.deepEqual([after.slug, after.branch, after.state], [before.slug, before.branch, 'running']);
   assert.equal(deriveJob(stamp([jobCreated(), { type: 'job-renamed', title: '' }])).title, jobCreated().title);
 });
+
+test('deriveJob resolves ledger artifact paths', () => {
+  const root = '.superpowers/superagent/j1/artifacts';
+  const withWorkflow = deriveJob(stamp([jobCreated({ artifactRoot: 'ledger', workflow: { id: 'troubleshooting' }, artifacts: { diagnosis: 'diagnosis.md', tasks: 'tasks.json' } })]));
+  assert.equal(withWorkflow.artifacts.diagnosis, `${root}/diagnosis.md`);
+  assert.equal(withWorkflow.artifacts.tasks, `${root}/tasks.json`);
+  assert.equal(withWorkflow.artifactRoot, 'ledger');
+  const legacyLedger = deriveJob(stamp([jobCreated({ artifactRoot: 'ledger' })]));
+  assert.equal(legacyLedger.artifacts.brief, `${root}/brief.md`);
+  assert.equal(legacyLedger.artifacts.testReport, `${root}/test-report.md`);
+  const plain = deriveJob(stamp([jobCreated()]));
+  assert.equal(plain.artifactRoot, null);
+  assert.equal(plain.artifacts.brief, 'docs/superpowers/jobs/add-hello/brief.md');
+});

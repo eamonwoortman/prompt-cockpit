@@ -49,6 +49,10 @@ export function attemptDir(primaryWorktree, { jobId, phase, task, attemptId }) {
   return path.join(primaryWorktree, '.superpowers', 'superagent', ...parts);
 }
 
+export function ledgerArtifactRoot(jobId) {
+  return `.superpowers/superagent/${jobId}/artifacts`;
+}
+
 // The job's resolved artifact map, which deriveJob() always sets (today's
 // table for a job without a workflow).
 export function artifactPaths(job) {
@@ -64,7 +68,7 @@ export const RESERVED_ARTIFACT_KEYS = Object.freeze([...PHASE_ATTEMPT_KINDS, ...
 
 // Decision 15. A key whose inputs were not given (no round, no taskId) is null.
 export function reviewPaths(job, { phase = null, round = null, taskId = null }) {
-  const jobs = `docs/superpowers/jobs/${job.slug}`;
+  const jobs = job.artifactRoot === 'ledger' ? ledgerArtifactRoot(job.jobId) : `docs/superpowers/jobs/${job.slug}`;
   const p = phase == null ? null : segment('phase', phase);
   const t = taskId == null ? null : segment('taskId', taskId);
   const r = Number.isInteger(round);
