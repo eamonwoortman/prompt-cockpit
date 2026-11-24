@@ -25,13 +25,11 @@ When you are finished (or blocked), publish exactly one result in `attemptDir` (
 - Unless your card says `resultVia: "final-message"`, publish atomically: write the JSON to `result.json.tmp` in `attemptDir`, then `rename` it to `result.json`. This is the very last thing you do; take no further actions after the rename.
 - If your card says `resultVia: "final-message"`, you cannot write files: reply with only the result JSON object as your final message.
 
-## Committing outputs
+## Outputs
 
-When the phase has required outputs, commit every output file in the primary worktree on the job branch and list the commit sha(s) in `evidence.commits` as a plain sha for the primary repo, or `{ "repo": "<id>", "sha": "<sha>" }` for an additional repo. After committing, leave each output unmodified so `git status` is clean for that path; an uncommitted, empty or later-modified output fails validation.
+Write each output to the path on your card (`outputs`, and the review, response, verify and report paths). Outputs are never committed: they live in the job's git-ignored ledger, and a commit that touches one is rejected. Commit only code, by explicit path, and never tests unless your card says `commitTests: true` (otherwise a commit that touches a test path, `testPaths` on your card, is rejected); never stage anything under `.superpowers/`, and never write job documents anywhere else in the repo. Where your phase makes a code commit, list its sha(s) in `evidence.commits`: a plain sha for the primary repo, or `{ "repo": "<id>", "sha": "<sha>" }` for an additional repo.
 
-Every output must appear in at least one commit you list. If you committed outputs more than once (for example a follow-up fix commit), list every commit that touched an output, not only the last one. If an output was already committed by an earlier attempt of this phase and you keep it, find that commit with `git log -- <path>` on the job branch and list it too.
-
-Note that review, response, verify and report files are outputs and must be committed and listed in `evidence.commits` like any other output.
+If your card has `artifactsCommitted: true`, the job predates the ledger and outputs are committed. Commit every output file in the primary worktree on the job branch and list the commit sha(s) in `evidence.commits`; after committing, leave each output unmodified so `git status` is clean for that path. Every output must appear in at least one commit you list. If you committed outputs more than once (for example a follow-up fix commit), list every commit that touched an output, not only the last one. If an output was already committed by an earlier attempt of this phase and you keep it, find that commit with `git log -- <path>` on the job branch and list it too. Note that review, response, verify and report files are outputs and must be committed and listed in `evidence.commits` like any other output.
 
 ## In-place folders
 
@@ -43,13 +41,13 @@ The user may have their own uncommitted and untracked changes there. Stage only 
 
 If the job card has a `purpose`, it says which kind of attempt this is and which result fields it needs:
 
-- `author`: write the phase outputs; `evidence.commits`.
+- `author`: write the phase outputs.
 - `review`: `verdict` (`approve` or `changes`) and `findings` (each with `id`, `severity` (`blocker`, `major` or `minor`), `text` and `"disposition": "open"`).
 - `task-review`: the same `verdict` and `findings`, about one task's commits.
 - `fix`: `findings` copied from `reviewFindings` on the card (`id`, `severity`, `text`) each with a `disposition` (`fixed`, `open` or `declined: <reason>`); a blocker may be `open` only in the final fix; a task `fix` also needs `evidence.commits` and `evidence.checks`.
 - `verify`: `verified`, a list of `{ id, verified, evidence }` covering exactly the contested ids.
 - `implement`: `evidence.commits` and `evidence.checks`.
-- `ask` (brainstormer): `questions`, a list of at most `maxQuestions` objects `{ "id": "Q<n>", "text": "..." }`, where `Q<n>` has n of 1 or more and an id is never reused across turns. To finish, write the brief to `outputs.brief`, commit it, and publish `questions: []` explicitly; a missing `questions` is rejected. When `final` is true, `questions` must be `[]`. A brainstormer never publishes `blocked`.
+- `ask` (brainstormer): `questions`, a list of at most `maxQuestions` objects `{ "id": "Q<n>", "text": "..." }`, where `Q<n>` has n of 1 or more and an id is never reused across turns. To finish, write the brief to `outputs.brief` and publish `questions: []` explicitly; a missing `questions` is rejected. When `final` is true, `questions` must be `[]`. A brainstormer never publishes `blocked`.
 - `answer` (stand-in): `answers`, a list of `{ "id", "tag", "answer", "reason" }` covering every id in `openQuestions` (`tag` is `from-idea`, `from-project` or `assumed`). To escalate one question, publish `status: "blocked"` with `question` (for the user), `escalated` (that question's id) and `answers` for all the others (it may be empty). A `done` result must not carry `escalated`. `failed` is allowed. It writes no files and has no commits.
 - `test`: on success `status: done`; on failure `status: failed` with `findings` (each `id`, `severity` (`blocker`, `major` or `minor`), `text`, optional `repo`).
 

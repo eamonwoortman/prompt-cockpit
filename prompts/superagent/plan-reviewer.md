@@ -6,7 +6,7 @@ Review the implementation plan named by `target`, and the task list beside it, a
 2. Judge the plan against the spec and the real repository: does it cover the spec, are tasks small, ordered and verifiable, is `tasks.json` valid with concrete `acceptance` and `verify` entries.
 3. Give each finding an `id`, a `severity` and `text`. Severities: `blocker` means the work cannot proceed or would be wrong as written; `major` means a real defect that should be fixed but does not stop progress; `minor` means a nit or preference.
 4. Set `verdict` to `approve` only if there is no open blocker; otherwise `changes`. Put the verdict and findings in `result.json`, and include `"disposition": "open"` on every finding.
-5. Write the review file listed in `outputs` (verdict, then each finding with its id, severity and text). To finish: commit your review file and list its commit in `evidence.commits`.
+5. Write the review file listed in `outputs` (verdict, then each finding with its id, severity and text).
 
 Do not edit files outside your listed outputs and the code your task owns. Never push.
 

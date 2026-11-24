@@ -57,7 +57,7 @@ test('the job card carries every field and the recovery note only on retries', a
   const { job, phase, attempt, emptyDir } = await fixture();
   const { card } = await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir });
   const c = parseCard(card);
-  assert.deepEqual(Object.keys(c).sort(), ['attemptDir', 'attemptId', 'idea', 'inputs', 'jobId', 'mode', 'outputs', 'handoff', 'phaseId', 'previousAttemptDir', 'previousFindings', 'recoveryNote', 'repos', 'round', 'taskId', 'title'].sort());
+  assert.deepEqual(Object.keys(c).sort(), ['artifactsCommitted', 'attemptDir', 'commitTests', 'testPaths', 'attemptId', 'idea', 'inputs', 'jobId', 'mode', 'outputs', 'handoff', 'phaseId', 'previousAttemptDir', 'previousFindings', 'recoveryNote', 'repos', 'round', 'taskId', 'title'].sort());
   assert.equal(c.jobId, job.jobId);
   assert.equal(c.phaseId, attempt.phase);
   assert.equal(c.taskId, null);
@@ -102,7 +102,9 @@ test('the invalid-result nudge carries the validator\'s error; the turn-cap nudg
   const n = nudgeText('invalid-result', { dir: a.dir, error: 'tasks[0].id must be 1-12 letters' });
   assert.ok(n.includes(a.dir) && n.includes('was rejected: tasks[0].id must be 1-12 letters') && n.includes('result.json.tmp'));
   assert.match(nudgeText('invalid-result', { dir: a.dir, readOnly: true, error: 'bad status' }), /^Your result was rejected: bad status\n.*final message/);
-  assert.match(nudgeText('turn-cap', a), /If only writing and committing your outputs remains.*status: done/);
+  assert.match(nudgeText('turn-cap', a), /If only writing your outputs remains.*status: done/);
+  assert.ok(n.includes('write any output you change'));
+  assert.ok(!/commit/.test(n));
 });
 
 test('the job card inputs and outputs follow the current phase', async () => {
@@ -185,7 +187,7 @@ test('with no purpose the card equals the Plan 2 card', async () => {
   assert.deepEqual(c, {
     jobId: job.jobId, phaseId: phase.phase, taskId: null, attemptId: 'a2', title: job.title, mode: job.mode, idea: IDEA,
     repos: [{ id: 'primary', worktree: job.repos[0].worktree, branch: job.branch }],
-    inputs: {}, outputs: { spec: artifactPaths(job).spec }, attemptDir: attempt.dir, round: null, previousFindings: null, recoveryNote: null, previousAttemptDir: null, handoff: null,
+    inputs: {}, outputs: { spec: artifactPaths(job).spec }, artifactsCommitted: true, commitTests: true, testPaths: [], attemptDir: attempt.dir, round: null, previousFindings: null, recoveryNote: null, previousAttemptDir: null, handoff: null,
   });
 });
 
@@ -214,12 +216,14 @@ test('contract.md mentions handoff', async () => {
   assert.ok(system.includes('read that file first'));
 });
 
-test('contract.md and planner.md require listing every commit that touched an output, including earlier attempts', async () => {
-  const { job, phase, attempt, emptyDir } = await fixture();
-  const { system } = await buildWorkerPrompt({ role: 'planner', job, phase, attempt, projectDir: emptyDir });
-  assert.ok(system.includes('Every output must appear in at least one commit you list'));
-  assert.ok(system.includes('an earlier attempt of this phase'));
-  assert.ok(system.includes('list every commit that touched them'));
+test('contract.md keeps the list-every-commit rule for legacy jobs only', async () => {
+  const contract = await fs.readFile(path.join(templatesDir(), 'contract.md'), 'utf8');
+  const legacy = contract.slice(contract.indexOf('If your card has `artifactsCommitted: true`'));
+  assert.ok(legacy.includes('Every output must appear in at least one commit you list'));
+  assert.ok(legacy.includes('an earlier attempt of this phase'));
+  assert.ok(legacy.includes('review, response, verify and report files are outputs'));
+  const planner = await fs.readFile(path.join(templatesDir(), 'planner.md'), 'utf8');
+  assert.ok(!planner.includes('list every commit that touched them'));
 });
 
 test('the card carries purpose, round, final and the required outputs list when purpose is set', async () => {
@@ -306,7 +310,7 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   const fixRule = ['when `purpose` is `fix`, read `previousFindings`, change the artifact for each finding or decline it with a one-sentence reason, and write the response file', 'when `final` is true, append every finding you did not fix under a heading `## Unresolved review findings`'];
   await has('spec-writer.md', ...fixRule, '## Unresolved review findings');
   await has('planner.md', ...fixRule, '## Unresolved review findings', '`id`', '`title`', '`repos`', '`dependsOn`', '`acceptance`', '`verify`', 'ids are at most 12 characters, letters, digits and hyphens', 'one task = one worker session');
-  for (const f of ['spec-reviewer.md', 'plan-reviewer.md']) await has(f, 'read-only', '`approve` only if there is no open blocker', 'blocker', 'major', 'minor', 'commit your review file and list its commit');
+  for (const f of ['spec-reviewer.md', 'plan-reviewer.md']) await has(f, 'read-only', '`approve` only if there is no open blocker', 'blocker', 'major', 'minor', 'Write the review file listed in `outputs`');
   await has('implementer.md', 'evidence.checks', 'exit code', 'check `git status` and `git log` before repeating work');
   await has('task-reviewer.md', 'taskCommits', 'git show', 'read-only');
   await has('tester.md', 'effectiveTasks', 'How to try it', 'status: failed', '`repo`', 'never edit code');
@@ -329,9 +333,46 @@ test('prompt surface: pinned strings in the pipeline templates and the contract'
   assert.ok(contract.includes('Purposes'));
   for (const p of ['author', 'review', 'fix', 'verify', 'implement', 'task-review', 'test']) assert.ok(contract.includes(`\`${p}\``), `contract: ${p}`);
   assert.ok(contract.includes('review, response, verify and report files are outputs'));
+  for (const n of ['Outputs are never committed', 'never stage anything under `.superpowers/`', 'If your card has `artifactsCommitted: true`', 'unless your card says `commitTests: true`']) assert.ok(contract.includes(n), `contract: ${n}`);
+  for (const f of ['fixer.md', 'implementer.md']) await has(f, 'tasks/<task>-tests/', 'commit only the fix');
+  for (const f of ['fix-reviewer.md', 'task-reviewer.md']) await has(f, 'a fix commit that adds or changes a test is a blocker');
   const purposeLine = (p) => contract.split(/\r?\n/).find((l) => l.startsWith(`- \`${p}\`:`));
   for (const p of ['review', 'test']) assert.ok(purposeLine(p).includes('`severity` (`blocker`, `major` or `minor`)'), `contract ${p} line lists severities`);
   assert.ok(purposeLine('fix').includes('`reviewFindings`'), 'contract fix line names reviewFindings');
+});
+
+test('no prompt other than the contract legacy paragraph tells a worker to commit artifacts or names repo job paths', async () => {
+  const dir = templatesDir();
+  for (const f of (await fs.readdir(dir)).filter((n) => n.endsWith('.md'))) {
+    const t = await fs.readFile(path.join(dir, f), 'utf8');
+    const text = f === 'contract.md' ? t.slice(0, t.indexOf('If your card has `artifactsCommitted: true`')) : t;
+    assert.ok(!text.includes('commit your review file'), `${f}: commit your review file`);
+    assert.ok(!text.includes('list its commit'), `${f}: list its commit`);
+    assert.ok(!text.includes('docs/superpowers/jobs'), `${f}: docs/superpowers/jobs`);
+  }
+  assert.ok(!(await fs.readFile(new URL('../src/superagent/prompts.js', import.meta.url), 'utf8')).includes('docs/superpowers/jobs'));
+});
+
+test('a ledger job card carries commitTests and testPaths, not artifactsCommitted; a legacy job card carries artifactsCommitted: true', async () => {
+  const build = async (over) => {
+    const emptyDir = await tempDir('sa-prompts-');
+    const job = deriveJob(provisionedEvents({ jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', idea: IDEA, ...over }));
+    const phase = job.pipeline[0];
+    const attempt = { attemptId: 'a1', phase: phase.phase, task: null, n: 1, recovery: false, previousAttemptId: null, dir: path.join(emptyDir, 'a1') };
+    return parseCard((await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: emptyDir })).card);
+  };
+  const ledger = await build({ artifactRoot: 'ledger', commitTests: false, testPaths: ['**/tests/**'] });
+  assert.equal(ledger.commitTests, false);
+  assert.deepEqual(ledger.testPaths, ['**/tests/**']);
+  assert.ok(!('artifactsCommitted' in ledger));
+  const legacy = await build({});
+  assert.equal(legacy.artifactsCommitted, true);
+  assert.equal(legacy.commitTests, true);
+  assert.deepEqual(legacy.testPaths, []);
+});
+
+test('the turn-cap nudge says writing your outputs', () => {
+  assert.ok(nudgeText('turn-cap', { dir: '/d' }).includes('writing your outputs'));
 });
 
 const REVIEW_FINDINGS = [{ id: 'B1', severity: 'blocker', text: 'no rollback' }, { id: 'M1', severity: 'minor', text: 'nit' }];

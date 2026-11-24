@@ -188,6 +188,9 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
     })),
     inputs,
     outputs,
+    ...(job.artifactRoot !== 'ledger' ? { artifactsCommitted: true } : {}),
+    commitTests: job.commitTests,
+    testPaths: job.testPaths,
     attemptDir: attempt.dir,
     round: null,
     previousFindings: null,
@@ -210,11 +213,11 @@ export function nudgeText(kind, attempt) {
   if (kind === 'invalid-result') {
     const error = attempt.error || 'no reason given';
     if (attempt.readOnly) return `Your result was rejected: ${error}\nReply with only the corrected result JSON object as your final message.`;
-    return `Your \`result.json\` in ${attempt.dir} was rejected: ${error}\nFix that, commit any output you change, then publish \`result.json\` again via \`result.json.tmp\` and rename.`;
+    return `Your \`result.json\` in ${attempt.dir} was rejected: ${error}\nFix that, write any output you change, then publish \`result.json\` again via \`result.json.tmp\` and rename.`;
   }
   if (attempt.readOnly) return 'No result was received. Reply with only the result JSON object as your final message.';
   if (kind === 'turn-cap') {
-    return `The turn limit was reached. If only writing and committing your outputs remains, do that now and publish \`result.json\` with \`status: done\`. Otherwise write \`handoff.md\` in ${attempt.dir} (current state and next steps). Either way, publish \`result.json\` there via \`result.json.tmp\` and rename.`;
+    return `The turn limit was reached. If only writing your outputs remains, do that now and publish \`result.json\` with \`status: done\`. Otherwise write \`handoff.md\` in ${attempt.dir} (current state and next steps). Either way, publish \`result.json\` there via \`result.json.tmp\` and rename.`;
   }
   return `No \`result.json\` was published. Publish it now in ${attempt.dir}: write \`result.json.tmp\`, then rename it to \`result.json\`.`;
 }
