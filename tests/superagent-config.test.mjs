@@ -11,6 +11,7 @@ import {
   validateMilestoneFixture,
   createSuperagentConfig,
   templateFor,
+  resolveProjectConfig,
 } from '../src/superagent/config.js';
 import { tempDir } from './superagent-helpers.mjs';
 
@@ -384,4 +385,18 @@ test('branchTemplates default, validate, merge per key and resolve a workflow id
   assert.equal(templateFor(t, 'feature'), 'feature/{description}');
   assert.equal(templateFor(t, 'other'), null);
   assert.equal(templateFor(t, null), null);
+});
+
+test('a branchTemplates key overrides the layer below whatever its case', () => {
+  const repo = path.resolve('some', 'repo');
+  const fileConfig = {
+    defaults: { branchTemplates: { Troubleshooting: 'fix/{ticket}', FEATURE: 'feat/{description}' } },
+    projects: { [repo]: { branchTemplates: { TROUBLESHOOTING: 'hotfix/{ticket}' } } },
+  };
+  const defaults = resolveProjectConfig(fileConfig, null).branchTemplates;
+  assert.deepEqual(defaults, { troubleshooting: 'fix/{ticket}', feature: 'feat/{description}' });
+  assert.equal(templateFor(defaults, 'troubleshooting'), 'fix/{ticket}');
+  const project = resolveProjectConfig(fileConfig, repo).branchTemplates;
+  assert.deepEqual(project, { troubleshooting: 'hotfix/{ticket}', feature: 'feat/{description}' });
+  assert.equal(templateFor(project, 'Troubleshooting'), 'hotfix/{ticket}');
 });

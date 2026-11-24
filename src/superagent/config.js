@@ -352,11 +352,17 @@ export function findProjectEntry(fileConfig, projectPath) {
   return key === undefined ? undefined : fileConfig.projects[key];
 }
 
+// Workflow ids compare case-insensitively, so a later layer's `Feature` must replace an earlier `feature`.
+function lowerTemplateKeys(layer) {
+  if (!isPlainObject(layer) || !isPlainObject(layer.branchTemplates)) return layer;
+  return { ...layer, branchTemplates: Object.fromEntries(Object.entries(layer.branchTemplates).map(([k, v]) => [k.toLowerCase(), v])) };
+}
+
 // `base` is the layer under config.json; a workflow's role models are merged into it first.
 export function resolveProjectConfig(fileConfig, projectPath, base = defaultConfig()) {
-  const merged = merge(base, fileConfig?.defaults ?? {});
+  const merged = merge(lowerTemplateKeys(base), lowerTemplateKeys(fileConfig?.defaults ?? {}));
   const entry = findProjectEntry(fileConfig, projectPath);
-  return entry === undefined ? merged : merge(merged, entry);
+  return entry === undefined ? merged : merge(merged, lowerTemplateKeys(entry));
 }
 
 function configError(code, message, extra = {}) {
