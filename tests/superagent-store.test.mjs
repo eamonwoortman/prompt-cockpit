@@ -508,6 +508,17 @@ test('job-renamed changes the title only; slug and branch keep the created title
   assert.equal(deriveJob(stamp([jobCreated(), { type: 'job-renamed', title: '' }])).title, jobCreated().title);
 });
 
+test('branch-renamed sets finalBranch and leaves branch and state unchanged', async () => {
+  const store = createSuperagentStore({ rootDir: await tempDir('sa-store-branch-renamed-'), logImpl: quiet });
+  for (const e of [jobCreated(), { type: 'job-provisioned' }, { type: 'needs-you', reason: 'ready-to-try', detail: null }]) await store.append('j1', e);
+  const before = store.get('j1');
+  assert.equal(before.finalBranch, null);
+  await store.append('j1', { type: 'branch-renamed', from: before.branch, to: 'bugfix/1-x' });
+  const after = await store.load('j1');
+  assert.equal(after.finalBranch, 'bugfix/1-x');
+  assert.deepEqual([after.branch, after.state, after.reason, after.needsYouSeq], [before.branch, 'needs-you', 'ready-to-try', before.needsYouSeq]);
+});
+
 test('deriveJob resolves ledger artifact paths', () => {
   const root = '.superpowers/superagent/j1/artifacts';
   const withWorkflow = deriveJob(stamp([jobCreated({ artifactRoot: 'ledger', workflow: { id: 'troubleshooting' }, artifacts: { diagnosis: 'diagnosis.md', tasks: 'tasks.json' } })]));

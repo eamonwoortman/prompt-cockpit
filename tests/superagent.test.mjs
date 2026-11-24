@@ -1480,6 +1480,168 @@ test('an answer or accept for a needs-you the job has left is refused and append
   } finally { registry._reset(); }
 });
 
+// A two-repo worktree job at ready-to-try. `failRename(args, cwd)` returning
+// true makes that `git branch -m` fail.
+async function readyTwoRepoJob({ failRename = () => false } = {}) {
+  const extra = path.join(await tempDir('sa-index-rename-'), 'lib');
+  await initRepo(extra);
+  const git = async (args, opts) => {
+    if (args[0] === 'branch' && args[1] === '-m' && failRename(args, path.resolve(opts.cwd))) return { code: 128, stdout: '', stderr: 'fatal: injected' };
+    return defaultGit(args, opts);
+  };
+  const h = await harness({ git });
+  const job = await create(h, { additionalRepos: [extra] });
+  await h.store.append(job.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+  return { h, extra, job: h.store.get(job.jobId), origins: [h.repo, extra] };
+}
+
+const tailTypes = (h, jobId, n) => h.events(jobId).slice(-n).map((e) => e.type);
+
+test('accept renames the branch in every repo', async () => {
+  try {
+    const { h, job, origins } = await readyTwoRepoJob();
+    const accepted = await h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch: '  bugfix/1-x ' });
+    assert.deepEqual([accepted.state, accepted.finalBranch, accepted.branch], ['done', 'bugfix/1-x', job.branch]);
+    for (const origin of origins) {
+      assert.ok(gitIn(origin, 'rev-parse', '--verify', 'refs/heads/bugfix/1-x'), origin);
+      assert.equal(branchExists(origin, job.branch), false, origin);
+    }
+    for (const repo of job.repos) assert.equal(gitIn(repo.worktree, 'symbolic-ref', '--short', 'HEAD'), 'bugfix/1-x');
+    const [renamed, done] = h.events(job.jobId).slice(-2);
+    assert.deepEqual([renamed.type, renamed.from, renamed.to, done.type], ['branch-renamed', job.branch, 'bugfix/1-x', 'job-accepted']);
+    assert.equal(h.store.get(job.jobId).finalBranch, 'bugfix/1-x');
+    assert.deepEqual(await h.sa.orphanWorktrees(), []);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accept refuses before renaming when any repo has the name', async () => {
+  try {
+    const { h, extra, job, origins } = await readyTwoRepoJob();
+    gitIn(extra, 'branch', 'bugfix/1-x');
+    const lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch: 'bugfix/1-x' }), { code: 'ERR_BRANCH_EXISTS' });
+    assert.equal(lineCount(h, job.jobId), lines);
+    assert.ok(branchExists(origins[0], job.branch));
+    assert.ok(branchExists(extra, job.branch));
+    assert.equal(branchExists(origins[0], 'bugfix/1-x'), false, 'the first repo is not renamed');
+    assert.equal(h.sa.getJob(job.jobId).reason, 'ready-to-try');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accept rolls back when a later rename fails', async () => {
+  try {
+    let failIn = null;
+    const { h, job, origins } = await readyTwoRepoJob({ failRename: (args, cwd) => cwd === failIn });
+    failIn = path.resolve(job.repos[1].worktree);
+    const lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch: 'bugfix/1-x' }), (err) => {
+      assert.equal(err.code, 'ERR_RENAME_FAILED');
+      assert.match(err.message, /fatal: injected/);
+      assert.match(err.message, /renamed back/);
+      return true;
+    });
+    assert.equal(lineCount(h, job.jobId), lines);
+    for (const origin of origins) {
+      assert.ok(branchExists(origin, job.branch), origin);
+      assert.equal(branchExists(origin, 'bugfix/1-x'), false, origin);
+    }
+    assert.equal(gitIn(job.repos[0].worktree, 'symbolic-ref', '--short', 'HEAD'), job.branch);
+    assert.equal(h.sa.getJob(job.jobId).reason, 'ready-to-try');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accept names the repos left renamed when a rollback fails too', async () => {
+  try {
+    let folders = null;
+    // The first repo renames but cannot rename back; the second cannot rename.
+    const failRename = (args, cwd) => folders != null && ((cwd === folders[0] && args[2] === 'bugfix/1-x') || (cwd === folders[1] && args[3] === 'bugfix/1-x'));
+    const { h, job, origins } = await readyTwoRepoJob({ failRename });
+    folders = job.repos.map((r) => path.resolve(r.worktree));
+    const lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch: 'bugfix/1-x' }), (err) => {
+      assert.equal(err.code, 'ERR_RENAME_FAILED');
+      assert.match(err.message, / in lib: fatal: injected; renaming back failed, so these repos are still renamed to bugfix\/1-x: primary$/);
+      return true;
+    });
+    assert.equal(lineCount(h, job.jobId), lines);
+    assert.ok(branchExists(origins[0], 'bugfix/1-x'));
+    assert.ok(branchExists(origins[1], job.branch));
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accept rejects an invalid name and changes nothing', async () => {
+  try {
+    const { h, job, origins } = await readyTwoRepoJob();
+    const lines = lineCount(h, job.jobId);
+    for (const branch of ['a..b', 'HEAD', '-x', 7]) {
+      await assert.rejects(h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch }), { code: 'ERR_INVALID_BRANCH' }, String(branch));
+    }
+    assert.equal(lineCount(h, job.jobId), lines);
+    for (const origin of origins) assert.ok(branchExists(origin, job.branch));
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accept with an empty branch or the job branch keeps the current name', async () => {
+  try {
+    for (const branch of [undefined, '', '   ']) {
+      const { h, job, origins } = await readyTwoRepoJob();
+      const accepted = await h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch });
+      assert.deepEqual([accepted.state, accepted.finalBranch], ['done', null], String(branch));
+      assert.deepEqual(tailTypes(h, job.jobId, 2), ['needs-you', 'job-accepted']);
+      for (const origin of origins) assert.ok(branchExists(origin, job.branch));
+      await h.sa.stop();
+    }
+    const { h, job } = await readyTwoRepoJob();
+    const accepted = await h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch: job.branch });
+    assert.deepEqual([accepted.state, accepted.finalBranch], ['done', null]);
+    assert.deepEqual(tailTypes(h, job.jobId, 2), ['needs-you', 'job-accepted']);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accept is idempotent after a rename', async () => {
+  try {
+    const { h, job, origins } = await readyTwoRepoJob();
+    for (const origin of origins) gitIn(origin, 'branch', '-m', job.branch, 'bugfix/1-x');
+    await h.store.append(job.jobId, { type: 'branch-renamed', from: job.branch, to: 'bugfix/1-x' });
+    const renamed = h.store.get(job.jobId);
+    assert.deepEqual([renamed.state, renamed.reason, renamed.finalBranch], ['needs-you', 'ready-to-try', 'bugfix/1-x']);
+    const lines = lineCount(h, job.jobId);
+    const accepted = await h.sa.accept(job.jobId, { needsYouSeq: renamed.needsYouSeq, branch: 'bugfix/1-x' });
+    assert.deepEqual([accepted.state, accepted.finalBranch], ['done', 'bugfix/1-x']);
+    assert.equal(lineCount(h, job.jobId), lines + 1);
+    assert.equal(h.events(job.jobId).at(-1).type, 'job-accepted');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accept after a crash between the git rename and its event appends branch-renamed then job-accepted', async () => {
+  try {
+    const { h, job, origins } = await readyTwoRepoJob();
+    for (const origin of origins) gitIn(origin, 'branch', '-m', job.branch, 'bugfix/1-x');
+    const accepted = await h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch: 'bugfix/1-x' });
+    assert.deepEqual([accepted.state, accepted.finalBranch], ['done', 'bugfix/1-x']);
+    const [renamed, done] = h.events(job.jobId).slice(-2);
+    assert.deepEqual([renamed.type, renamed.from, renamed.to, done.type], ['branch-renamed', job.branch, 'bugfix/1-x', 'job-accepted']);
+    for (const origin of origins) assert.ok(branchExists(origin, 'bugfix/1-x'));
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a worktree whose job was accepted under another superagent/ name is not an orphan', async () => {
+  try {
+    const { h, job } = await readyTwoRepoJob();
+    await h.sa.accept(job.jobId, { needsYouSeq: job.needsYouSeq, branch: 'superagent/final-name' });
+    assert.deepEqual(await h.sa.orphanWorktrees(), []);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
 test('createJob records commitTests and testPaths: the option beats the config default, absent takes the resolved value', async () => {
   try {
     const h = await harness({ configJson: { defaults: { commitTests: false, testPaths: ['custom/**'] } } });

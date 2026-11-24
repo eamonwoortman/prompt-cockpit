@@ -207,7 +207,40 @@ test('an answer must name the needs-you it was written for; a stale one is a 409
   const current = await api('/api/superagent/jobs/job-1/answer', { method: 'POST', body: { text: 'Use cookies', needsYouSeq: 7 } });
   assert.equal(current.status, 200);
   await api('/api/superagent/jobs/job-1/accept', { method: 'POST', body: { needsYouSeq: 9 } });
-  assert.deepEqual(calls, [4, 7, { needsYouSeq: 9 }]);
+  assert.deepEqual(calls, [4, 7, { needsYouSeq: 9, branch: undefined }]);
+});
+
+test('accept passes the branch through, refuses a non-text branch before the supervisor, and maps rename errors', async (t) => {
+  const calls = [];
+  const supervisor = {
+    accept: async (jobId, opts) => {
+      calls.push(opts);
+      if (opts.branch === 'a..b') throw Object.assign(new Error('superagent: a..b is not a valid branch name'), { code: 'ERR_INVALID_BRANCH' });
+      if (opts.branch === 'broken') throw Object.assign(new Error('superagent: could not rename'), { code: 'ERR_RENAME_FAILED' });
+      if (opts.branch === 'taken') throw Object.assign(new Error('superagent: branch taken already exists'), { code: 'ERR_BRANCH_EXISTS' });
+      return job({ jobId, state: 'done' });
+    },
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  for (const branch of [5, null, ['x'], { name: 'x' }]) {
+    const res = await api('/api/superagent/jobs/job-1/accept', { method: 'POST', body: { needsYouSeq: 9, branch } });
+    assert.deepEqual([res.status, res.body.code, res.body.error], [400, 'ERR_INVALID_REQUEST', 'branch must be text'], JSON.stringify(branch));
+  }
+  assert.deepEqual(calls, []);
+  const ok = await api('/api/superagent/jobs/job-1/accept', { method: 'POST', body: { needsYouSeq: 9, branch: 'bugfix/1-x' } });
+  assert.deepEqual([ok.status, ok.body.status], [200, 'done']);
+  const invalid = await api('/api/superagent/jobs/job-1/accept', { method: 'POST', body: { branch: 'a..b' } });
+  assert.deepEqual([invalid.status, invalid.body.code], [400, 'ERR_INVALID_BRANCH']);
+  const failed = await api('/api/superagent/jobs/job-1/accept', { method: 'POST', body: { branch: 'broken' } });
+  assert.deepEqual([failed.status, failed.body.code], [500, 'ERR_RENAME_FAILED']);
+  const taken = await api('/api/superagent/jobs/job-1/accept', { method: 'POST', body: { branch: 'taken' } });
+  assert.deepEqual([taken.status, taken.body.code], [400, 'ERR_BRANCH_EXISTS']);
+  assert.deepEqual(calls, [
+    { needsYouSeq: 9, branch: 'bugfix/1-x' },
+    { needsYouSeq: undefined, branch: 'a..b' },
+    { needsYouSeq: undefined, branch: 'broken' },
+    { needsYouSeq: undefined, branch: 'taken' },
+  ]);
 });
 
 test('retry passes the needs-you and note through, requires the needs-you, and maps refusals', async (t) => {

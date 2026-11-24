@@ -22,7 +22,7 @@ import { defaultConfig, defaultSuperagentRoot } from './config.js';
 import { ledgerArtifactRoot } from './results.js';
 import { LEDGER_LEGACY_ARTIFACTS, LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
 
-export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored', 'job-retried', 'job-renamed'];
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored', 'job-retried', 'job-renamed', 'branch-renamed'];
 
 const NEWLINE = 0x0a;
 
@@ -83,6 +83,7 @@ export function deriveJob(events) {
     commitTests: first.commitTests ?? true,
     testPaths: structuredClone(first.testPaths ?? []),
     branchTemplate: first.branchTemplate ?? null,
+    finalBranch: null,
     state: 'provisioning',
     reason: null,
     detail: null,
@@ -132,6 +133,10 @@ export function deriveJob(events) {
       // created title's.
       case 'job-renamed':
         if (typeof ev.title === 'string' && ev.title) job.title = ev.title;
+        break;
+      // Accept's rename: job.branch keeps the name the job ran on.
+      case 'branch-renamed':
+        if (typeof ev.to === 'string' && ev.to) job.finalBranch = ev.to;
         break;
       case 'folder-restored':
         if (job.state === 'needs-you' && job.reason === 'folder-changed') setState('running');

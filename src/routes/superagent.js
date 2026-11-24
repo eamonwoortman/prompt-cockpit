@@ -26,7 +26,7 @@ const BAD_REQUEST = new Set([
   'ERR_INVALID_ANSWER', 'ERR_UNKNOWN_ARTIFACT', 'ERR_ARTIFACT_OUTSIDE',
   'ERR_NOT_GIT_REPO', 'ERR_NO_COMMITS', 'ERR_BRANCH_EXISTS', 'ERR_WORKTREE_PATH_EXISTS', 'ERR_DUPLICATE_REPO',
   'ERR_INVALID_CONFIG', 'ERR_NO_TEMPLATE', 'ERR_PATH_TOO_LONG', 'ERR_PHASE_KIND_UNSUPPORTED', 'ERR_MODE_UNSUPPORTED',
-  'ERR_UNKNOWN_WORKFLOW', 'ERR_INVALID_WORKFLOW', 'ERR_INVALID_REQUEST',
+  'ERR_UNKNOWN_WORKFLOW', 'ERR_INVALID_WORKFLOW', 'ERR_INVALID_REQUEST', 'ERR_INVALID_BRANCH',
   'ERR_FOLDER_DIRTY', 'ERR_FOLDER_BUSY_GIT', 'ERR_FOLDER_ON_JOB_BRANCH', 'ERR_FOLDER_CHANGED',
 ]);
 
@@ -282,10 +282,10 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
   // detail's needsYou.seq), so text a stale view wrote for one question can
   // never reach the next one: the supervisor refuses a mismatch with 409
   // ERR_INVALID_STATE before appending anything. Accept checks it when given;
-  // retry requires it too.
+  // retry requires it too. Accept's optional `branch` is the final branch name.
   const actions = {
     answer: (supervisor, id, body) => supervisor.answerQuestion(id, body.text, { needsYouSeq: body.needsYouSeq }),
-    accept: (supervisor, id, body) => supervisor.accept(id, { needsYouSeq: body.needsYouSeq }),
+    accept: (supervisor, id, body) => supervisor.accept(id, { needsYouSeq: body.needsYouSeq, branch: body.branch }),
     retry: (supervisor, id, body) => supervisor.retryJob(id, { needsYouSeq: body.needsYouSeq, note: body.note }),
     stop: (supervisor, id) => supervisor.stopJob(id),
     rename: (supervisor, id, body) => supervisor.renameJob(id, body.title),
@@ -298,6 +298,9 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
       }
       if (name === 'rename' && typeof body.title !== 'string') {
         return respondJson(res, 400, { error: 'title must be text', code: 'ERR_INVALID_REQUEST' });
+      }
+      if (name === 'accept' && body.branch !== undefined && typeof body.branch !== 'string') {
+        return respondJson(res, 400, { error: 'branch must be text', code: 'ERR_INVALID_REQUEST' });
       }
       if (name === 'retry' && !Number.isInteger(body.needsYouSeq)) {
         return respondJson(res, 400, { error: 'needsYouSeq is required: the stuck entry this retry was made for', code: 'ERR_INVALID_REQUEST' });

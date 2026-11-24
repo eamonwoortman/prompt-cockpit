@@ -48,6 +48,7 @@ import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createAccounting } from './accounting.js';
 import { artifactStates as readArtifactStates, snapshotDirFor } from './artifacts.js';
+import { isValidBranchName } from './branch-name.js';
 import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, templateFor, validateMilestoneFixture } from './config.js';
 import { checkGate, checkInPlace, folderChangedEvent, normaliseTop, provisionInPlace, refuseJobBranch } from './inplace.js';
 import { hasTemplate } from './prompts.js';
@@ -945,12 +946,58 @@ export function createSuperagent({
     }
   }
 
-  function accept(jobId, { needsYouSeq } = {}) {
+  const branchThere = async (cwd, name) => (await git(['rev-parse', '--verify', '--quiet', `refs/heads/${name}`], { cwd })).code === 0;
+
+  // Renames `from` to `to` in every repo, or in none: everything is checked
+  // before the first rename, and a failed rename renames the repos already
+  // done back. A repo with `to` and without `from` was renamed by an earlier
+  // accept that stopped before its event was appended, and is skipped.
+  async function renameBranch(job, from, to) {
+    const missing = job.repos.find((r) => !r.worktree);
+    if (missing) throw fail('ERR_INVALID_STATE', `superagent: repo ${missing.id} of job ${job.jobId} has no folder to rename the branch in`);
+    const valid = isValidBranchName(to) && (await git(['check-ref-format', '--branch', to], { cwd: primaryRepo(job).worktree })).code === 0;
+    if (!valid) throw fail('ERR_INVALID_BRANCH', `superagent: ${to} is not a valid branch name`);
+    const pending = [];
+    for (const repo of job.repos) {
+      const [hasFrom, hasTo] = [await branchThere(repo.worktree, from), await branchThere(repo.worktree, to)];
+      if (hasTo && hasFrom) throw fail('ERR_BRANCH_EXISTS', `superagent: branch ${to} already exists in ${repo.id} (${repo.worktree})`);
+      if (hasTo) continue;
+      if (!hasFrom) throw fail('ERR_RENAME_FAILED', `superagent: branch ${from} is not in ${repo.id} (${repo.worktree}); nothing was renamed`);
+      pending.push(repo);
+    }
+    const done = [];
+    for (const repo of pending) {
+      const res = await git(['branch', '-m', from, to], { cwd: repo.worktree });
+      if (res.code === 0) {
+        done.push(repo);
+        continue;
+      }
+      const left = [];
+      for (const back of done.reverse()) {
+        if ((await git(['branch', '-m', to, from], { cwd: back.worktree })).code !== 0) left.push(back.id);
+      }
+      const after = left.length > 0
+        ? `; renaming back failed, so these repos are still renamed to ${to}: ${left.join(', ')}`
+        : done.length > 0 ? '; the repos already renamed were renamed back' : '';
+      throw fail('ERR_RENAME_FAILED', `superagent: could not rename ${from} to ${to} in ${repo.id}: ${res.stderr.trim() || `git exited ${res.code}`}${after}`);
+    }
+  }
+
+  // `branch`, when given and different, is the name the job's branch takes
+  // in every repo before the job is accepted.
+  function accept(jobId, { needsYouSeq, branch } = {}) {
     return withJob(jobId, async () => {
       const job = await requireJob(jobId);
       requireSeen(job, needsYouSeq);
       if (job.state !== 'needs-you' || job.reason !== 'ready-to-try') {
         throw fail('ERR_INVALID_STATE', `superagent: job ${jobId} is ${job.state}${job.reason ? ` (${job.reason})` : ''}, not ready to try`);
+      }
+      if (branch != null && typeof branch !== 'string') throw fail('ERR_INVALID_BRANCH', 'superagent: a branch name must be text');
+      const from = job.finalBranch ?? job.branch;
+      const to = branch?.trim() || from;
+      if (to !== from) {
+        await renameBranch(job, from, to);
+        await appendConfirmed(jobId, { type: 'branch-renamed', from, to }, (j) => j.finalBranch === to);
       }
       const accepted = await appendConfirmed(jobId, { type: 'job-accepted' }, (j) => j.state === 'done');
       releaseIfFinished(jobId);
@@ -1083,7 +1130,7 @@ export function createSuperagent({
   async function orphanWorktrees() {
     const jobs = [...known].map((jobId) => store.get(jobId)).filter(Boolean);
     const repos = [...new Set(jobs.flatMap((j) => j.repos.filter((r) => !r.inPlace).map((r) => r.origin)))];
-    const knownBranches = new Set(jobs.map((j) => j.branch));
+    const knownBranches = new Set(jobs.flatMap((j) => [j.branch, j.finalBranch].filter(Boolean)));
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 

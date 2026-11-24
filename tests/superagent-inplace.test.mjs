@@ -859,3 +859,36 @@ test('a gated attempt after a routed failure does not stall the route', async ()
     await fresh.sa.stop();
   } finally { registry._reset(); }
 });
+
+const branchThere = (folder, branch) => tryGit(folder, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`) != null;
+
+test('accept renames an in-place job branch the folder is on', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h, { inPlace: [h.repo] });
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+    const accepted = await h.sa.accept(job.jobId, { needsYouSeq: h.store.get(job.jobId).needsYouSeq, branch: 'bugfix/1-x' });
+    assert.deepEqual([accepted.state, accepted.finalBranch], ['done', 'bugfix/1-x']);
+    assert.equal(currentBranch(h.repo), 'bugfix/1-x');
+    assert.equal(branchThere(h.repo, job.branch), false);
+    assert.deepEqual(h.events(job.jobId).slice(-2).map((e) => e.type), ['branch-renamed', 'job-accepted']);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('accept renames by name, not the current branch', async () => {
+  try {
+    const h = await harness();
+    const own = currentBranch(h.repo);
+    const job = await create(h, { inPlace: [h.repo] });
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+    gitIn(h.repo, 'switch', '-q', own);
+    const accepted = await h.sa.accept(job.jobId, { needsYouSeq: h.store.get(job.jobId).needsYouSeq, branch: 'bugfix/1-x' });
+    assert.deepEqual([accepted.state, accepted.finalBranch], ['done', 'bugfix/1-x']);
+    assert.ok(branchThere(h.repo, 'bugfix/1-x'));
+    assert.equal(branchThere(h.repo, job.branch), false);
+    assert.ok(branchThere(h.repo, own));
+    assert.equal(currentBranch(h.repo), own);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
