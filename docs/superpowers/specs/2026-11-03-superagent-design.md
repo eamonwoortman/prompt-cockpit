@@ -236,6 +236,8 @@ Each attempt gets a fresh session created with the role's model/effort/`maxTurns
 
 **Validation before the sequencer advances** (`results.js`): identity fields match the attempt that was launched; schema valid; for `done`, every required output path exists and is non-empty; for `implement`, every listed commit exists on the job branch in the named repo and every `verify` check is reported with exit 0; for review phases, findings carry severity/disposition as required. An invalid result counts as a failed attempt with reason `invalid-result`.
 
+**Update (2026-11-24): outputs are not committed.** New jobs keep spec, plan, tasks, reviews, brief and reports in the git-ignored ledger (`.superpowers/superagent/<jobId>/artifacts/`, recorded as `artifactRoot: 'ledger'`), so "every required output path exists and is non-empty" is the whole check for them and `attempt-ended` records a SHA-256 per required output; workers commit only code, by explicit path, and tests only when the job's `commitTests` is true. Every listed commit is rejected if it touches `.superpowers/` or, with `commitTests` false, a test path. Jobs created before this keep the committed-artifact rules above. See `2026-11-24-superagent-artifacts-out-of-git-and-branch-names-design.md`.
+
 **Completion detection.** When a worker's turn ends, the runner first consults the cooldown store and the row's rate-limit state (see "Usage cap"); then reads the attempt's `result.json`. Missing → one nudge ("publish your result") → still missing → failed attempt (`no-result`).
 
 ### Questions from unattended workers [Author's call]
