@@ -1,5 +1,6 @@
 import { attemptCap, gatedOut, retriedAway, taskStatus } from './sequencer.js';
 import { PHASE_ATTEMPT_KINDS, TASK_ATTEMPT_KINDS, artifactPaths, reviewPaths } from './results.js';
+import { suggestBranch } from './branch-name.js';
 
 const CORRUPT_TITLE = 'corrupt event log';
 const isCorrupt = (job) => job?.reason === 'corrupt-events' && !job.pipeline;
@@ -281,6 +282,8 @@ export function jobDetail(job, { isLive = () => false, usageFor = () => null, tr
     ...summary,
     idea: job.idea ?? null,
     branch: job.branch ?? null,
+    finalBranch: job.finalBranch ?? null,
+    branchSuggestion: job.reason === 'ready-to-try' ? suggestBranch(job) : null,
     repos: (job.repos ?? []).map((r) => ({ id: r.id, origin: r.origin, worktree: r.worktree ?? null, inPlace: r.inPlace === true })),
     readyInputs: readyInputs(job),
     phases: phaseChips(job),

@@ -484,3 +484,12 @@ test('each router decision in the detail carries its model and cost, null when u
   assert.deepEqual(router(null).cost, { usd: null, complete: false });
   assert.deepEqual(router({ costUsd: null }).cost, { usd: null, complete: false });
 });
+
+test('jobDetail suggests the final branch only when ready to try', () => {
+  const tasks = { type: 'tasks-loaded', tasks: [{ id: 't1', title: 'Fix the crash' }] };
+  const over = { branchTemplate: 'bugfix/{ticket}-{description}', idea: 'Fix ADO #170001 crash' };
+  const detail = jobDetail(m2([tasks, needsYou('ready-to-try')], over), notLive);
+  assert.equal(detail.branchSuggestion, 'bugfix/170001-fix-the-crash');
+  assert.equal(detail.finalBranch, null);
+  assert.equal(jobDetail(m2([tasks], over), notLive).branchSuggestion, null);
+});
