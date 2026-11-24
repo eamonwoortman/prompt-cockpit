@@ -54,6 +54,15 @@ Additional folders are never guessed from their names.
 }
 ```
 
+To set up a second account step by step:
+
+1. Log in once with that folder: `CLAUDE_CONFIG_DIR=~/.claudempg claude`, then `/login`.
+2. Add an entry to `claudeSubscriptions` as above (an existing `~/.claudempg` folder works as-is).
+3. Restart Cockpit, then pick the account in the launcher beside **Default**.
+
+If an account is missing from the picker, the key is absent from the settings
+file, or the file is invalid JSON (the default account still works either way).
+
 Each entry adds a choice beside **Default**. `id` must be unique (`default`
 is reserved); `label` is optional and falls back to the ID. `configDir`
 accepts an absolute path, `~/` (or `~\`) for your home folder, or a path
