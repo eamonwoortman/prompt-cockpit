@@ -424,6 +424,14 @@ test('worker text is never parsed as HTML', () => {
   assert.equal(root.querySelector('.sa-jp-title').textContent, '<img src=x onerror=alert(1)>');
 });
 
+test('the branches card shows the final branch', () => {
+  const { root, pane } = mount();
+  pane.render(detail({ finalBranch: 'bugfix/1-x' }));
+  const text = root.querySelector('.sa-branches').textContent;
+  assert.match(text, /FallGuys: bugfix\/1-x/);
+  assert.doesNotMatch(text, /superagent\//);
+});
+
 test('branches and tasks are still listed', () => {
   const { root, pane } = mount();
   pane.render(detail({ tasks: [{ id: 'T1', title: 'Guard the loader', done: true }, { id: 'T2', title: 'Add a test', done: false }] }));

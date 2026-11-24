@@ -499,7 +499,7 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
     const { box } = card('Branches', 'sa-branches');
     const list = box.appendChild(el('ul', 'sa-list'));
     for (const r of detail.repos) {
-      const item = list.appendChild(el('li', null, `${r.id}: ${detail.branch ?? '—'}`));
+      const item = list.appendChild(el('li', null, `${r.id}: ${detail.finalBranch ?? detail.branch ?? '—'}`));
       if (r.inPlace) item.append(' ', el('span', 'sa-marker', 'in place'));
       item.append(' ', el('span', 'sa-muted', r.origin));
       if (r.inPlace && FINISHED.has(detail.status)) item.append(el('div', 'sa-note', IN_PLACE_FINISHED));

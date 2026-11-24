@@ -100,6 +100,7 @@ export function initSuperagentView() {
   const artifactCache = new Map();
   // Draft answers by needs-you key, so switching jobs and back keeps them.
   const answerDrafts = new Map();
+  const branchDrafts = new Map();
 
   document.title = 'Superagent - Prompt Cockpit';
   document.getElementById('favicon')?.setAttribute('href', '/superagent-favicon.svg');
@@ -549,7 +550,7 @@ export function initSuperagentView() {
   }
 
   function branchLine(repo) {
-    const li = el('li', null, `${repo.id}: ${detail.branch ?? '—'}`);
+    const li = el('li', null, `${repo.id}: ${detail.finalBranch ?? detail.branch ?? '—'}`);
     if (repo.inPlace) li.append(' ', el('span', 'sa-marker', 'in place'));
     return li;
   }
@@ -763,12 +764,21 @@ export function initSuperagentView() {
       if (detail.readyInputs.includes('brief') || detail.artifacts.some((a) => a.key === 'brief')) {
         box.append(artifactBlock('Assumptions made for you', cachedArtifact(detail.jobId, needsYou.key, 'brief'), (text) => briefSection(text)));
       }
+      const branchLabel = el('label', 'sa-field');
+      const branchInput = el('input');
+      branchInput.type = 'text';
+      branchInput.value = branchDrafts.get(needsYou.key) ?? detail.branchSuggestion ?? '';
+      branchInput.addEventListener('input', () => branchDrafts.set(needsYou.key, branchInput.value));
+      branchLabel.append(el('span', 'sa-field-label', 'Branch'), branchInput);
+      box.append(branchLabel);
       const row = el('div', 'sa-actions');
       const accept = button('Accept', 'btn-primary', async () => {
         accept.disabled = true;
-        if (!(await act('accept', rightError, { needsYouSeq: needsYou.seq }))) accept.disabled = false;
+        const branch = branchInput.value.trim();
+        const payload = branch ? { needsYouSeq: needsYou.seq, branch } : { needsYouSeq: needsYou.seq };
+        if (!(await act('accept', rightError, payload))) accept.disabled = false;
       });
-      accept.title = 'Mark the job done. Nothing is merged or pushed.';
+      accept.title = 'Mark the job done and rename the branch. Nothing is merged or pushed.';
       row.append(accept, stopButton(rightError));
       box.append(row);
     } else if (needsYou.reason === 'folder-changed') {

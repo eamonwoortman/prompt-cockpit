@@ -21,7 +21,8 @@ export function isValidBranchName(name) {
 }
 
 export function suggestBranch(job, { isValid = isValidBranchName } = {}) {
-  if (typeof job.branchTemplate !== 'string' || job.branchTemplate === '') return job.branch;
+  const current = job.finalBranch ?? job.branch;
+  if (typeof job.branchTemplate !== 'string' || job.branchTemplate === '') return current;
   const values = { ticket: ticketFromIdea(job.idea), description: describe(job), slug: job.slug ?? '' };
   const filled = job.branchTemplate
     .replace(/\{(ticket|description|slug)\}/g, (_, key) => values[key])
@@ -30,5 +31,5 @@ export function suggestBranch(job, { isValid = isValidBranchName } = {}) {
     .split('/')
     .map((segment) => segment.replace(/^-+|-+$/g, ''))
     .join('/');
-  return isValid(filled) ? filled : job.branch;
+  return isValid(filled) ? filled : current;
 }

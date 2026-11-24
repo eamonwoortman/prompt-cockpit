@@ -42,6 +42,11 @@ test('suggestBranch returns the job branch without a template', () => {
   assert.equal(suggestBranch(job({ branchTemplate: null })), 'superagent/rolling-ball');
 });
 
+test('suggestBranch falls back to the final branch after a half-finished accept', () => {
+  assert.equal(suggestBranch(job({ branchTemplate: null, finalBranch: 'bugfix/1-x' })), 'bugfix/1-x');
+  assert.equal(suggestBranch(job({ title: '!!!', tasks: null, branchTemplate: 'bugfix/{description}', finalBranch: 'bugfix/1-x' })), 'bugfix/1-x');
+});
+
 test('falls back to the job branch when the filled name is invalid', () => {
   assert.equal(suggestBranch(job({ title: '!!!', tasks: null, branchTemplate: 'bugfix/{description}' })), 'superagent/rolling-ball');
 });
