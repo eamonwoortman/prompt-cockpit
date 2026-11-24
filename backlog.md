@@ -175,3 +175,9 @@ Plan 6 (the Superagent view) shipped without each of these; every one is a contr
 - [2026-11-19] [L] Prune retrospective snapshot folders (`~/.prompt-cockpit/superagent/retros/`). The 2026-11-19 view UX spec creates one per Retrospective click and never removes them.
 - [2026-11-19] [L] A Retrospective whose `sendInput` fails after the session was created closes the session but leaves its snapshot folder under `~/.prompt-cockpit/superagent/retros/` (a failure before the session removes it). Covered by the pruning entry above.
 - [2026-11-19] [M] No paid run of the Retrospective session and no real-transcript run of Inspect for a finished attempt: both are unit-tested with fakes or hand-checked with route mocks only (`tests/README.md`, "Superagent view UX, spend, inspect and retrospective").
+- [2026-11-24] [L] The default `testPaths` glob `**/*Test.cs` also matches production names such as `ABTest.cs` or `LatencyTest.cs`, so a job that does not commit tests refuses a commit of such a file. A project can override `testPaths`; the default is not narrowed yet.
+- [2026-11-24] [M] The `.superpowers/` commit refusal (`src/superagent/results.js`) also blocks committing edits to a project's tracked workflows and prompts under `.superpowers/superagent/`, so a job cannot change them.
+- [2026-11-24] [L] The win32 path-length guard (`fitSlug`/`longestAttemptPath`) ignores the ledger artifact paths and the saved-test paths (`tasks/<task>-tests/<repoId>/...`), which can be longer than the attempt paths it measures.
+- [2026-11-24] [L] The New job form's "Commit tests" checkbox is not pre-filled from the resolved config (`commitTests` for the chosen project).
+- [2026-11-24] [L] Saved tests (`tasks/<task>-tests/`) are not shown in the Superagent view.
+- [2026-11-24] [L] Two tasks that save a test at the same repo path collide when the saved tests are put back: the later copy overwrites the earlier one.
