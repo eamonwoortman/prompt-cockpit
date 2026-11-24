@@ -4,11 +4,11 @@
   "name": "Feature",
   "description": "Brainstorm a brief, write and review a spec and a plan, implement task by task with review, test.",
   "artifacts": {
-    "brief": "docs/superpowers/jobs/{slug}/brief.md",
-    "spec": "docs/superpowers/specs/{date}-{slug}-design.md",
-    "plan": "docs/superpowers/plans/{date}-{slug}.md",
-    "tasks": "docs/superpowers/jobs/{slug}/tasks.json",
-    "testReport": "docs/superpowers/jobs/{slug}/test-report.md"
+    "brief": "brief.md",
+    "spec": "spec.md",
+    "plan": "plan.md",
+    "tasks": "tasks.json",
+    "testReport": "test-report.md"
   },
   "phases": [
     { "phase": "brainstorm", "kind": "brainstorm", "role": "brainstormer", "inputs": ["idea"], "outputs": ["brief"] },

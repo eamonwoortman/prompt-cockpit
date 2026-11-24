@@ -13,11 +13,11 @@
 // worktree.js's own createWorktree, and an event log written through the real
 // store:
 //   - needs-you / question   (HTML-looking, long, multi-line question; router decisions)
-//   - needs-you / ready-to-try (brief, spec, plan, tasks, reviews and test report committed)
+//   - needs-you / ready-to-try (brief, spec, plan, tasks, reviews and test report in the ledger)
 //   - needs-you / stuck      (attempt cap; router decisions)
 //   - done                   (accepted)
 //   - needs-you / ready-to-try, Troubleshooting workflow (diagnosis, tasks,
-//     reviews and test report committed; no brief)
+//     reviews and test report in the ledger; no brief)
 // plus one in-place Feature job on <repoDir>-inplace (created like <repoDir>),
 // paused at needs-you / folder-changed: its superagent/<slug> branch exists but
 // the folder is left on its own branch, so the real in-place gate fails on
@@ -132,7 +132,7 @@ const routerDecided = (forAttemptId, action, note, estimatedTokens, costUsd = nu
   latencyMs: 1800,
 });
 
-// Provisions the worktree with createWorktree, commits `files` into it, then
+// Provisions the worktree with createWorktree, writes `files` into it, then
 // writes job-created, worktree-created, job-provisioned and `events`.
 // `workflowId` records a built-in workflow; `events` may then be a function of
 // its models.
@@ -145,21 +145,17 @@ async function seedJob({ title, idea, files = () => ({}), events, workflowId = n
   const created = jobCreated({
     jobId, slug, title, idea, branch, createdDate,
     repos: [{ id: 'primary', origin: repo }],
+    artifactRoot: 'ledger',
     ...recorded,
     router: { allowlist: defaults.routerModelAllowlist, maxInputTokens: defaults.routerMaxInputTokens, maxOutputTokens: defaults.routerMaxOutputTokens },
     copyLocalClaudeSettings: false,
   });
   const made = await createWorktree({ origin: repo, worktree: path.join(worktreesRoot, slug, 'primary'), branch, copyLocalClaudeSettings: false });
   const job = deriveJob([created]);
-  const writes = files(job);
-  if (Object.keys(writes).length) {
-    for (const [rel, text] of Object.entries(writes)) {
-      const file = path.join(made.worktree, ...rel.split('/'));
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, text);
-    }
-    git(made.worktree, 'add', '--', ...Object.keys(writes));
-    git(made.worktree, '-c', 'user.email=fixture@example.com', '-c', 'user.name=Fixture', 'commit', '-q', '-m', `fixture: ${title}`);
+  for (const [rel, text] of Object.entries(files(job))) {
+    const file = path.join(made.worktree, ...rel.split('/'));
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, text);
   }
   await store.append(jobId, created);
   await store.append(jobId, { type: 'worktree-created', repo: 'primary', worktree: made.worktree, branch: made.branch, baseSha: made.baseSha, settingsCopy: made.settingsCopy });
@@ -182,6 +178,7 @@ async function seedInPlaceJob({ title, idea }) {
   const created = jobCreated({
     jobId, slug, title, idea, branch, createdDate,
     repos: [{ id: 'primary', origin: inPlaceRepo, toplevel: inPlaceRepo, inPlace: true, admittedHead: head }],
+    artifactRoot: 'ledger',
     ...recorded,
     router: { allowlist: defaults.routerModelAllowlist, maxInputTokens: defaults.routerMaxInputTokens, maxOutputTokens: defaults.routerMaxOutputTokens },
     copyLocalClaudeSettings: false,
@@ -230,7 +227,7 @@ const QUESTION = [
   '<script>alert("still text")</script>',
 ].join('\n');
 
-// A finished pipeline up to the human accept phase, with every artifact committed.
+// A finished pipeline up to the human accept phase, with every artifact written.
 function finishedPipeline() {
   const t = (id, title) => ({ id, title, repos: ['primary'], dependsOn: [], acceptance: 'it works', verify: '', origin: 'plan', fromAttemptId: null });
   const tasks = [t('t1', 'Parse rows'), t('t2', 'Write the export')];
@@ -272,7 +269,7 @@ function finishedPipeline() {
   return { events, files };
 }
 
-// The Troubleshooting pipeline up to its accept phase, every artifact committed.
+// The Troubleshooting pipeline up to its accept phase, every artifact written.
 function troubleshootingPipeline() {
   const tasks = [{ id: 't1', title: 'Guard the empty header', repos: ['primary'], dependsOn: [], acceptance: 'a failing test now passes', verify: '', origin: 'plan', fromAttemptId: null }];
   const events = (models) => [

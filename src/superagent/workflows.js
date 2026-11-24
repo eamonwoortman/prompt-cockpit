@@ -28,7 +28,7 @@ const CONTRACT_ROLE = 'contract';
 const ARTIFACT_KEY = /^[a-zA-Z][a-zA-Z0-9]{0,31}$/;
 const MODEL_FIELDS = ['provider', 'model', 'maxTurns', 'effort', 'alternate'];
 const SAMPLE_JOB = { slug: 'sample-job-00000000', date: '2000-01-01' };
-const RESERVED_PATHS = ['.git/', '.superpowers/superagent/', 'docs/superpowers/jobs/{slug}/reviews/', 'docs/superpowers/jobs/{slug}/tasks/'];
+const RESERVED_PATHS = ['.git/', '.superpowers/', 'reviews/', 'tasks/'];
 
 export const LEGACY_ARTIFACTS = Object.freeze({
   brief: 'docs/superpowers/jobs/{slug}/brief.md',

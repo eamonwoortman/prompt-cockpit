@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as registry from '../src/session-registry.js';
-import { tempDir, initRepo, sessionFactory, jobCreated, deferred, taskCreated, ev, missingTranscripts, T0 } from './superagent-helpers.mjs';
+import { tempDir, initRepo, sessionFactory, scriptedWorker, jobCreated, deferred, taskCreated, ev, missingTranscripts, T0, MIN } from './superagent-helpers.mjs';
 import { createSuperagentStore } from '../src/superagent/store.js';
 import { createSuperagentConfig, defaultConfig, MILESTONE_1_PIPELINE, MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import { RESULT_FILE, artifactPaths, attemptDir } from '../src/superagent/results.js';
@@ -71,16 +72,13 @@ async function harness({ configJson = {}, ...over } = {}) {
   return build(over);
 }
 
-// Plays the spec-writer: commits the spec in the worktree and publishes a
-// valid result.json via result.json.tmp + rename.
+// Plays the spec-writer: writes the spec in the worktree (a ledger job commits
+// no artifact) and publishes a valid result.json via result.json.tmp + rename.
 async function publishSpec(job, attempt) {
   const wt = job.repos[0].worktree;
   const rel = artifactPaths(job).spec;
   await fs.mkdir(path.dirname(path.join(wt, ...rel.split('/'))), { recursive: true });
   await fs.writeFile(path.join(wt, ...rel.split('/')), '# Hello design\n');
-  gitIn(wt, 'add', '--', rel);
-  gitIn(wt, 'commit', '-q', '-m', 'spec');
-  const sha = gitIn(wt, 'rev-parse', 'HEAD');
   await fs.mkdir(attempt.dir, { recursive: true });
   const body = {
     jobId: job.jobId,
@@ -91,11 +89,9 @@ async function publishSpec(job, attempt) {
     artifacts: [rel],
     summary: 'Wrote the hello design.',
     question: null,
-    evidence: { commits: [sha] },
   };
   await fs.writeFile(path.join(attempt.dir, `${RESULT_FILE}.tmp`), JSON.stringify(body));
   await fs.rename(path.join(attempt.dir, `${RESULT_FILE}.tmp`), path.join(attempt.dir, RESULT_FILE));
-  return sha;
 }
 
 function rejectionSpy() {
@@ -882,7 +878,7 @@ test('createJob with a workflow records it', async () => {
     assert.deepEqual(created.pipeline, QUICK.phases);
     assert.deepEqual(created.models['note-writer'], { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 30, alternate: 'claude-opus-5-5' });
     assert.deepEqual(created.models['spec-writer'], defaultConfig().models['spec-writer']);
-    assert.deepEqual([job.workflow, job.artifacts, job.prompts], [created.workflow, created.artifacts, created.prompts]);
+    assert.deepEqual([job.workflow, job.artifacts, job.prompts], [created.workflow, { note: `.superpowers/superagent/${job.jobId}/artifacts/${created.artifacts.note}` }, created.prompts]);
 
     await h.sa.tick();
     assert.equal(h.started(job.jobId).at(-1).role, 'note-writer');
@@ -965,9 +961,51 @@ test('createJob without workflow uses the default', async () => {
     const created = h.events(job.jobId)[0];
     assert.deepEqual(created.workflow, { id: 'feature', name: 'Feature', source: 'built-in', file: path.join(workflowsDir(), 'feature.json') });
     assert.deepEqual(created.pipeline, JSON.parse(JSON.stringify(defaultConfig().pipeline)));
-    assert.equal(created.artifacts.brief, `docs/superpowers/jobs/${job.slug}/brief.md`);
+    assert.equal(created.artifacts.brief, 'brief.md');
+    assert.equal(job.artifacts.brief, `.superpowers/superagent/${job.jobId}/artifacts/brief.md`);
     assert.ok(Object.keys(created.prompts).includes('spec-writer'));
     assert.ok(Object.values(created.prompts).every((p) => p === null));
+  } finally { registry._reset(); }
+});
+
+test('a new job keeps its artifacts in the ledger and off the branch', async () => {
+  try {
+    const h = await harness();
+    const approve = ({ publish }) => publish({ verdict: 'approve', findings: [] });
+    const diagnosis = '# Diagnosis\n\n## Reproduction\n\ncurl /hello\n';
+    const worker = scriptedWorker({
+      factory: h.factory,
+      handlers: {
+        'investigate:author': ({ publish }) => publish({}, { content: { diagnosis, tasks: JSON.stringify([taskCreated('T1')], null, 2) } }),
+        'diagnosis-review:review': approve,
+        'fix:implement': ({ publish }) => publish({}, { files: { 'src/hello.js': 'export const hello = () => 200;\n' } }),
+        'fix:task-review': approve,
+        'verify:test': ({ publish }) => publish(),
+      },
+    });
+    const job = await createFrom(h, 'troubleshooting', { title: 'Fix hello', idea: 'GET /hello returns 500.' });
+    const created = h.events(job.jobId)[0];
+    assert.equal(created.artifactRoot, 'ledger');
+    for (let i = 0; i < 40 && h.store.get(job.jobId).state === 'running'; i++) {
+      h.clock.t += 6 * MIN;
+      await h.sa.tick();
+    }
+    assert.deepEqual(worker.errors, []);
+    const got = h.store.get(job.jobId);
+    assert.deepEqual([got.state, got.reason], ['needs-you', 'ready-to-try']);
+
+    const primary = got.repos[0];
+    const rel = `.superpowers/superagent/${job.jobId}/artifacts/diagnosis.md`;
+    assert.equal(got.artifacts.diagnosis, rel);
+    assert.equal(readFileSync(path.join(primary.worktree, ...rel.split('/')), 'utf8'), diagnosis);
+    const investigate = h.started(job.jobId).find((e) => e.phase === 'investigate');
+    const ended = h.events(job.jobId).find((e) => e.type === 'attempt-ended' && e.attemptId === investigate.attemptId);
+    assert.equal(ended.outputs[rel], createHash('sha256').update(diagnosis).digest('hex'));
+
+    const touched = gitIn(primary.worktree, 'log', '--name-only', '--format=', `${primary.baseSha}..${job.branch}`).split('\n').filter(Boolean);
+    assert.deepEqual(touched, ['src/hello.js']);
+    assert.ok(touched.every((p) => !p.startsWith('docs/superpowers/') && !p.startsWith('.superpowers/')));
+    await h.sa.stop();
   } finally { registry._reset(); }
 });
 

@@ -283,7 +283,7 @@ test('snapshot copies only the selected attempts\' transcripts, the job records 
   const reads = [];
   const readArtifactFn = async (j, key, opts) => {
     reads.push({ key, opts });
-    if (key === 'spec') return { key, path: 'docs/spec.md', text: 'the spec', truncated: false, source: 'snapshot' };
+    if (key === 'spec') return { key, path: '.superpowers/superagent/j1/artifacts/spec.md', text: 'the spec', truncated: false, source: 'snapshot' };
     throw Object.assign(new Error('gone'), { code: 'ERR_ARTIFACT_GONE' });
   };
   const attempts = job.attempts.filter((a) => a.attemptId !== 'a3');

@@ -907,6 +907,7 @@ export function createSuperagent({
       createdDate,
       repos,
       pipeline,
+      artifactRoot: 'ledger',
       ...(recorded && { workflow: recorded.workflow, artifacts: substituteArtifacts(recorded.artifacts, { slug, date: createdDate }), prompts: recorded.prompts }),
       models,
       limits: resolved.limits,

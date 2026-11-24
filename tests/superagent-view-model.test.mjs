@@ -147,15 +147,15 @@ test('workflow artifact keys are listed', () => {
     { phase: 'accept', kind: 'human', inputs: ['testReport'] },
   ];
   const workflow = { id: 'troubleshoot', name: 'Troubleshooting', source: 'built-in', file: '/w/troubleshoot.json' };
-  const artifacts = { diagnosis: 'docs/jobs/x/diagnosis.md', tasks: 'docs/jobs/x/tasks.json', testReport: 'docs/jobs/x/report.md' };
-  const job = deriveJob(stamp([...provisionedEvents({ pipeline, workflow, artifacts }), start('a1', 'diagnose')]));
+  const artifacts = { diagnosis: 'diagnosis.md', tasks: 'tasks.json', testReport: 'report.md' };
+  const job = deriveJob(stamp([...provisionedEvents({ pipeline, workflow, artifacts, artifactRoot: 'ledger' }), start('a1', 'diagnose')]));
   assert.deepEqual(artifactKeys(job), ['diagnosis', 'tasks']);
   assert.deepEqual(jobDetail(job, notLive).artifacts, [
     { key: 'diagnosis', label: 'diagnosis', phase: 'diagnose', task: null, state: null },
     { key: 'tasks', label: 'tasks', phase: 'diagnose', task: null, state: null },
   ]);
-  assert.equal(artifactPath(job, 'diagnosis'), 'docs/jobs/x/diagnosis.md');
-  assert.equal(artifactPath(job, 'testReport'), 'docs/jobs/x/report.md');
+  assert.equal(artifactPath(job, 'diagnosis'), '.superpowers/superagent/j1/artifacts/diagnosis.md');
+  assert.equal(artifactPath(job, 'testReport'), '.superpowers/superagent/j1/artifacts/report.md');
   for (const unknown of ['spec', 'brief', 'plan', 'constructor', '__proto__', 'toString']) assert.equal(artifactPath(job, unknown), null, unknown);
 });
 

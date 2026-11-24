@@ -5,6 +5,7 @@ import path from 'node:path';
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import {
   CONFIG_PIPELINE_ID,
+  LEDGER_LEGACY_ARTIFACTS,
   LEGACY_ARTIFACTS,
   WORKFLOW_FORMAT,
   loadWorkflows,
@@ -62,7 +63,7 @@ test('the shipped feature file produces today\'s default pipeline', async () => 
   assert.equal(feature.file, path.join(workflowsDir(), 'feature.json'));
   assert.equal(feature.doc.format, WORKFLOW_FORMAT);
   assert.deepEqual(feature.doc.phases, defaultConfig().pipeline);
-  assert.deepEqual(feature.doc.artifacts, LEGACY_ARTIFACTS);
+  assert.deepEqual(feature.doc.artifacts, LEDGER_LEGACY_ARTIFACTS);
   assert.equal(def, 'feature');
   assert.equal(defaultNote, null);
   assert.ok(!workflows.some((w) => w.id === CONFIG_PIPELINE_ID));
@@ -135,9 +136,11 @@ test('validation refuses', async (t) => {
     ['a drive-letter artifact path', (d) => { d.artifacts.spec = 'C:\\spec.md'; }, /must be relative to the repo/],
     ['an artifact path containing ..', (d) => { d.artifacts.spec = 'docs/../../spec.md'; }, /must not contain "\.\."/],
     ['an artifact path inside .git/', (d) => { d.artifacts.spec = '.git/spec.md'; }, /reserved \.git\//],
-    ['an artifact path inside .superpowers/superagent/', (d) => { d.artifacts.spec = '.superpowers/superagent/spec.md'; }, /reserved \.superpowers\/superagent\//],
-    ['an artifact path inside the job\'s reviews/', (d) => { d.artifacts.spec = 'docs/superpowers/jobs/{slug}/reviews/spec.md'; }, /reserved docs\/superpowers\/jobs\/\{slug\}\/reviews\//],
-    ['an artifact path inside the job\'s tasks/', (d) => { d.artifacts.spec = 'docs/superpowers/jobs/{slug}/tasks/spec.md'; }, /reserved docs\/superpowers\/jobs\/\{slug\}\/tasks\//],
+    ['an artifact path inside .superpowers/superagent/', (d) => { d.artifacts.spec = '.superpowers/superagent/spec.md'; }, /reserved \.superpowers\//],
+    ['an artifact path inside .superpowers/', (d) => { d.artifacts.spec = '.superpowers/{slug}/spec.md'; }, /reserved \.superpowers\//],
+    ['an artifact path inside the job\'s reviews/', (d) => { d.artifacts.spec = 'reviews/{date}-spec.md'; }, /reserved reviews\//],
+    ['an artifact path inside the job\'s tasks/', (d) => { d.artifacts.spec = 'tasks/spec.md'; }, /reserved tasks\//],
+    ['an artifact path equal to the job\'s reviews', (d) => { d.artifacts.spec = 'reviews'; }, /reserved reviews\//],
     ['an unknown placeholder', (d) => { d.artifacts.spec = 'docs/{user}/spec.md'; }, /only \{slug\} and \{date\}/],
     ['tasks mapped to a non-.json path', (d) => { d.artifacts.tasks = 'docs/custom/tasks.md'; }, /"tasks" must be a \.json path/],
   ];
@@ -160,6 +163,13 @@ test('validation refuses', async (t) => {
     const doc = baseDoc();
     doc.artifacts.spec = '.GIT\\spec.md';
     assert.ok(check(doc, { platform: 'win32' }).some((e) => /reserved \.git\//.test(e.message)));
+  });
+  await t.test('paths beside the reserved namespaces, and the old repo job folders, are accepted', () => {
+    const doc = baseDoc();
+    doc.artifacts.spec = 'reviews.md';
+    doc.artifacts.tasks = 'tasks-{slug}.json';
+    doc.artifacts.testReport = 'docs/superpowers/jobs/{slug}/reviews/report.md';
+    assert.deepEqual(check(doc), []);
   });
   await t.test('error paths name the workflow fields, not config.json ones', () => {
     const doc = baseDoc();

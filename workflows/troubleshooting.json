@@ -4,9 +4,9 @@
   "name": "Troubleshooting",
   "description": "Reproduce, find the root cause, fix with a failing test, verify.",
   "artifacts": {
-    "diagnosis": "docs/superpowers/jobs/{slug}/diagnosis.md",
-    "tasks": "docs/superpowers/jobs/{slug}/tasks.json",
-    "testReport": "docs/superpowers/jobs/{slug}/test-report.md"
+    "diagnosis": "diagnosis.md",
+    "tasks": "tasks.json",
+    "testReport": "test-report.md"
   },
   "phases": [
     { "phase": "investigate", "kind": "author", "role": "investigator", "inputs": ["idea"], "outputs": ["diagnosis", "tasks"] },

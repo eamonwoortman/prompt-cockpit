@@ -346,7 +346,8 @@ test('stop uses the caller\'s absolute deadline', async () => {
   assert.ok(elapsed >= 50 && elapsed < 1000, `waited ${elapsed} ms for a deadline 60 ms past the injected clock`);
 });
 
-// Snapshot items (R2-2): a derived milestone-2 job over a temp worktree.
+// Snapshot items (R2-2): a derived milestone-2 job over a temp worktree, its
+// artifacts in the ledger unless a test asks for a legacy job.
 const started = (attemptId, phase, over = {}) => ({ type: 'attempt-started', attemptId, phase, role: 'r', model: 'm', n: 1, purpose: 'author', ...over });
 const ended = (attemptId, outcome = 'done', reason = null) => ({ type: 'attempt-ended', attemptId, outcome, reason });
 
@@ -355,7 +356,7 @@ async function snapshotSetup(over = {}) {
   const worktree = path.join(h.root, 'worktree');
   await fs.mkdir(worktree);
   const derive = (events, created = {}) => {
-    const all = [...provisionedEvents({ pipeline: MILESTONE_2_PIPELINE, ...created }), ...events];
+    const all = [...provisionedEvents({ pipeline: MILESTONE_2_PIPELINE, artifactRoot: 'ledger', ...created }), ...events];
     const j = deriveJob(all.map((e, i) => ({ seq: i + 1, at: T0 + i, ...e })));
     primaryRepo(j).worktree = worktree;
     return j;
@@ -383,6 +384,7 @@ test('a snapshot item copies the keys its attempt is the latest writer of', asyn
     started('r1', 'spec-review', { purpose: 'review', round: 1 }), ended('r1'),
     started('f1', 'spec-review', { purpose: 'fix', round: 1 }), ended('f1'),
   ]);
+  assert.equal(artifactPath(j, 'spec'), '.superpowers/superagent/j1/artifacts/spec.md');
   await h.write('spec', 'revised spec', j);
   await h.write('review:spec-review:1', 'findings', j);
   await h.write('response:spec-review:1', 'response', j);
@@ -407,8 +409,9 @@ test('a snapshot item copies the keys its attempt is the latest writer of', asyn
 
 test('a finished legacy job with readable artifacts and no transcript gets its snapshots', async () => {
   const h = await snapshotSetup();
-  const j = h.derive([started('s1', 'spec'), ended('s1'), { type: 'job-stopped' }], { pipeline: MILESTONE_1_PIPELINE });
+  const j = h.derive([started('s1', 'spec'), ended('s1'), { type: 'job-stopped' }], { pipeline: MILESTONE_1_PIPELINE, artifactRoot: null });
   assert.equal(j.workflow, null);
+  assert.equal(artifactPath(j, 'spec'), `docs/superpowers/specs/${j.createdDate}-${j.slug}-design.md`);
   assert.equal(j.attempts[0].sessionId, null);
   await h.write('spec', 'the spec', j);
   await h.run([j]);

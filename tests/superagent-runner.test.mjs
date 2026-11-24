@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as registry from '../src/session-registry.js';
@@ -889,12 +890,12 @@ test('reconcile ends in-flight attempts with their result or as interrupted', as
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 const F = (id, severity, disposition) => ({ id, severity, text: `Finding ${id}.`, ...(disposition ? { disposition } : {}) });
 
-async function gitSetup({ tasks = null, pipeline = MILESTONE_2_PIPELINE } = {}) {
+async function gitSetup({ tasks = null, pipeline = MILESTONE_2_PIPELINE, artifactRoot = null } = {}) {
   const root = await tempDir('sa-runner-git-');
   const store = createSuperagentStore({ rootDir: path.join(root, 'jobs'), now: () => T0, logImpl: quiet });
   const origin = path.join(root, 'origin');
   await initRepo(origin);
-  const created = jobCreated({ pipeline, repos: [{ id: 'primary', origin }] });
+  const created = jobCreated({ pipeline, repos: [{ id: 'primary', origin }], ...(artifactRoot && { artifactRoot }) });
   const { jobId, branch } = created;
   const worktree = path.join(root, 'wt');
   const { baseSha } = await createWorktree({ origin, worktree, branch, copyLocalClaudeSettings: false });
@@ -903,13 +904,16 @@ async function gitSetup({ tasks = null, pipeline = MILESTONE_2_PIPELINE } = {}) 
   await store.append(jobId, { type: 'job-provisioned' });
   if (tasks) await store.append(jobId, { type: 'tasks-loaded', tasks });
   const job = store.get(jobId);
-  const commit = async (files, message = 'work') => {
+  const write = async (files) => {
     for (const [rel, content] of Object.entries(files)) {
       const abs = path.join(worktree, ...rel.split('/'));
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, content);
-      git(worktree, 'add', '--', rel);
     }
+  };
+  const commit = async (files, message = 'work') => {
+    await write(files);
+    git(worktree, 'add', '--', ...Object.keys(files));
     git(worktree, 'commit', '-q', '-m', message);
     return git(worktree, 'rev-parse', 'HEAD');
   };
@@ -934,7 +938,7 @@ async function gitSetup({ tasks = null, pipeline = MILESTONE_2_PIPELINE } = {}) 
   const events = async () => (await fs.readFile(path.join(store.jobDir(jobId), 'events.jsonl'), 'utf8'))
     .split('\n').filter(Boolean).map((line) => JSON.parse(line));
   const endOf = async (attemptId) => (await events()).find((e) => e.type === 'attempt-ended' && e.attemptId === attemptId);
-  return { store, job, jobId, origin, worktree, commit, result, publish, startedOnly, doneReview, events, endOf };
+  return { store, job, jobId, origin, worktree, write, commit, result, publish, startedOnly, doneReview, events, endOf };
 }
 
 let liveRuns = 0;
@@ -987,23 +991,25 @@ test('attempt-started records purpose and round; no purpose defaults to author',
   } finally { registry._reset(); }
 });
 
-test('a valid review result ends the attempt with verdict and findings stored on the derived attempt', async () => {
+test('a valid review result ends the attempt with verdict and findings stored on the derived attempt, and the output hashed', async () => {
   registry._reset();
   try {
-    const g = await gitSetup();
+    const g = await gitSetup({ artifactRoot: 'ledger' });
     const rel = reviewPaths(g.job, { phase: 'spec-review', round: 1 }).review;
-    const sha = await g.commit({ [rel]: '# review r1\n' });
+    assert.equal(rel, `.superpowers/superagent/${g.jobId}/artifacts/reviews/spec-review-r1.md`);
+    await g.write({ [rel]: '# review r1\n' });
     const findings = [F('F1', 'blocker'), F('F2', 'minor')];
     const attempt = await runLive(g, launchAction({ phase: 'spec-review', role: 'spec-reviewer', purpose: 'review', round: 1 }),
-      (a) => g.result(a, { artifacts: [rel], verdict: 'changes', findings, evidence: { commits: [sha] } }));
+      (a) => g.result(a, { artifacts: [rel], verdict: 'changes', findings }));
     assert.equal(attempt.outcome, 'done', JSON.stringify(await g.endOf(attempt.attemptId)));
     assert.equal(attempt.verdict, 'changes');
     assert.deepEqual(attempt.findings, findings);
-    assert.deepEqual(attempt.commits, [{ repo: 'primary', sha }]);
+    assert.deepEqual(attempt.commits, []);
     assert.equal(attempt.verified, null);
     const end = await g.endOf(attempt.attemptId);
     assert.equal(end.verdict, 'changes');
     assert.equal(end.verified, null);
+    assert.deepEqual(end.outputs, { [rel]: createHash('sha256').update('# review r1\n').digest('hex') });
   } finally { registry._reset(); }
 });
 
@@ -1011,16 +1017,17 @@ test('a valid implement result stores commits; a missing verify check ends the a
   registry._reset();
   try {
     const T1 = taskCreated('T1', { verify: 'npm test' });
-    const g = await gitSetup({ tasks: [T1] });
+    const g = await gitSetup({ tasks: [T1], artifactRoot: 'ledger' });
     const report = reviewPaths(g.job, { taskId: 'T1' }).report;
-    const reportSha = await g.commit({ [report]: '# T1 report\n' }, 'report');
+    assert.equal(report, `.superpowers/superagent/${g.jobId}/artifacts/tasks/T1-report.md`);
+    await g.write({ [report]: '# T1 report\n' });
     const codeSha = await g.commit({ 'src/hello.js': 'export const hello = 1;\n' }, 'code');
     const action = launchAction({ phase: 'implement', task: 'T1', role: 'implementer', purpose: 'implement', taskDef: T1 });
-    const evidence = (checks) => ({ commits: [reportSha, codeSha], checks });
+    const evidence = (checks) => ({ commits: [codeSha], checks });
 
     const ok = await runLive(g, action, (a) => g.result(a, { artifacts: [report], evidence: evidence([{ cmd: 'npm test', exit: 0 }]) }));
     assert.equal(ok.outcome, 'done', JSON.stringify(await g.endOf(ok.attemptId)));
-    assert.deepEqual(ok.commits, [{ repo: 'primary', sha: reportSha }, { repo: 'primary', sha: codeSha }]);
+    assert.deepEqual(ok.commits, [{ repo: 'primary', sha: codeSha }]);
     assert.equal(ok.verdict, null);
     assert.equal(ok.findings, null);
 

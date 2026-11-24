@@ -186,11 +186,13 @@ export function parseCard(text) {
 // - commit(files, message, repoId = 'primary') writes { relPath: text } into
 //   that repo's worktree, commits them on the job branch, returns the sha;
 // - publish(fields, { content, files }) writes every card output (content by
-//   output key overrides the default text) plus `files`, commits them, and
-//   returns a done body whose evidence lists that commit (and the task's
-//   verify command as a passing check).
+//   output key overrides the default text) without committing it, commits
+//   `files` in the primary repo (none, no commit), and returns a done body
+//   whose evidence lists that commit, if any (and the task's verify command
+//   as a passing check). `commitOutputs` plays a worker of a legacy job (no
+//   `artifactRoot`), which commits its outputs together with `files`.
 // Nudges (any later sendInput) are left unanswered.
-export function scriptedWorker({ factory, handlers }) {
+export function scriptedWorker({ factory, handlers, commitOutputs = false }) {
   const log = [];
   const errors = [];
   const original = factory.registry.sendInput;
@@ -211,19 +213,23 @@ export function scriptedWorker({ factory, handlers }) {
   }
 
   function publish(card, fields = {}, { content = {}, files = {} } = {}) {
-    const writes = {};
+    const primary = card.repos.find((r) => r.id === 'primary');
+    const outputs = {};
     for (const [key, rel] of Object.entries(card.outputs ?? {})) {
-      writes[rel] = content[key] ?? `# ${card.phaseId} ${card.purpose} ${card.attemptId}\n`;
+      outputs[rel] = content[key] ?? `# ${card.phaseId} ${card.purpose} ${card.attemptId}\n`;
+      const file = path.join(primary.worktree, ...rel.split('/'));
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, outputs[rel]);
     }
-    Object.assign(writes, files);
-    const sha = commit(card, writes, `${card.phaseId} ${card.purpose}${card.taskId ? ` ${card.taskId}` : ''}`);
+    const committed = commitOutputs ? { ...outputs, ...files } : files;
+    const sha = Object.keys(committed).length > 0 ? commit(card, committed, `${card.phaseId} ${card.purpose}${card.taskId ? ` ${card.taskId}` : ''}`) : null;
     const verify = card.task?.verify?.trim();
     return {
       status: 'done',
       artifacts: Object.values(card.outputs ?? {}),
       summary: `${card.purpose} for ${card.phaseId}${card.taskId ? ` ${card.taskId}` : ''}`,
       question: null,
-      evidence: { commits: [{ repo: 'primary', sha }], ...(verify ? { checks: [{ cmd: verify, exit: 0 }] } : {}) },
+      evidence: { ...(sha ? { commits: [{ repo: 'primary', sha }] } : {}), ...(verify ? { checks: [{ cmd: verify, exit: 0 }] } : {}) },
       ...fields,
     };
   }

@@ -123,14 +123,8 @@ function printEvents(jobId) {
 }
 
 function printArtifacts(job, worktree) {
-  const { slug, createdDate } = job;
-  const jobs = `docs/superpowers/jobs/${slug}`;
-  const rels = [
-    `docs/superpowers/specs/${createdDate}-${slug}-design.md`,
-    `docs/superpowers/plans/${createdDate}-${slug}.md`,
-    `${jobs}/tasks.json`,
-    `${jobs}/test-report.md`,
-  ];
+  const jobs = `.superpowers/superagent/${job.jobId}/artifacts`;
+  const rels = [job.artifacts.spec, job.artifacts.plan, job.artifacts.tasks, job.artifacts.testReport];
   for (const phase of ['spec-review', 'plan-review']) {
     for (let r = 1; r <= 3; r++) rels.push(`${jobs}/reviews/${phase}-r${r}.md`, `${jobs}/reviews/${phase}-r${r}-response.md`);
     rels.push(`${jobs}/reviews/${phase}-verify.md`);

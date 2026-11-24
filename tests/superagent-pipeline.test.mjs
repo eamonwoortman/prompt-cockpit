@@ -1,13 +1,14 @@
 // Milestone-2 and default-pipeline (brainstorm) integration: createSuperagent
 // driven by tick() with scripted fake workers (tests/superagent-helpers.mjs
-// scriptedWorker) that commit real files in the job's worktrees. One origin
+// scriptedWorker) that write their outputs into the ledger and commit real
+// code files in the job's worktrees. One origin
 // repo (plus one additional repo) is shared by the whole file; each test gets
 // its own store, registry state and job branch.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as registry from '../src/session-registry.js';
@@ -40,6 +41,10 @@ const task = (id, over = {}) => ({ id, title: `Task ${id}`, repos: ['primary'], 
 const TWO_TASKS = [task('T2', { dependsOn: ['T1'] }), task('T1', { verify: 'npm test' })];
 
 const approve = ({ publish }) => publish({ verdict: 'approve', findings: [] });
+// Task work needs a code commit in one of the task's repos; the content is
+// new on every attempt, so the commit is never empty.
+const codeFiles = (card) => ({ [`src/${card.taskId}.js`]: `// ${card.purpose} ${card.attemptId}\n` });
+const publishCode = (fields = {}) => ({ card, publish }) => publish(fields, { files: codeFiles(card) });
 
 // Every purpose's minimal valid answer; tests override by purpose or by
 // `${phaseId}:${purpose}`.
@@ -49,13 +54,13 @@ function handlersWith(over = {}) {
     'plan:author': ({ publish }) => publish({}, { content: { tasks: JSON.stringify(TWO_TASKS, null, 2) } }),
     review: approve,
     'task-review': approve,
-    implement: ({ publish }) => publish(),
+    implement: publishCode(),
     test: ({ publish }) => publish(),
     ...over,
   };
 }
 
-async function harness({ handlers = handlersWith(), limits = null, defaults = {}, projects = null, router: firstRouter, budgetCheck } = {}) {
+async function harness({ handlers = handlersWith(), limits = null, defaults = {}, projects = null, router: firstRouter, budgetCheck, commitOutputs = false } = {}) {
   registry._reset();
   const root = await fs.mkdtemp(path.join(shared.root, 'h-'));
   const configFile = path.join(root, 'config.json');
@@ -70,7 +75,7 @@ async function harness({ handlers = handlersWith(), limits = null, defaults = {}
     const config = createSuperagentConfig({ filePath: configFile });
     await config.load();
     const factory = sessionFactory(registry);
-    const worker = scriptedWorker({ factory, handlers });
+    const worker = scriptedWorker({ factory, handlers, commitOutputs });
     const sa = createSuperagent({
       registry: factory.registry,
       store,
@@ -126,7 +131,7 @@ const FF_ROLES = { spec: 'spec-writer', plan: 'planner' };
 
 // Puts a fresh job at `phaseId` without running workers for the phases
 // before it (the happy path runs them for real): the earlier artifacts are
-// committed in one go and the earlier phases are recorded as synthetic done
+// written in one go and the earlier phases are recorded as synthetic done
 // attempts (dir null, so h.started() leaves them out) and completions.
 async function fastForward(h, job, phaseId, { tasks = TWO_TASKS } = {}) {
   const wt = job.repos.find((r) => r.id === 'primary').worktree;
@@ -134,13 +139,10 @@ async function fastForward(h, job, phaseId, { tasks = TWO_TASKS } = {}) {
   const upTo = FF_ORDER.indexOf(phaseId);
   const files = { [paths.spec]: '# spec\n' };
   if (upTo > FF_ORDER.indexOf('plan')) Object.assign(files, { [paths.plan]: '# plan\n', [paths.tasks]: JSON.stringify(tasks, null, 2) });
-  const git = (...args) => execFileSync('git', args, { cwd: wt, encoding: 'utf8', timeout: 60_000 });
   for (const [rel, text] of Object.entries(files)) {
     await fs.mkdir(path.dirname(path.join(wt, ...rel.split('/'))), { recursive: true });
     await fs.writeFile(path.join(wt, ...rel.split('/')), text);
   }
-  git('add', '--', ...Object.keys(files));
-  git('commit', '-q', '-m', 'fast-forward');
   for (const phase of FF_ORDER.slice(0, upTo)) {
     if (FF_ROLES[phase]) {
       const attemptId = randomUUID();
@@ -227,7 +229,7 @@ test('a reviewer that always answers changes stops at the cap: 3 reviewers, 3 fi
     assert.deepEqual(steps(h.started(job.jobId).slice(-1)), [['plan', null, 'author', 'planner']]);
 
     const cards = h.worker.cards().filter((c) => c.phaseId === 'spec-review');
-    const reviews = `docs/superpowers/jobs/${job.slug}/reviews`;
+    const reviews = `.superpowers/superagent/${job.jobId}/artifacts/reviews`;
     assert.deepEqual(cards.map((c) => c.previousFindings), [null, `${reviews}/spec-review-r1.md`, `${reviews}/spec-review-r1.md`, `${reviews}/spec-review-r2.md`, `${reviews}/spec-review-r2.md`, `${reviews}/spec-review-r3.md`]);
     assert.ok(cards.every((c) => c.target === artifactPaths(job).spec));
     assert.deepEqual(cards.map((c) => c.final), [false, false, false, false, false, true]);
@@ -255,7 +257,7 @@ async function contestedRun(verified) {
   assert.equal(verify.role, 'verifier');
   const card = h.worker.cards().find((c) => c.purpose === 'verify');
   assert.deepEqual(card.contested, [{ id: 'B1', text: BLOCKER.text, disposition: 'declined: out of scope' }]);
-  assert.deepEqual(card.outputs, { verify: `docs/superpowers/jobs/${job.slug}/reviews/spec-review-verify.md` });
+  assert.deepEqual(card.outputs, { verify: `.superpowers/superagent/${job.jobId}/artifacts/reviews/spec-review-verify.md` });
   return { h, job, got, verify };
 }
 
@@ -330,8 +332,8 @@ test('a task review loop: changes, fix, approve completes the task with both com
           T2: changes(BLOCKER),
         }),
         fix: byTask({
-          T1: ({ publish }) => publish({ findings: [{ ...MAJOR, disposition: 'fixed' }] }),
-          T2: decline(BLOCKER),
+          T1: publishCode({ findings: [{ ...MAJOR, disposition: 'fixed' }] }),
+          T2: publishCode({ findings: [{ ...BLOCKER, disposition: 'declined: out of scope' }] }),
         }),
         verify: ({ publish }) => publish({ verified: [{ id: 'B1', verified: false, evidence: EVIDENCE }] }),
         test: () => HOLD,
@@ -355,11 +357,12 @@ test('a task review loop: changes, fix, approve completes the task with both com
     const round2 = cards.find((c) => c.taskId === 'T1' && c.purpose === 'task-review' && c.round === 2);
     assert.deepEqual(round2.taskCommits, [...body('T1', 'implement').evidence.commits, ...body('T1', 'fix').evidence.commits]);
     assert.equal(round2.taskCommits.length, 2);
-    assert.equal(round2.previousFindings, `docs/superpowers/jobs/${job.slug}/tasks/T1-review-r1.md`);
+    const taskFiles = `.superpowers/superagent/${job.jobId}/artifacts/tasks`;
+    assert.equal(round2.previousFindings, `${taskFiles}/T1-review-r1.md`);
     const t1Fix = cards.find((c) => c.taskId === 'T1' && c.purpose === 'fix');
-    assert.deepEqual([t1Fix.target, t1Fix.task.id, t1Fix.previousFindings], [null, 'T1', `docs/superpowers/jobs/${job.slug}/tasks/T1-review-r1.md`]);
+    assert.deepEqual([t1Fix.target, t1Fix.task.id, t1Fix.previousFindings], [null, 'T1', `${taskFiles}/T1-review-r1.md`]);
     const t2Verify = cards.find((c) => c.taskId === 'T2' && c.purpose === 'verify');
-    assert.deepEqual(t2Verify.outputs, { taskVerify: `docs/superpowers/jobs/${job.slug}/tasks/T2-verify.md` });
+    assert.deepEqual(t2Verify.outputs, { taskVerify: `${taskFiles}/T2-verify.md` });
     assert.deepEqual(t2Verify.contested, [{ id: 'B1', text: BLOCKER.text, disposition: 'declined: out of scope' }]);
 
     assert.deepEqual(got.completions.find((c) => c.phase === 'implement'), {
@@ -438,7 +441,7 @@ test('two test-failure cycles: a planner task F1 does not collide with the gener
   } finally { registry._reset(); }
 });
 
-test('an additional-repo-only task completes with an additional-repo commit plus the primary report commit; a test failure naming that repo routes a fix task whose repos include it', { timeout: TEST_TIMEOUT_MS }, async () => {
+test('an additional-repo-only task completes with only an additional-repo commit; a test failure naming that repo routes a fix task whose repos include it', { timeout: TEST_TIMEOUT_MS }, async () => {
   try {
     let implementRuns = 0;
     let tests = 0;
@@ -448,7 +451,7 @@ test('an additional-repo-only task completes with an additional-repo commit plus
           if (++implementRuns > 1) return HOLD;
           const libSha = commit({ 'src/lib.js': 'export const hello = () => "hello";\n' }, 'lib: hello', 'lib');
           const body = publish();
-          body.evidence.commits.unshift({ repo: 'lib', sha: libSha });
+          body.evidence.commits = [{ repo: 'lib', sha: libSha }];
           return body;
         },
         test: () => {
@@ -466,7 +469,7 @@ test('an additional-repo-only task completes with an additional-repo commit plus
     const l1 = h.started(job.jobId).find((e) => e.task === 'L1' && e.purpose === 'implement');
     const l1End = endOf(h, job.jobId, l1.attemptId);
     assert.equal(l1End.outcome, 'done');
-    assert.deepEqual(l1End.commits.map((c) => c.repo), ['lib', 'primary']);
+    assert.deepEqual(l1End.commits.map((c) => c.repo), ['lib']);
     const libHead = execFileSync('git', ['log', '-1', '--format=%H %s', job.branch], { cwd: shared.lib, encoding: 'utf8', timeout: 60_000 }).trim();
     assert.equal(libHead, `${l1End.commits[0].sha} lib: hello`);
     const review = h.worker.cards().find((c) => c.taskId === 'L1' && c.purpose === 'task-review');
@@ -546,10 +549,11 @@ test('a plan-review fix that corrupts tasks.json is invalid-result and retried',
     const h = await harness({
       handlers: handlersWith({
         'plan-review:review': (ctx) => (ctx.card.round === 1 ? changes(MAJOR)(ctx) : approve(ctx)),
-        'plan-review:fix': ({ publish }) => publish(
-          { findings: [{ ...MAJOR, disposition: 'fixed' }] },
-          { files: { [tasksRel]: ++fixes === 1 ? '[{"id": "T1",' : JSON.stringify(revised, null, 2) } },
-        ),
+        'plan-review:fix': ({ card, publish }) => {
+          const wt = card.repos.find((r) => r.id === 'primary').worktree;
+          writeFileSync(path.join(wt, ...tasksRel.split('/')), ++fixes === 1 ? '[{"id": "T1",' : JSON.stringify(revised, null, 2));
+          return publish({ findings: [{ ...MAJOR, disposition: 'fixed' }] });
+        },
         implement: () => HOLD,
       }),
     });
@@ -1322,6 +1326,7 @@ test('a pre-Plan-7 job resumes and routes a test failure', { timeout: TEST_TIMEO
   try {
     let tests = 0;
     const h = await harness({
+      commitOutputs: true,
       handlers: handlersWith({
         test: ({ publish }) => (++tests === 1 ? failedTest('1 test fails', [{ id: 'E1', severity: 'major', text: 'GET /hello returns 500' }]) : publish()),
       }),
@@ -1413,7 +1418,7 @@ const writeDiagnosis = ({ publish }) => publish({}, { content: { diagnosis: DIAG
 const troubleshootingHandlers = (over = {}) => ({
   'investigate:author': writeDiagnosis,
   'diagnosis-review:review': approve,
-  'fix:implement': ({ publish }) => publish(),
+  'fix:implement': publishCode(),
   'fix:task-review': approve,
   'verify:test': ({ publish }) => publish(),
   ...over,
