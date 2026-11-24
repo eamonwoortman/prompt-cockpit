@@ -48,7 +48,7 @@ import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createAccounting } from './accounting.js';
 import { artifactStates as readArtifactStates, snapshotDirFor } from './artifacts.js';
-import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, validateMilestoneFixture } from './config.js';
+import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, templateFor, validateMilestoneFixture } from './config.js';
 import { checkGate, checkInPlace, folderChangedEvent, normaliseTop, provisionInPlace, refuseJobBranch } from './inplace.js';
 import { hasTemplate } from './prompts.js';
 import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
@@ -916,6 +916,7 @@ export function createSuperagent({
       copyLocalClaudeSettings: resolved.copyLocalClaudeSettings,
       commitTests: commitTests ?? resolved.commitTests,
       testPaths: resolved.testPaths,
+      branchTemplate: templateFor(resolved.branchTemplates, recorded?.workflow?.id ?? null),
     };
     provisioningNow.add(jobId);
     known.add(jobId);

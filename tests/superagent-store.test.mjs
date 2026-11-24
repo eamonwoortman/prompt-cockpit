@@ -521,3 +521,10 @@ test('deriveJob resolves ledger artifact paths', () => {
   assert.equal(plain.artifactRoot, null);
   assert.equal(plain.artifacts.brief, 'docs/superpowers/jobs/add-hello/brief.md');
 });
+
+test('deriveJob reads branchTemplate from job-created, null when absent', () => {
+  const withT = deriveJob(stamp([jobCreated({ branchTemplate: 'feature/{description}' })]));
+  const without = deriveJob(stamp([jobCreated()]));
+  assert.equal(withT.branchTemplate, 'feature/{description}');
+  assert.equal(without.branchTemplate, null);
+});

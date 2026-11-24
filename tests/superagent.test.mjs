@@ -1495,3 +1495,15 @@ test('createJob records commitTests and testPaths: the option beats the config d
     assert.deepEqual(h.store.get(plain.jobId).testPaths, ['custom/**']);
   } finally { registry._reset(); }
 });
+
+test('createJob records the workflow branch template, null for a fixture job', async () => {
+  try {
+    const h = await harness();
+    const ts = await h.sa.createJob({ title: 'Fix hello', idea: 'GET /hello returns 500.', primaryRepo: h.repo, fixture: null, workflow: 'troubleshooting' });
+    const fx = await create(h, { title: 'Other thing' });
+    assert.equal(h.events(ts.jobId)[0].branchTemplate, 'bugfix/{ticket}-{description}');
+    assert.equal(h.store.get(ts.jobId).branchTemplate, 'bugfix/{ticket}-{description}');
+    assert.equal(h.events(fx.jobId)[0].branchTemplate, null);
+    assert.equal(h.store.get(fx.jobId).branchTemplate, null);
+  } finally { registry._reset(); }
+});

@@ -10,6 +10,7 @@ import {
   validateDefaults,
   validateMilestoneFixture,
   createSuperagentConfig,
+  templateFor,
 } from '../src/superagent/config.js';
 import { tempDir } from './superagent-helpers.mjs';
 
@@ -352,4 +353,35 @@ test('commitTests and testPaths default, validate and resolve per project', asyn
   assert.equal(cfg.resolve(repo).commitTests, true);
   assert.deepEqual(cfg.resolve(repo).testPaths, ['a/**']);
   await assert.rejects(cfg.save({ defaults: { commitTests: 'yes' } }), (err) => err.code === 'ERR_INVALID_CONFIG');
+});
+
+test('branchTemplates default, validate, merge per key and resolve a workflow id case-insensitively', async () => {
+  const d = defaultConfig();
+  assert.deepEqual(d.branchTemplates, { troubleshooting: 'bugfix/{ticket}-{description}', feature: 'feature/{description}' });
+  assert.deepEqual(validateDefaults(d), { errors: [], warnings: [] });
+  for (const bad of [{ feature: '' }, { feature: 1 }, { feature: null }]) {
+    const r = validateDefaults({ ...defaultConfig(), branchTemplates: bad });
+    assert.equal(r.errors.find((e) => e.path === 'branchTemplates.feature')?.message, 'branchTemplates.feature must be a non-empty string', JSON.stringify(bad));
+  }
+  for (const bad of ['a', [], null, 3]) {
+    const r = validateDefaults({ ...defaultConfig(), branchTemplates: bad });
+    assert.equal(r.errors.find((e) => e.path === 'branchTemplates')?.message, 'branchTemplates must be an object', JSON.stringify(bad));
+  }
+  const dir = await tempDir('sa-config-');
+  const repo = path.join(dir, 'repo');
+  const filePath = path.join(dir, 'config.json');
+  await fs.writeFile(filePath, JSON.stringify({
+    defaults: { branchTemplates: { custom: 'c/{slug}' } },
+    projects: { [repo]: { branchTemplates: { troubleshooting: 'fix/{ticket}' } } },
+  }));
+  const cfg = createSuperagentConfig({ filePath });
+  await cfg.load();
+  assert.deepEqual(cfg.resolve(null).branchTemplates, { troubleshooting: 'bugfix/{ticket}-{description}', feature: 'feature/{description}', custom: 'c/{slug}' });
+  assert.deepEqual(cfg.resolve(repo).branchTemplates, { troubleshooting: 'fix/{ticket}', feature: 'feature/{description}', custom: 'c/{slug}' });
+  await assert.rejects(cfg.save({ defaults: { branchTemplates: { feature: '' } } }), (err) => err.code === 'ERR_INVALID_CONFIG');
+  const t = cfg.resolve(repo).branchTemplates;
+  assert.equal(templateFor(t, 'Troubleshooting'), 'fix/{ticket}');
+  assert.equal(templateFor(t, 'feature'), 'feature/{description}');
+  assert.equal(templateFor(t, 'other'), null);
+  assert.equal(templateFor(t, null), null);
 });

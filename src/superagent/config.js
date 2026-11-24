@@ -101,6 +101,7 @@ export function defaultConfig() {
       '**/test/**', '**/tests/**', '**/Test/**', '**/Tests/**', '**/__tests__/**',
       '**/*.test.*', '**/*.spec.*', '**/*_test.*', '**/*Test.cs', '**/*Tests.cs',
     ],
+    branchTemplates: { troubleshooting: 'bugfix/{ticket}-{description}', feature: 'feature/{description}' },
     additionalRepos: [],
   };
 }
@@ -274,6 +275,13 @@ function checkScalars(d, errors) {
   if (!Array.isArray(d.testPaths) || d.testPaths.length === 0 || !d.testPaths.every(isNonEmptyString)) {
     errors.push({ path: 'testPaths', message: 'testPaths must be a non-empty array of glob strings' });
   }
+  if (!isPlainObject(d.branchTemplates)) {
+    errors.push({ path: 'branchTemplates', message: 'branchTemplates must be an object' });
+  } else {
+    for (const [key, value] of Object.entries(d.branchTemplates)) {
+      if (!isNonEmptyString(value)) errors.push({ path: keyPath('branchTemplates', key), message: `${keyPath('branchTemplates', key)} must be a non-empty string` });
+    }
+  }
   if (!isPlainObject(d.limits)) {
     errors.push({ path: 'limits', message: 'limits must be an object' });
     return;
@@ -313,6 +321,13 @@ export function validatePipeline(d) {
 export function validateMilestoneFixture(d, name = 'milestone-1') {
   if (!Object.hasOwn(FIXTURES, name)) throw new Error(`unknown milestone fixture "${name}"`);
   return validate({ ...d, pipeline: FIXTURES[name] }, { composition: false });
+}
+
+// Case-insensitive like workflows.js's sameWorkflowId, which cannot be imported here (workflows.js imports this module).
+export function templateFor(templates, workflowId) {
+  if (typeof workflowId !== 'string' || !isPlainObject(templates)) return null;
+  const key = Object.keys(templates).find((k) => k.toLowerCase() === workflowId.toLowerCase());
+  return key === undefined ? null : templates[key];
 }
 
 function merge(base, override) {

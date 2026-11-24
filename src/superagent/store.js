@@ -82,6 +82,7 @@ export function deriveJob(events) {
     copyLocalClaudeSettings: first.copyLocalClaudeSettings,
     commitTests: first.commitTests ?? true,
     testPaths: structuredClone(first.testPaths ?? []),
+    branchTemplate: first.branchTemplate ?? null,
     state: 'provisioning',
     reason: null,
     detail: null,
