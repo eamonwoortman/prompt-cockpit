@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { createSuperagentStore, deriveJob } from '../src/superagent/store.js';
 import { tempDir, jobCreated, provisionedEvents, taskCreated, ev } from './superagent-helpers.mjs';
@@ -548,29 +549,295 @@ const given = (over = {}) => ({ type: 'feedback-given', round: 1, forNeedsYouSeq
 const routed = (route, over = {}) => ({ type: 'feedback-routed', round: 1, attemptId: 'tri1', route, ...over });
 const feedbackFix = taskCreated('fb1');
 
-test('old event logs derive unchanged: feature job after one done planner attempt', () => {
-  const log = featureLog(
+test('old event logs derive unchanged: feature job through plan, a retried review and ready-to-try', () => {
+  const log = stamp([
+    ...provisionedEvents({ pipeline: featureWorkflow.phases, workflow: { id: 'feature' }, artifacts: featureWorkflow.artifacts, artifactRoot: 'ledger', models: { planner: { model: 'm' } }, limits: { maxAttempts: 3 }, router: { allowlist: ['r'], maxInputTokens: 10, maxOutputTokens: 5 } }),
+    started('b1', 'brainstorm', { role: 'brainstormer' }), ended('b1'), ev.phaseCompleted('brainstorm', 1),
+    started('s1', 'spec', { role: 'spec-writer' }), ended('s1'), ev.phaseCompleted('spec', 1),
+    ev.phaseCompleted('spec-review', 1),
     started('p1', 'plan', { role: 'planner', model: 'claude-opus-5-5', dir: '/d' }),
     { type: 'attempt-session', attemptId: 'p1', sessionId: 's1' },
     ended('p1', 'done', { summary: 'planned', tokens: 5 }),
     ev.tasksLoaded([taskCreated('t1')]),
-  );
-  const job = deriveJob(log);
-  const strip = (a) => {
-    const { feedbackRound, reportOrdinal, triage, ...rest } = a;
+    started('p2', 'plan-review', { role: 'plan-reviewer', purpose: 'review', round: 1 }),
+    ended('p2', 'failed', { reason: 'no-result' }),
+    { type: 'needs-you', reason: 'stuck', detail: { phase: 'plan-review' } },
+    { type: 'job-retried', needsYouSeq: 20, phase: 'plan-review', task: null, fromAttemptId: 'p2', handoff: null, note: 'try again' },
+    started('p3', 'plan-review', { role: 'plan-reviewer', purpose: 'review', round: 1 }),
+    ended('p3'),
+    ev.phaseCompleted('plan', 1),
+    ev.phaseCompleted('plan-review', 1),
+    { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } },
+  ]);
+  const { feedbackRound, feedbackRounds, ...job } = deriveJob(log);
+  assert.equal(feedbackRound, 0);
+  assert.deepEqual(feedbackRounds, []);
+  job.attempts = job.attempts.map((a) => {
+    assert.deepEqual([a.feedbackRound, a.reportOrdinal, a.triage], [0, null, null]);
+    const { feedbackRound: _r, reportOrdinal: _o, triage: _t, ...rest } = a;
     return rest;
-  };
-  assert.deepEqual([job.state, job.phaseIndex, job.phaseId, job.visits, job.tasks.map((t) => t.id)], ['running', 0, 'brainstorm', { brainstorm: 1 }, ['t1']]);
-  assert.deepEqual(job.attempts.map(strip), [{
-    attemptId: 'p1', phase: 'plan', task: null, role: 'planner', model: 'claude-opus-5-5', n: 1, recovery: false, previousAttemptId: null,
-    dir: '/d', handoff: null, sessionId: 's1', startedAt: null, endedAt: log.find((e) => e.type === 'attempt-ended').at,
-    outcome: 'done', reason: null, signature: null, detail: null, summary: 'planned', question: null, nudges: [], precompacts: [],
-    purpose: 'author', round: null, final: false, verdict: null, findings: null, commits: [], outputs: {}, verified: null,
-    questions: null, answers: null, escalated: null, tokens: 5, retryNote: null, retried: false,
-  }].map((a) => ({ ...a, startedAt: log.find((e) => e.type === 'attempt-started').at })));
-  assert.equal(job.feedbackRound, 0);
-  assert.deepEqual(job.feedbackRounds, []);
-  assert.deepEqual([job.attempts[0].feedbackRound, job.attempts[0].reportOrdinal, job.attempts[0].triage], [0, null, null]);
+  });
+  job.retries = job.retries.map((r) => {
+    assert.deepEqual([r.feedbackRound, r.reopen, r.errors], [0, false, null]);
+    const { feedbackRound: _r, reopen: _o, errors: _e, ...rest } = r;
+    return rest;
+  });
+  assert.deepEqual(job, {
+    jobId: 'j1',
+    slug: 'add-hello',
+    title: 'Add hello',
+    idea: 'Add a hello file.',
+    mode: 'automatic',
+    branch: 'superagent/add-hello',
+    createdAt: 1000,
+    createdDate: '2026-11-04',
+    repos: [
+      {
+        id: 'primary',
+        origin: '/repo',
+        inPlace: false,
+        toplevel: null,
+        admittedHead: null,
+        pendingChanges: null,
+        worktree: path.join(os.tmpdir(), 'sa-worktrees', 'j1', 'primary'),
+        baseSha: 'base',
+        settingsCopy: null
+      }
+    ],
+    workflow: { id: 'feature' },
+    artifactRoot: 'ledger',
+    artifacts: {
+      brief: '.superpowers/superagent/j1/artifacts/brief.md',
+      spec: '.superpowers/superagent/j1/artifacts/spec.md',
+      plan: '.superpowers/superagent/j1/artifacts/plan.md',
+      tasks: '.superpowers/superagent/j1/artifacts/tasks.json',
+      testReport: '.superpowers/superagent/j1/artifacts/test-report.md'
+    },
+    prompts: {},
+    pipeline: [
+      { phase: 'brainstorm', kind: 'brainstorm', role: 'brainstormer', inputs: [ 'idea' ], outputs: [ 'brief' ] },
+      { phase: 'spec', kind: 'author', role: 'spec-writer', inputs: [ 'brief' ], outputs: [ 'spec' ] },
+      { phase: 'spec-review', kind: 'review', role: 'spec-reviewer', author: 'spec-writer', target: 'spec', maxRounds: 3 },
+      { phase: 'plan', kind: 'author', role: 'planner', inputs: [ 'spec' ], outputs: [ 'plan', 'tasks' ] },
+      { phase: 'plan-review', kind: 'review', role: 'plan-reviewer', author: 'planner', target: 'plan', inputs: [ 'spec', 'tasks' ], maxRounds: 3 },
+      { phase: 'implement', kind: 'per-task', role: 'implementer', taskReview: 'task-reviewer', inputs: [ 'tasks' ] },
+      { phase: 'test', kind: 'author', role: 'tester', inputs: [ 'spec', 'tasks' ], outputs: [ 'testReport' ], test: true },
+      { phase: 'accept', kind: 'human', inputs: [ 'testReport' ] }
+    ],
+    models: { planner: { model: 'm' } },
+    limits: { maxAttempts: 3 },
+    router: { allowlist: [ 'r' ], maxInputTokens: 10, maxOutputTokens: 5 },
+    workerPermissionMode: 'auto',
+    copyLocalClaudeSettings: true,
+    commitTests: true,
+    testPaths: [],
+    branchTemplate: null,
+    finalBranch: null,
+    state: 'needs-you',
+    reason: 'ready-to-try',
+    detail: { phase: 'accept' },
+    needsYouSeq: 23,
+    phaseIndex: 5,
+    phaseId: 'implement',
+    attempts: [
+      {
+        attemptId: 'b1',
+        phase: 'brainstorm',
+        task: null,
+        role: 'brainstormer',
+        model: 'm',
+        n: 1,
+        recovery: false,
+        previousAttemptId: null,
+        dir: null,
+        handoff: null,
+        sessionId: null,
+        startedAt: 1003,
+        endedAt: 1004,
+        outcome: 'done',
+        reason: null,
+        signature: null,
+        detail: null,
+        summary: null,
+        question: null,
+        nudges: [],
+        precompacts: [],
+        purpose: 'author',
+        round: null,
+        final: false,
+        verdict: null,
+        findings: null,
+        commits: [],
+        outputs: {},
+        verified: null,
+        questions: null,
+        answers: null,
+        escalated: null,
+        tokens: null,
+        retryNote: null,
+        retried: false
+      },
+      {
+        attemptId: 's1',
+        phase: 'spec',
+        task: null,
+        role: 'spec-writer',
+        model: 'm',
+        n: 1,
+        recovery: false,
+        previousAttemptId: null,
+        dir: null,
+        handoff: null,
+        sessionId: null,
+        startedAt: 1006,
+        endedAt: 1007,
+        outcome: 'done',
+        reason: null,
+        signature: null,
+        detail: null,
+        summary: null,
+        question: null,
+        nudges: [],
+        precompacts: [],
+        purpose: 'author',
+        round: null,
+        final: false,
+        verdict: null,
+        findings: null,
+        commits: [],
+        outputs: {},
+        verified: null,
+        questions: null,
+        answers: null,
+        escalated: null,
+        tokens: null,
+        retryNote: null,
+        retried: false
+      },
+      {
+        attemptId: 'p1',
+        phase: 'plan',
+        task: null,
+        role: 'planner',
+        model: 'claude-opus-5-5',
+        n: 1,
+        recovery: false,
+        previousAttemptId: null,
+        dir: '/d',
+        handoff: null,
+        sessionId: 's1',
+        startedAt: 1010,
+        endedAt: 1012,
+        outcome: 'done',
+        reason: null,
+        signature: null,
+        detail: null,
+        summary: 'planned',
+        question: null,
+        nudges: [],
+        precompacts: [],
+        purpose: 'author',
+        round: null,
+        final: false,
+        verdict: null,
+        findings: null,
+        commits: [],
+        outputs: {},
+        verified: null,
+        questions: null,
+        answers: null,
+        escalated: null,
+        tokens: 5,
+        retryNote: null,
+        retried: false
+      },
+      {
+        attemptId: 'p2',
+        phase: 'plan-review',
+        task: null,
+        role: 'plan-reviewer',
+        model: 'm',
+        n: 1,
+        recovery: false,
+        previousAttemptId: null,
+        dir: null,
+        handoff: null,
+        sessionId: null,
+        startedAt: 1014,
+        endedAt: 1015,
+        outcome: 'failed',
+        reason: 'no-result',
+        signature: null,
+        detail: null,
+        summary: null,
+        question: null,
+        nudges: [],
+        precompacts: [],
+        purpose: 'review',
+        round: 1,
+        final: false,
+        verdict: null,
+        findings: null,
+        commits: [],
+        outputs: {},
+        verified: null,
+        questions: null,
+        answers: null,
+        escalated: null,
+        tokens: null,
+        retryNote: null,
+        retried: true
+      },
+      {
+        attemptId: 'p3',
+        phase: 'plan-review',
+        task: null,
+        role: 'plan-reviewer',
+        model: 'm',
+        n: 1,
+        recovery: false,
+        previousAttemptId: null,
+        dir: null,
+        handoff: null,
+        sessionId: null,
+        startedAt: 1018,
+        endedAt: 1019,
+        outcome: 'done',
+        reason: null,
+        signature: null,
+        detail: null,
+        summary: null,
+        question: null,
+        nudges: [],
+        precompacts: [],
+        purpose: 'review',
+        round: 1,
+        final: false,
+        verdict: null,
+        findings: null,
+        commits: [],
+        outputs: {},
+        verified: null,
+        questions: null,
+        answers: null,
+        escalated: null,
+        tokens: null,
+        retryNote: null,
+        retried: false
+      }
+    ],
+    tasks: [ { id: 't1', title: 'Task t1', repos: [ 'primary' ], dependsOn: [], acceptance: 'it works', verify: '', origin: 'plan', fromAttemptId: null } ],
+    visits: { brainstorm: 1, spec: 1, 'spec-review': 1, plan: 1, 'plan-review': 1, implement: 1 },
+    completions: [
+      { phase: 'brainstorm', visit: 1, unresolved: [], verification: null },
+      { phase: 'spec-review', visit: 1, unresolved: [], verification: null },
+      { phase: 'plan-review', visit: 1, unresolved: [], verification: null }
+    ],
+    routerDecisions: [],
+    answers: [],
+    retries: [ { needsYouSeq: 20, phase: 'plan-review', task: null, fromAttemptId: 'p2', handoff: null, note: 'try again', at: 1017, consumedBy: 'p3' } ],
+    lastSeq: 23
+  });
 });
 
 test('feedback-given applies only to its ready-to-try', () => {
@@ -666,4 +933,22 @@ test('attempt-started and attempt-ended keep round, report ordinal and triage', 
   const triage = { route: 'fix', summary: 's', requirementChanges: [] };
   const job = deriveJob(featureLog(started('a1', 'test', { feedbackRound: 2, reportOrdinal: 3 }), ended('a1', 'done', { triage })));
   assert.deepEqual([job.attempts[0].feedbackRound, job.attempts[0].reportOrdinal, job.attempts[0].triage], [2, 3, triage]);
+});
+
+test('tasks-appended applies only to a subplan round', () => {
+  const append = { type: 'tasks-appended', round: 1, tasks: [taskCreated('fb1')] };
+  for (const route of ['fix', 'separate']) {
+    const job = deriveJob(featureLog(...readyToTry, ev.tasksLoaded([taskCreated('t1')]), given(), routed(route, route === 'fix' ? { task: feedbackFix } : {}), append));
+    assert.deepEqual([job.feedbackRounds[0].tasksAppended, job.tasks.some((t) => t.id === 'fb1' && t.origin === 'feedback' && t.fromAttemptId == null)], [false, false], route);
+  }
+  const before = deriveJob(featureLog(...readyToTry, ev.tasksLoaded([taskCreated('t1')]), given(), append));
+  assert.deepEqual([before.feedbackRounds[0].tasksAppended, before.tasks.map((t) => t.id)], [false, ['t1']]);
+});
+
+test('job-retried reopen for a phase outside the pipeline changes nothing', () => {
+  const log = [...readyToTry, started('x0', 'plan', { role: 'planner' }), ended('x0'), given(), routed('subplan'), started('r1', 'plan-review', { feedbackRound: 1, purpose: 'review' }), ended('r1', 'failed'), stuck('plan-review')];
+  const seq = featureLog(...log).length;
+  const base = deriveJob(featureLog(...log));
+  const job = deriveJob(featureLog(...log, retriedEv(seq, { phase: 'nope', feedbackRound: 1, reopen: true })));
+  assert.deepEqual([job.state, job.phaseIndex, job.visits, job.attempts.map((a) => a.retried)], ['running', base.phaseIndex, base.visits, [false, false]]);
 });

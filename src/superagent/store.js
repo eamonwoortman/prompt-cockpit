@@ -167,15 +167,15 @@ export function deriveJob(events) {
         for (const a of job.attempts) {
           if (a.phase === ev.phase && a.task === task && a.outcome === 'failed' && a.feedbackRound === round) a.retried = true;
         }
-        if (ev.reopen === true) {
-          const at = job.pipeline.findIndex((p) => p.phase === ev.phase);
+        const at = job.pipeline.findIndex((p) => p.phase === ev.phase);
+        if (ev.reopen === true && at >= 0) {
           const review = roundPhases(job.pipeline).review;
           const phases = [at, review === at + 1 ? review : -1].filter((i) => i >= 0).map((i) => job.pipeline[i].phase);
           for (const a of job.attempts) {
             if (a.feedbackRound === round && phases.includes(a.phase)) a.retried = true;
           }
           for (const p of phases) job.visits[p] = (job.visits[p] ?? 1) + 1;
-          if (at >= 0) job.phaseIndex = at;
+          job.phaseIndex = at;
         }
         job.retries.push({
           feedbackRound: round,
@@ -336,7 +336,7 @@ export function deriveJob(events) {
       case 'tasks-appended': {
         const entry = job.feedbackRounds.find((r) => r.round === ev.round);
         const perTask = roundPhases(job.pipeline).perTask;
-        if (!entry || entry.round !== job.feedbackRound || entry.tasksAppended || perTask < 0) break;
+        if (!entry || entry.round !== job.feedbackRound || entry.route !== 'subplan' || entry.tasksAppended || perTask < 0) break;
         job.tasks = [...(job.tasks ?? []), ...(ev.tasks ?? []).map((t) => ({ ...structuredClone(t), origin: 'feedback', round: ev.round }))];
         job.visits[job.pipeline[perTask].phase] = (job.visits[job.pipeline[perTask].phase] ?? 1) + 1;
         entry.tasksAppended = true;
