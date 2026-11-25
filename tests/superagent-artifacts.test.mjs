@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { artifactStates, readArtifact, snapshotArtifact } from '../src/superagent/artifacts.js';
+import { artifactPath } from '../src/superagent/view-model.js';
 import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import { artifactPaths, primaryRepo } from '../src/superagent/results.js';
 import { deriveJob } from '../src/superagent/store.js';
@@ -223,5 +224,37 @@ test('artifactStates keeps a key pending when its latest writer failed, stopped 
     const job = deriveJob(events.map((e, i) => ({ seq: i + 1, at: 1000 + i, ...e })));
     primaryRepo(job).worktree = worktree;
     assert.equal((await artifactStates(job, { snapshotDir: path.join(base, 'none') })).get('spec'), 'pending', outcome);
+  }
+});
+
+test('round test reports read through artifacts.js from the workspace, then from snapshots, the alias naming the passing tester', async (t) => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'sa-artifacts-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const worktree = path.join(base, 'worktree');
+  await fs.mkdir(worktree);
+  const workflow = JSON.parse(await fs.readFile(new URL('../workflows/feature.json', import.meta.url), 'utf8'));
+  const tester = (attemptId, reportOrdinal) => ({ type: 'attempt-started', attemptId, phase: 'test', role: 'tester', model: 'm', n: 1, purpose: 'test', feedbackRound: 1, reportOrdinal });
+  const events = [
+    ...provisionedEvents({ pipeline: workflow.phases, workflow: { id: 'feature', name: 'Feature' }, artifacts: workflow.artifacts, artifactRoot: 'ledger' }),
+    { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } },
+    { type: 'feedback-given', round: 1, forNeedsYouSeq: 4, text: 'more', triageModel: null, baseline: {}, pendingChanges: {} },
+    tester('t1', 1), { type: 'attempt-ended', attemptId: 't1', outcome: 'failed' },
+    tester('t2', 2), { type: 'attempt-ended', attemptId: 't2', outcome: 'done' },
+  ].map((e, i) => ({ seq: i + 1, at: 1000 + i, ...e }));
+  const job = deriveJob(events);
+  primaryRepo(job).worktree = worktree;
+  const snapshotDir = snapshotDirOf(worktree);
+  const keys = { failed: 'feedback:1:test:testReport:1', passing: 'feedback:1:test:testReport:2', alias: 'feedback:1:test:testReport' };
+  const files = { [keys.failed]: 'failed report', [keys.passing]: 'passing report', [keys.alias]: 'passing report' };
+  for (const key of [keys.failed, keys.passing]) await writeSpec(path.join(worktree, artifactPath(job, key)), files[key]);
+  assert.deepEqual(await readArtifact(job, keys.alias, { snapshotDir }), { key: keys.alias, path: artifactPath(job, keys.passing), text: 'passing report', truncated: false, source: 'workspace' });
+  for (const key of Object.values(keys)) {
+    await snapshotArtifact(job, key, { snapshotDir });
+    assert.equal((await readArtifact(job, key, { snapshotDir })).text, files[key], key);
+  }
+  await fs.rm(path.join(worktree, '.superpowers'), { recursive: true });
+  for (const key of Object.values(keys)) {
+    const read = await readArtifact(job, key, { snapshotDir, ended: true });
+    assert.deepEqual([read.text, read.source], [files[key], 'snapshot'], key);
   }
 });

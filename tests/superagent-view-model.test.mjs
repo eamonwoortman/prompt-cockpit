@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import fs from 'node:fs/promises';
 import { MILESTONE_2_PIPELINE } from '../src/superagent/config.js';
 import { artifactPaths, reviewPaths } from '../src/superagent/results.js';
 import { deriveJob } from '../src/superagent/store.js';
@@ -492,4 +493,131 @@ test('jobDetail suggests the final branch only when ready to try', () => {
   assert.equal(detail.branchSuggestion, 'bugfix/170001-fix-the-crash');
   assert.equal(detail.finalBranch, null);
   assert.equal(jobDetail(m2([tasks], over), notLive).branchSuggestion, null);
+});
+
+const featureWorkflow = JSON.parse(await fs.readFile(new URL('../workflows/feature.json', import.meta.url), 'utf8'));
+const featureJob = (events = []) => deriveJob(stamp([
+  ...provisionedEvents({ pipeline: featureWorkflow.phases, workflow: { id: 'feature', name: 'Feature' }, artifacts: featureWorkflow.artifacts, artifactRoot: 'ledger' }),
+  ...events,
+]));
+const ready = { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } };
+const BASE = provisionedEvents().length;
+const given = (log, round) => ({ type: 'feedback-given', round, forNeedsYouSeq: BASE + log.length, text: `feedback ${round}`, triageModel: { model: 'm', effort: null, maxTurns: 20 }, baseline: {}, pendingChanges: {} });
+const routedTo = (round, route, attemptId = `tri${round}`) => ({ type: 'feedback-routed', round, attemptId, route });
+const endedWith = (attemptId, over = {}) => ({ type: 'attempt-ended', attemptId, outcome: 'done', ...over });
+const inRound = (feedbackRound, over = {}) => ({ feedbackRound, ...over });
+
+// Round 1 is a routed subplan: triage, plan, plan review, one tester, back to ready-to-try.
+const subplanRound = () => {
+  const log = [ready];
+  log.push(given(log, 1));
+  log.push(start('tri1', 'accept', inRound(1, { role: 'triage', purpose: 'triage' })));
+  log.push(endedWith('tri1', { triage: { route: 'subplan', summary: 'needs a sub-plan', requirementChanges: ['add X'], idea: 'the idea' } }));
+  log.push(routedTo(1, 'subplan'));
+  log.push(start('p1', 'plan', inRound(1, { role: 'planner', purpose: 'feedback-plan' })), endedWith('p1'));
+  log.push(start('rv1', 'plan-review', inRound(1, { purpose: 'review', round: 1 })), endedWith('rv1'));
+  log.push(start('t1', 'test', inRound(1, { role: 'tester', purpose: 'test', reportOrdinal: 1 })), endedWith('t1'));
+  log.push(ready);
+  return log;
+};
+
+test('round keys do not collide across rounds', () => {
+  const log = [ready, start('orig', 'plan-review', { purpose: 'review', round: 1 }), endedWith('orig')];
+  log.push(given(log, 1), start('r1', 'plan-review', inRound(1, { purpose: 'review', round: 1 })), endedWith('r1'), routedTo(1, 'separate'));
+  log.push(given(log, 2), start('r2', 'plan-review', inRound(2, { purpose: 'review', round: 1 })), endedWith('r2'));
+  const job = featureJob(log);
+  const keys = artifactKeys(job);
+  for (const k of ['review:plan-review:1', 'feedback:1:review:plan-review:1', 'feedback:2:review:plan-review:1']) assert.ok(keys.includes(k), k);
+  const writers = artifactWriters(job);
+  assert.equal(writers.get('review:plan-review:1').attemptId, 'orig');
+  assert.equal(writers.get('feedback:1:review:plan-review:1').attemptId, 'r1');
+  assert.equal(writers.get('feedback:2:review:plan-review:1').attemptId, 'r2');
+});
+
+test('round planner writes only round keys', () => {
+  const job = featureJob([start('p0', 'plan', { role: 'planner' }), endedWith('p0'), ...subplanRound()]);
+  const writers = artifactWriters(job);
+  assert.equal(writers.get('plan').attemptId, 'p0');
+  assert.equal(writers.get('tasks').attemptId, 'p0');
+  assert.equal(writers.get('feedback:1:out:plan').attemptId, 'p1');
+  assert.equal(writers.get('feedback:1:out:tasks').attemptId, 'p1');
+});
+
+test('a round plan review fix writes the round response and the round outputs', () => {
+  const log = [ready];
+  log.push(given(log, 1), start('f1', 'plan-review', inRound(1, { purpose: 'fix', round: 1 })), endedWith('f1'));
+  const writers = artifactWriters(featureJob(log));
+  assert.equal(writers.get('feedback:1:response:plan-review:1').attemptId, 'f1');
+  assert.equal(writers.get('feedback:1:out:plan').attemptId, 'f1');
+  assert.equal(writers.has('response:plan-review:1'), false);
+});
+
+test('triage writes feedback:N:triage', () => {
+  const job = featureJob(subplanRound());
+  assert.deepEqual(artifactWriters(job).get('feedback:1:triage'), { attemptId: 'tri1', phase: 'accept', task: null });
+  assert.ok(artifactKeys(job).includes('feedback:1:triage'));
+});
+
+test('round test keys use the report ordinal, not the cap counter', () => {
+  const log = [ready];
+  log.push(given(log, 1));
+  log.push(start('t1', 'test', inRound(1, { role: 'tester', purpose: 'test', n: 1, reportOrdinal: 1 })), endedWith('t1', { outcome: 'failed' }));
+  log.push(start('t2', 'test', inRound(1, { role: 'tester', purpose: 'test', n: 1, reportOrdinal: 2 })), endedWith('t2'));
+  const job = featureJob(log);
+  const writers = artifactWriters(job);
+  assert.equal(writers.get('feedback:1:test:testReport:1').attemptId, 't1');
+  assert.equal(writers.get('feedback:1:test:testReport:2').attemptId, 't2');
+  assert.equal(writers.get('feedback:1:test:testReport').attemptId, 't2');
+  assert.equal(writers.get('testReport'), undefined);
+  assert.deepEqual(artifactKeys(job).filter((k) => k.startsWith('feedback:1:test')).sort(), ['feedback:1:test:testReport', 'feedback:1:test:testReport:1', 'feedback:1:test:testReport:2']);
+});
+
+test('the round test alias waits for a done tester', () => {
+  const log = [ready];
+  log.push(given(log, 1), start('t1', 'test', inRound(1, { role: 'tester', purpose: 'test', reportOrdinal: 1 })), endedWith('t1', { outcome: 'failed' }));
+  const job = featureJob(log);
+  assert.equal(artifactWriters(job).has('feedback:1:test:testReport'), false);
+  assert.equal(artifactPath(job, 'feedback:1:test:testReport'), null);
+});
+
+test('artifactPath resolves round keys', () => {
+  const job = featureJob([...subplanRound(), start('t2', 'test', inRound(1, { role: 'tester', purpose: 'test', reportOrdinal: 2 })), endedWith('t2')]);
+  const dir = '.superpowers/superagent/j1/artifacts/feedback/round-1';
+  assert.equal(artifactPath(job, 'feedback:1:triage'), `${dir}/triage.md`);
+  assert.equal(artifactPath(job, 'feedback:1:out:plan'), `${dir}/outputs/plan.md`);
+  assert.equal(artifactPath(job, 'feedback:1:out:tasks'), `${dir}/outputs/tasks.json`);
+  assert.equal(artifactPath(job, 'feedback:1:test:testReport:1'), `${dir}/tests/testReport-1.md`);
+  assert.equal(artifactPath(job, 'feedback:1:test:testReport:2'), `${dir}/tests/testReport-2.md`);
+  assert.equal(artifactPath(job, 'feedback:1:test:testReport'), `${dir}/tests/testReport-2.md`);
+  const paths = reviewPaths(job, { phase: 'plan-review', round: 1, feedbackRound: 1 });
+  assert.equal(artifactPath(job, 'feedback:1:review:plan-review:1'), paths.review);
+  assert.equal(artifactPath(job, 'feedback:1:response:plan-review:1'), paths.response);
+  for (const bad of ['feedback:2:triage', 'feedback:0:triage', 'feedback:1:out:spec', 'feedback:1:out:nope', 'feedback:1:test:nope:1', 'feedback:1:test:testReport:0',
+    'feedback:1:review:nope:1', 'feedback:1:review:plan-review', 'feedback:1:bogus', 'feedback:1', 'feedback:x:triage', 'feedback:1:triage:extra']) {
+    assert.equal(artifactPath(job, bad), null, bad);
+  }
+});
+
+test('jobDetail carries feedback rounds and links', () => {
+  const before = featureJob([ready]);
+  assert.deepEqual(jobDetail(before, notLive).readyInputs, ['testReport']);
+  assert.deepEqual(jobDetail(before, notLive).feedbackRounds, []);
+  const job = featureJob(subplanRound());
+  const detail = jobDetail(job, notLive);
+  assert.deepEqual(detail.feedbackRounds, [{ round: 1, text: 'feedback 1', route: 'subplan', summary: 'needs a sub-plan', requirementChanges: ['add X'], idea: 'the idea', at: job.feedbackRounds[0].at }]);
+  assert.deepEqual(detail.readyInputs, ['feedback:1:triage', 'feedback:1:test:testReport']);
+  assert.deepEqual(detail.attempts.map((a) => [a.attemptId, a.feedbackRound]), [['tri1', 1], ['p1', 1], ['rv1', 1], ['t1', 1]]);
+});
+
+test('a separate round links its triage and keeps the older report', () => {
+  const log = [start('t0', 'test', { role: 'tester', purpose: 'test' }), endedWith('t0'), ready];
+  log.push(given(log, 1), start('tri1', 'accept', inRound(1, { role: 'triage', purpose: 'triage' })), endedWith('tri1', { triage: { route: 'separate', summary: 's', requirementChanges: [], idea: 'i' } }), routedTo(1, 'separate'));
+  assert.deepEqual(jobDetail(featureJob(log), notLive).readyInputs, ['feedback:1:triage', 'testReport']);
+});
+
+test('canGiveFeedback is false for a legacy job and for a running job', () => {
+  assert.equal(jobDetail(featureJob([ready]), notLive).canGiveFeedback, true);
+  assert.equal(jobDetail(featureJob([]), notLive).canGiveFeedback, false);
+  const legacy = deriveJob(stamp([...provisionedEvents({ pipeline: featureWorkflow.phases, workflow: { id: 'feature', name: 'Feature' }, artifacts: featureWorkflow.artifacts }), ready]));
+  assert.equal(jobDetail(legacy, notLive).canGiveFeedback, false);
 });

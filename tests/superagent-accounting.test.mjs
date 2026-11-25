@@ -509,3 +509,24 @@ test('a snapshot write after stop or past its time budget is refused', async () 
     assert.deepEqual(h.progress(), {}, how);
   }
 });
+
+test('snapshots round artifacts', async () => {
+  const workflow = JSON.parse(readFileSync(new URL('../workflows/feature.json', import.meta.url), 'utf8'));
+  const h = await snapshotSetup();
+  const created = { pipeline: workflow.phases, workflow: { id: 'feature', name: 'Feature' }, artifacts: workflow.artifacts };
+  const j = h.derive([
+    { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } },
+    { type: 'feedback-given', round: 1, forNeedsYouSeq: 4, text: 'more', triageModel: null, baseline: {}, pendingChanges: {} },
+    started('tri1', 'accept', { role: 'triage', purpose: 'triage', feedbackRound: 1 }), { type: 'attempt-session', attemptId: 'tri1', sessionId: 'sess-t' },
+    { type: 'attempt-ended', attemptId: 'tri1', outcome: 'done', triage: { route: 'separate', summary: 's', requirementChanges: [], idea: 'i' } },
+  ], created);
+  assert.equal(artifactPath(j, 'feedback:1:triage'), '.superpowers/superagent/j1/artifacts/feedback/round-1/triage.md');
+  await h.write('feedback:1:triage', 'the brief', j);
+  h.live.add('sess-t');
+  await h.run([j]);
+  assert.equal(h.snapshot('feedback:1:triage'), undefined, 'still live');
+  h.live.delete('sess-t');
+  await h.run([j]);
+  assert.equal(h.snapshot('feedback:1:triage'), 'the brief');
+  assert.deepEqual([h.progress()['feedback:1:triage'].attemptId, h.progress()['feedback:1:triage'].state], ['tri1', 'done']);
+});

@@ -1,6 +1,7 @@
 import { attemptCap, gatedOut, retriedAway, taskStatus } from './sequencer.js';
 import { PHASE_ATTEMPT_KINDS, TASK_ATTEMPT_KINDS, artifactPaths, reviewPaths } from './results.js';
 import { suggestBranch } from './branch-name.js';
+import { currentRound, feedbackEligibility, feedbackShape, parseRoundKey, roundKey, roundOf, roundOutputPaths, roundTestReportPaths, roundTriagePath } from './feedback.js';
 
 const CORRUPT_TITLE = 'corrupt event log';
 const isCorrupt = (job) => job?.reason === 'corrupt-events' && !job.pipeline;
@@ -52,7 +53,7 @@ function phaseChips(job) {
   });
 }
 
-function attemptKey(a) {
+function plainAttemptKey(a) {
   const { phase, task, round, purpose } = a;
   const suffix = Number.isInteger(round) ? `:${round}` : '';
   if (task != null) {
@@ -67,6 +68,13 @@ function attemptKey(a) {
   return null;
 }
 
+// A feedback round's phase-level review, response and verify files sit under
+// the round prefix; its per-task files keep their task-scoped keys.
+function attemptKey(a) {
+  const key = plainAttemptKey(a);
+  return key && a.task == null && roundOf(a) > 0 ? roundKey(roundOf(a), key) : key;
+}
+
 export function artifactKeys(job) {
   if (isCorrupt(job)) return [];
   const known = Object.keys(artifactPaths(job));
@@ -78,14 +86,47 @@ export function artifactKeys(job) {
     for (const k of [...(p.outputs ?? []), ...(p.inputs ?? [])]) if (k === 'brief' && known.includes(k)) keys.add(k);
     for (const k of p.outputs ?? []) if (known.includes(k)) keys.add(k);
   }
+  const knownSet = new Set(known);
   for (const a of launched) {
     const key = attemptKey(a);
     if (key) keys.add(key);
+    if (roundOf(a) > 0 && a.task == null) for (const k of keysWritten(job, a, knownSet)) keys.add(k);
   }
+  for (const alias of roundTestAliases(job, launched).keys()) keys.add(alias);
   return [...keys];
 }
 
 const AUTHORING_PURPOSES = new Set(['author', 'ask', 'test']);
+
+// A feedback round attempt writes round keys (feedback:<N>:...); see Global
+// Constraints for the forms.
+function roundKeysWritten(job, a, phase, known) {
+  const round = roundOf(a);
+  if (a.purpose === 'triage') return [roundKey(round, 'triage')];
+  const outs = (list) => list.filter((k) => known.has(k)).map((k) => roundKey(round, `out:${k}`));
+  if (a.purpose === 'feedback-plan') return outs(phase?.outputs ?? []);
+  if (a.purpose === 'test') {
+    return Number.isInteger(a.reportOrdinal) ? (phase?.outputs ?? []).filter((k) => known.has(k)).map((k) => roundKey(round, `test:${k}:${a.reportOrdinal}`)) : [];
+  }
+  const keys = [attemptKey(a)].filter(Boolean);
+  if (a.purpose === 'fix' && phase?.target) {
+    const author = job.pipeline.find((p) => p.kind === 'author' && (p.outputs ?? []).includes(phase.target));
+    keys.push(...outs(author?.outputs ?? []));
+  }
+  return keys;
+}
+
+// feedback:<N>:test:<key> -> the latest done round tester of round N.
+function roundTestAliases(job, launched) {
+  const aliases = new Map();
+  const known = new Set(Object.keys(artifactPaths(job)));
+  for (const a of launched) {
+    if (a.purpose !== 'test' || roundOf(a) === 0 || a.outcome !== 'done') continue;
+    const phase = (job.pipeline ?? []).find((p) => p.phase === a.phase);
+    for (const k of phase?.outputs ?? []) if (known.has(k)) aliases.set(roundKey(roundOf(a), `test:${k}`), a);
+  }
+  return aliases;
+}
 
 // The keys an attempt writes (results.js requiredOutputs): its phase outputs
 // when authoring, else its own review/response/report/verify file, plus, for a
@@ -94,6 +135,7 @@ const AUTHORING_PURPOSES = new Set(['author', 'ask', 'test']);
 function keysWritten(job, a, known) {
   if (a.purpose === 'answer') return [];
   const phase = (job.pipeline ?? []).find((p) => p.phase === a.phase);
+  if (roundOf(a) > 0 && a.task == null) return roundKeysWritten(job, a, phase, known);
   if (AUTHORING_PURPOSES.has(a.purpose)) return (phase?.outputs ?? []).filter((k) => known.has(k));
   const keys = [attemptKey(a)].filter(Boolean);
   if (a.purpose === 'fix' && a.task == null && phase?.target) {
@@ -111,6 +153,7 @@ export function artifactWriters(job) {
   const launched = (job.attempts ?? []).filter((a) => !gatedOut(a));
   const writer = (a) => ({ attemptId: a.attemptId, phase: a.phase, task: a.task ?? null });
   for (const a of launched) for (const key of keysWritten(job, a, known)) writers.set(key, writer(a));
+  for (const [alias, a] of roundTestAliases(job, launched)) writers.set(alias, writer(a));
   // artifactKeys also lists a brief that only a later phase reads.
   if (!writers.has('brief') && artifactKeys(job).includes('brief')) {
     const brainstorms = new Set(job.pipeline.filter((p) => p.kind === 'brainstorm').map((p) => p.phase));
@@ -136,6 +179,36 @@ export function artifactPath(job, key) {
   if (isCorrupt(job) || typeof key !== 'string') return null;
   const paths = artifactPaths(job);
   if (Object.hasOwn(paths, key)) return paths[key];
+  const parsed = parseRoundKey(key);
+  return parsed ? roundArtifactPath(job, parsed) : reviewKeyPath(job, key, 0);
+}
+
+function roundArtifactPath(job, { round, key }) {
+  if (!ROUND.test(String(round)) || round > currentRound(job)) return null;
+  const shape = feedbackShape(job);
+  if (!shape) return null;
+  const [kind, ...rest] = key.split(':');
+  try {
+    if (kind === 'triage') return rest.length === 0 ? roundTriagePath(job, round) : null;
+    if (kind === 'out') return rest.length === 1 && (shape.taskWriting.outputs ?? []).includes(rest[0]) ? roundOutputPaths(job, round, [rest[0]])[rest[0]] : null;
+    if (kind === 'test') return roundTestPath(job, shape, round, rest);
+    if (kind === 'review' || kind === 'response' || kind === 'verify') return reviewKeyPath(job, key, round);
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function roundTestPath(job, shape, round, [id, ordinal, ...more]) {
+  if (more.length || !(shape.test.outputs ?? []).includes(id)) return null;
+  if (ordinal === undefined) {
+    const latest = (job.attempts ?? []).findLast((a) => a.purpose === 'test' && roundOf(a) === round && a.outcome === 'done' && !gatedOut(a) && Number.isInteger(a.reportOrdinal));
+    return latest ? roundTestReportPaths(job, round, latest.reportOrdinal)[id] : null;
+  }
+  return ROUND.test(ordinal) ? roundTestReportPaths(job, round, Number(ordinal))[id] : null;
+}
+
+function reviewKeyPath(job, key, feedbackRound) {
   const [kind, id, round, ...rest] = key.split(':');
   if (rest.length || !id) return null;
   if (round !== undefined && !ROUND.test(round)) return null;
@@ -146,8 +219,9 @@ export function artifactPath(job, key) {
   if (['review', 'response', 'taskReview'].includes(kind) && n === null) return null;
   if (['report'].includes(kind) && n !== null) return null;
   if (phaseKind && !(job.pipeline ?? []).some((p) => p.phase === id)) return null;
+  if (feedbackRound > 0 && !phaseKind) return null;
   try {
-    const paths = reviewPaths(job, phaseKind ? { phase: id, round: n } : { taskId: id, round: n });
+    const paths = reviewPaths(job, phaseKind ? { phase: id, round: n, feedbackRound } : { taskId: id, round: n });
     return paths[kind] ?? null;
   } catch {
     return null;
@@ -193,9 +267,33 @@ function needsYouView(job) {
   };
 }
 
+// After a feedback round the links name that round's files: its triage, then
+// each input the round rewrote (the latest done tester's report, a sub-plan's
+// outputs) in place of the original.
 function readyInputs(job) {
   const last = (job.pipeline ?? []).findLast((p) => p.kind === 'human');
-  return [...(last?.inputs ?? [])];
+  const inputs = [...(last?.inputs ?? [])];
+  const round = currentRound(job);
+  if (round === 0) return inputs;
+  const writers = artifactWriters(job);
+  const swapped = inputs.map((key) => [`test:${key}`, `out:${key}`].map((k) => roundKey(round, k)).find((k) => writers.has(k)) ?? key);
+  const triage = roundKey(round, 'triage');
+  return writers.has(triage) ? [triage, ...swapped] : swapped;
+}
+
+function feedbackRoundsView(job) {
+  return (job.feedbackRounds ?? []).map((entry) => {
+    const triage = (job.attempts ?? []).find((a) => a.attemptId === entry.attemptId)?.triage ?? null;
+    return {
+      round: entry.round,
+      text: entry.text,
+      route: entry.route ?? null,
+      summary: triage?.summary ?? null,
+      requirementChanges: triage?.requirementChanges ?? [],
+      idea: triage?.idea ?? null,
+      at: entry.at ?? null,
+    };
+  });
 }
 
 // usd is null when no part of it was priced; complete is false when anything
@@ -270,7 +368,7 @@ const usageShape = (usage) => (usage && usage.state !== 'unknown'
 export function jobDetail(job, { isLive = () => false, usageFor = () => null, transcriptFor = () => null, artifactStates = null } = {}) {
   const summary = jobSummary(job);
   if (isCorrupt(job)) {
-    return { ...summary, idea: null, branch: null, repos: [], readyInputs: [], phases: [], tasks: null, attempts: [], artifacts: [], spend: spendView(job, []), router: routerView(job), needsYou: null };
+    return { ...summary, idea: null, branch: null, repos: [], readyInputs: [], phases: [], tasks: null, attempts: [], artifacts: [], spend: spendView(job, []), router: routerView(job), needsYou: null, feedbackRounds: [], canGiveFeedback: false };
   }
   const limits = job.limits ?? {};
   const writers = artifactWriters(job);
@@ -297,6 +395,7 @@ export function jobDetail(job, { isLive = () => false, usageFor = () => null, tr
       n: a.n,
       cap: attemptCap(limits, a.task),
       round: a.round ?? null,
+      feedbackRound: roundOf(a),
       purpose: a.purpose,
       outcome: a.outcome ?? null,
       pausedBeforeLaunch: gatedOut(a),
@@ -327,5 +426,7 @@ export function jobDetail(job, { isLive = () => false, usageFor = () => null, tr
     spend: spendView(job, costed),
     router: routerView(job),
     needsYou: needsYouView(job),
+    feedbackRounds: feedbackRoundsView(job),
+    canGiveFeedback: feedbackEligibility(job).ok,
   };
 }
