@@ -20,6 +20,7 @@
 import path from 'node:path';
 import { STAND_IN_ROLE } from './config.js';
 import { ANSWER_TAGS } from './results.js';
+import { currentRound, feedbackShape, isRoundScoped, roundOf, roundRoute } from './feedback.js';
 
 export const CONSUMING_OUTCOMES = new Set(['done', 'failed', 'question']);
 // createJob's gate (index.js).
@@ -45,13 +46,21 @@ export const gatedOut = (a) => a.outcome === 'failed' && a.reason === 'folder-ch
 // same way; the retry itself carries the resume point (pendingRetry).
 export const retriedAway = (a) => a.retried === true;
 
-export function attemptsFor(job, phase, task = null) {
-  return job.attempts.filter((a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a) && !retriedAway(a));
+// A feedback round re-enters the task-writing, plan review, test and human
+// phases: their scopes read only the round's attempts. Per-task scopes stay
+// per task id.
+const inRound = (job, phase, round) => (isRoundScoped(job, phase) ? (a) => roundOf(a) === round : () => true);
+
+export function attemptsFor(job, phase, task = null, round = currentRound(job)) {
+  const ofRound = inRound(job, phase, round);
+  return job.attempts.filter((a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a) && !retriedAway(a) && ofRound(a));
 }
 
-// The scope's latest Retry that no attempt has started from yet.
+// The scope's latest Retry that no attempt has started from yet, in the
+// current round (the round the next attempt-started carries).
 function pendingRetry(job, phase, task) {
-  return (job.retries ?? []).findLast((r) => r.phase === phase && r.task === task && r.consumedBy === null) ?? null;
+  const round = currentRound(job);
+  return (job.retries ?? []).findLast((r) => r.phase === phase && r.task === task && (r.feedbackRound ?? 0) === round && r.consumedBy === null) ?? null;
 }
 
 export function attemptCap(limits, task) {
@@ -85,8 +94,8 @@ export function answerFor(job, attemptId) {
   return answerRecord(job, attemptId)?.answer ?? null;
 }
 
-export function answeredInScope(job, phaseId, taskId = null) {
-  const scope = new Set(attemptsFor(job, phaseId, taskId).map((a) => a.attemptId));
+export function answeredInScope(job, phaseId, taskId = null, round = currentRound(job)) {
+  const scope = new Set(attemptsFor(job, phaseId, taskId, round).map((a) => a.attemptId));
   return (job.answers ?? []).filter((a) => scope.has(a.forAttemptId)).length;
 }
 
@@ -235,9 +244,16 @@ export function buildFixTask(job, attemptId, rawFindings) {
   };
 }
 
-function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null, model: modelOverride = null, handoff = null, openQuestions = null, askedIds = null }) {
-  const model = job.models[role];
+const roundEntry = (job, round) => (job.feedbackRounds ?? []).find((r) => r.round === round) ?? null;
+
+// Triage's model was resolved at feedback-given and recorded on the round: a
+// job's own models were fixed at job-created and may have no triage entry.
+const modelFor = (job, role) => (role === 'triage' ? (roundEntry(job, currentRound(job))?.triageModel ?? job.models[role]) : job.models[role]);
+
+function launch(job, { phase, task = null, role, attempts, recovery, previousAttemptId, purpose, round = null, final = false, taskDef = null, reviewFindings = null, contested = null, model: modelOverride = null, handoff = null, openQuestions = null, askedIds = null, reportOrdinal = null }) {
+  const model = modelFor(job, role);
   const retry = pendingRetry(job, phase.phase, task);
+  const feedbackRound = currentRound(job);
   return {
     type: 'launch',
     phase: phase.phase,
@@ -259,6 +275,9 @@ function launch(job, { phase, task = null, role, attempts, recovery, previousAtt
     openQuestions,
     askedIds,
     ...(retry?.note ? { retryNote: retry.note } : {}),
+    ...(retry?.errors != null ? { retryErrors: retry.errors } : {}),
+    ...(feedbackRound > 0 ? { feedbackRound } : {}),
+    ...(reportOrdinal != null ? { reportOrdinal } : {}),
   };
 }
 
@@ -336,6 +355,12 @@ function routeOrApply(job, ctx, { last, role, launchArgs, stuck }) {
   }
 }
 
+// A subplan round re-runs the task-writing phase to write the round's files.
+function authorPurpose(job, phase, round) {
+  if (round === 0 || roundRoute(job, round) !== 'subplan') return 'author';
+  return feedbackShape(job)?.taskWriting.phase === phase.phase ? 'feedback-plan' : 'author';
+}
+
 function authorAction(job, phase, ctx) {
   const { now, liveSessions, maxConcurrentSessions } = ctx;
   const attempts = attemptsFor(job, phase.phase);
@@ -366,6 +391,7 @@ function authorAction(job, phase, ctx) {
   if (guard) return guard;
 
   const retry = last != null && !routed.has(last.attemptId);
+  const feedbackRound = currentRound(job);
   const launchArgs = {
     phase,
     task: null,
@@ -373,14 +399,42 @@ function authorAction(job, phase, ctx) {
     attempts,
     recovery: retry,
     previousAttemptId: retry ? last.attemptId : null,
-    purpose: isTest ? 'test' : 'author',
+    purpose: isTest ? 'test' : authorPurpose(job, phase, feedbackRound),
     round: null,
+    // Every test attempt started in the round counts, retried, interrupted and
+    // gated ones included, so a retest never reuses an earlier report's file.
+    reportOrdinal: isTest && feedbackRound > 0 ? 1 + job.attempts.filter((a) => a.phase === phase.phase && roundOf(a) === feedbackRound).length : null,
   };
   const override = retry ? routeOrApply(job, ctx, { last, role: phase.role, launchArgs, stuck }) : null;
   if (override?.type) return override;
 
   if (liveSessions >= maxConcurrentSessions) return { type: 'wait', until: null, why: 'concurrency' };
   return launch(job, { ...launchArgs, ...override });
+}
+
+// A feedback round with no routing decision: triage runs in the human phase.
+// authorAction's guard order (in-flight, question, cap, repeated error,
+// back-off, concurrency) with no router; a done triage is ready to route.
+function triageAction(job, phase, ctx, round) {
+  const { now, liveSessions, maxConcurrentSessions } = ctx;
+  const attempts = attemptsFor(job, phase.phase);
+  if (attempts.some((a) => !a.outcome)) return { type: 'none' };
+
+  const last = attempts[attempts.length - 1];
+  const stuck = (why, extra) => stuckAction(phase, null, why, last, extra);
+  if (last?.outcome === 'done') return last.triage ? { type: 'route-feedback', round, attemptId: last.attemptId } : stuck('triage-missing');
+  if (last?.outcome === 'question' && answerFor(job, last.attemptId) == null) {
+    if (answeredInScope(job, phase.phase) >= questionCap(job)) return stuck('question-cap', { attemptId: last.attemptId, question: last.question });
+    return { type: 'needs-you', reason: 'question', detail: { attemptId: last.attemptId, question: last.question, phase: phase.phase, task: null } };
+  }
+
+  if (attempts.filter((a) => consumes(job, a)).length >= attemptCap(job.limits, null)) return stuck('attempt-cap');
+  const guard = retryGuard(attempts, job.limits, now, stuck);
+  if (guard) return guard;
+
+  if (liveSessions >= maxConcurrentSessions) return { type: 'wait', until: null, why: 'concurrency' };
+  const recovery = last != null;
+  return launch(job, { phase, task: null, role: 'triage', attempts, recovery, previousAttemptId: recovery ? last.attemptId : null, purpose: 'triage', round: null });
 }
 
 // Guard order for one review scope (a review phase, or one task): in-flight,
@@ -455,6 +509,9 @@ function reviewAction(job, phase, ctx) {
 function perTaskAction(job, phase, ctx) {
   if (job.tasks === null) return { type: 'load-tasks' };
   if (job.attempts.some((a) => a.phase === phase.phase && !a.outcome)) return { type: 'none' };
+  // A subplan round's tasks are appended on entry, with or without a plan review.
+  const round = currentRound(job);
+  if (round > 0 && roundRoute(job, round) === 'subplan' && !roundEntry(job, round).tasksAppended) return { type: 'load-round-tasks', round };
 
   const loops = job.tasks.map((task) => ({ task, loop: taskLoop(job, phase, task) }));
   if (loops.every(({ loop }) => loop.type === 'complete')) {
@@ -567,14 +624,17 @@ function brainstormAction(job, phase, ctx) {
 // The launch action's attempt context, rebuilt from the derived job for an
 // attempt that has no live record (reconcile), so its result is validated by
 // the same rules as a live finish. Only attempts before it in its scope count,
-// as when the sequencer created the launch.
+// as when the sequencer created the launch, and only those of the attempt's own
+// feedback round in a round-scoped phase.
 export function attemptContext(job, attempt) {
   const purpose = attempt.purpose ?? 'author';
   const task = attempt.task ?? null;
   const round = attempt.round ?? null;
+  const feedbackRound = roundOf(attempt);
+  const ofRound = inRound(job, attempt.phase, feedbackRound);
   const at = job.attempts.findIndex((a) => a.attemptId === attempt.attemptId);
   const before = (at < 0 ? job.attempts : job.attempts.slice(0, at))
-    .filter((a) => a.phase === attempt.phase && (a.task ?? null) === task);
+    .filter((a) => a.phase === attempt.phase && (a.task ?? null) === task && ofRound(a));
   const done = before.filter((a) => a.outcome === 'done');
   const phase = job.pipeline.find((p) => p.phase === attempt.phase);
 
@@ -611,6 +671,9 @@ export function attemptContext(job, attempt) {
     contested,
     openQuestions,
     askedIds,
+    // As on the launch action: absent means round 0 and no report ordinal.
+    ...(feedbackRound > 0 ? { feedbackRound } : {}),
+    ...(attempt.reportOrdinal != null ? { reportOrdinal: attempt.reportOrdinal } : {}),
   };
 }
 
@@ -618,7 +681,11 @@ export function nextAction(job, ctx) {
   if (job.state !== 'running') return { type: 'none' };
   const phase = job.pipeline[job.phaseIndex];
   if (!phase) return { type: 'none' };
-  if (phase.kind === 'human') return { type: 'needs-you', reason: 'ready-to-try', detail: { phase: phase.phase } };
+  if (phase.kind === 'human') {
+    const round = currentRound(job);
+    if (round === 0 || roundRoute(job, round) !== null) return { type: 'needs-you', reason: 'ready-to-try', detail: { phase: phase.phase } };
+    return triageAction(job, phase, ctx, round);
+  }
   if (phase.kind === 'review') return reviewAction(job, phase, ctx);
   if (phase.kind === 'per-task') return perTaskAction(job, phase, ctx);
   if (phase.kind === 'brainstorm') return brainstormAction(job, phase, ctx);

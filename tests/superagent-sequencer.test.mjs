@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { deriveJob } from '../src/superagent/store.js';
 import { outcomeForResult } from '../src/superagent/results.js';
 import * as sequencer from '../src/superagent/sequencer.js';
@@ -1212,4 +1213,192 @@ test('job-retried is ignored unless the job is stuck, and only forgets its own s
   const job = m2(...events, stuck, { type: 'job-retried', needsYouSeq: seq, phase: 'implement', task: 'T1', fromAttemptId: 'x1', handoff: null, note: null });
   assert.equal(job.state, 'running');
   assert.deepEqual(job.attempts.filter((x) => x.phase === 'implement').map((x) => [x.attemptId, x.retried]), [['x1', true], ['x2', false]]);
+});
+
+// Give feedback: a ready-to-try Feature job re-enters triage, its task-writing
+// phase, plan review, per-task and test phases, each scoped to its round.
+const FEATURE = JSON.parse(readFileSync(new URL('../workflows/feature.json', import.meta.url), 'utf8'));
+const { triage: _noTriage, ...preTriageModels } = defaultConfig().models;
+const featureStart = provisionedEvents({ pipeline: FEATURE.phases, workflow: { id: 'feature' }, artifacts: FEATURE.artifacts, artifactRoot: 'ledger', models: preTriageModels });
+// A feedback-given with no forNeedsYouSeq answers the latest needs-you.
+const fj = (...events) => {
+  let ready = null;
+  return deriveJob([...featureStart, ...events].map((e, i) => {
+    const out = { seq: i + 1, at: 1, ...e };
+    if (e.type === 'needs-you') ready = out.seq;
+    if (e.type === 'feedback-given' && e.forNeedsYouSeq === undefined) out.forNeedsYouSeq = ready;
+    return out;
+  }));
+};
+// One attempt in feedback round `fr` (0 leaves feedbackRound off, as old logs do).
+function fa({ id, phase, purpose, fr = 0, ord = null, task = null, round = null, role = 'r', outcome = 'done', ...end }) {
+  const s = { type: 'attempt-started', attemptId: id, phase, task, role, model: 'm', n: 1, purpose, round, final: false, dir: '/d', ...(fr ? { feedbackRound: fr } : {}), ...(ord != null ? { reportOrdinal: ord } : {}) };
+  return outcome == null ? [s] : [s, { type: 'attempt-ended', attemptId: id, outcome, at: T0, ...end }];
+}
+const READY = { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } };
+const FT1 = taskCreated('T1');
+const round0 = [
+  ev.phaseCompleted('brainstorm', 1), ev.phaseCompleted('spec', 1), ev.phaseCompleted('spec-review', 1),
+  ...fa({ id: 'p0', phase: 'plan', purpose: 'author' }),
+  ...fa({ id: 'r0', phase: 'plan-review', purpose: 'review', round: 1, verdict: 'approve', findings: [] }), ev.phaseCompleted('plan-review', 1),
+  ev.tasksLoaded([FT1]),
+  ...fa({ id: 'i0', phase: 'implement', task: 'T1', purpose: 'implement' }),
+  ...fa({ id: 'tr0', phase: 'implement', task: 'T1', purpose: 'task-review', round: 1, verdict: 'approve', findings: [] }),
+  ev.phaseCompleted('implement', 1),
+  ...fa({ id: 't0', phase: 'test', purpose: 'test' }),
+  READY,
+];
+const given = (round, over = {}) => ({ type: 'feedback-given', round, text: `feedback ${round}`, triageModel: { model: 'claude-sonnet-5-5', effort: null, maxTurns: 20 }, baseline: {}, pendingChanges: {}, ...over });
+const triaged = (round, route, id = `tri${round}`) => fa({ id, phase: 'accept', purpose: 'triage', role: 'triage', fr: round, triage: { route, summary: 's', requirementChanges: [] } });
+const routedTo = (round, route, over = {}) => ({ type: 'feedback-routed', round, attemptId: `tri${round}`, route, ...over });
+const doneRoundTask = (id, fr) => [
+  ...fa({ id: `i-${id}`, phase: 'implement', task: id, purpose: 'implement', fr }),
+  ...fa({ id: `tr-${id}`, phase: 'implement', task: id, purpose: 'task-review', round: 1, verdict: 'approve', findings: [], fr }),
+];
+// A whole subplan round, from feedback back to ready-to-try: visits plan,
+// plan-review and implement are 1 + round when it ends.
+const subplanRound = (round, { planner = fa({ id: `p${round}`, phase: 'plan', purpose: 'feedback-plan', fr: round }) } = {}) => [
+  given(round), ...triaged(round, 'subplan'), routedTo(round, 'subplan'),
+  ...planner,
+  ...fa({ id: `r${round}`, phase: 'plan-review', purpose: 'review', round: 1, verdict: 'approve', findings: [], fr: round }), ev.phaseCompleted('plan-review', 1 + round),
+  { type: 'tasks-appended', round, tasks: [taskCreated(`B${round}`)] },
+  ...doneRoundTask(`B${round}`, round), ev.phaseCompleted('implement', 1 + round),
+  ...fa({ id: `t${round}`, phase: 'test', purpose: 'test', fr: round, ord: 1 }),
+  READY,
+];
+const ROUND_LAUNCH = { type: 'launch', task: null, effort: null, n: 1, recovery: false, previousAttemptId: null, round: null, final: false, taskDef: null, reviewFindings: null, contested: null, handoff: null, openQuestions: null, askedIds: null };
+
+test('ready-to-try with no round needs the user', () => {
+  assert.deepEqual(fj(...round0).feedbackRound, 0);
+  assert.deepEqual(nextAction(fj(...round0.slice(0, -1)), ctx()), READY);
+  assert.deepEqual(nextAction(fj(...round0, ...subplanRound(1).slice(0, -1)), ctx()), READY, 'a routed round back at the human phase');
+});
+
+test('a new round launches triage', () => {
+  const job = fj(...round0, given(1));
+  assert.equal(job.models.triage, undefined, 'a job created before triage existed');
+  assert.deepEqual(nextAction(job, ctx()), { ...ROUND_LAUNCH, phase: 'accept', role: 'triage', model: 'claude-sonnet-5-5', maxTurns: 20, purpose: 'triage', feedbackRound: 1 });
+  const opus = fj(...round0, given(1, { triageModel: { model: 'claude-opus-5-5', effort: 'high', maxTurns: 7 } }));
+  assert.deepEqual(pick(nextAction(opus, ctx()), 'model', 'effort', 'maxTurns'), { model: 'claude-opus-5-5', effort: 'high', maxTurns: 7 });
+  assert.deepEqual(nextAction(job, ctx({ liveSessions: 3 })), { type: 'wait', until: null, why: 'concurrency' });
+  assert.deepEqual(nextAction(fj(...round0, given(1), ...fa({ id: 'tri1', phase: 'accept', purpose: 'triage', fr: 1, outcome: null })), ctx()), { type: 'none' });
+});
+
+test('a done triage routes', () => {
+  const job = fj(...round0, given(1), ...triaged(1, 'subplan'));
+  assert.deepEqual(nextAction(job, ctx()), { type: 'route-feedback', round: 1, attemptId: 'tri1' });
+});
+
+test('triage question then answer relaunches triage', () => {
+  const asking = [...round0, given(1), ...fa({ id: 'tri1', phase: 'accept', purpose: 'triage', fr: 1, outcome: 'question', question: 'Which page?' })];
+  const open = nextAction(fj(...asking), ctx());
+  assert.deepEqual([open.type, open.reason, open.detail.attemptId, open.detail.question], ['needs-you', 'question', 'tri1', 'Which page?']);
+  const job = fj(...asking, ...answered('tri1', 'The index'));
+  assert.equal(job.state, 'running');
+  const action = nextAction(job, ctx());
+  assert.deepEqual(pick(action, 'type', 'phase', 'role', 'purpose', 'recovery', 'previousAttemptId', 'feedbackRound'), { type: 'launch', phase: 'accept', role: 'triage', purpose: 'triage', recovery: true, previousAttemptId: 'tri1', feedbackRound: 1 });
+});
+
+test('subplan round launches feedback-plan, not a recovery of round 0', () => {
+  const job = fj(...round0, given(1), ...triaged(1, 'subplan'), routedTo(1, 'subplan'));
+  assert.equal(job.phaseId, 'plan');
+  assert.deepEqual(attemptsFor(job, 'plan').map((a) => a.attemptId), []);
+  assert.deepEqual(attemptsFor(job, 'plan', null, 0).map((a) => a.attemptId), ['p0']);
+  assert.deepEqual(attemptsFor(job, 'implement', 'T1').map((a) => a.attemptId), ['i0', 'tr0'], 'per-task scopes stay per task id');
+  assert.deepEqual(nextAction(job, ctx()), {
+    ...ROUND_LAUNCH, phase: 'plan', role: 'planner', model: 'claude-opus-5-5', maxTurns: 60, purpose: 'feedback-plan', feedbackRound: 1,
+  });
+});
+
+test('round 2 review ignores round 1 approve', () => {
+  const job = fj(...round0, ...subplanRound(1), given(2), ...triaged(2, 'subplan'), routedTo(2, 'subplan'), ...fa({ id: 'p2', phase: 'plan', purpose: 'feedback-plan', fr: 2 }));
+  assert.equal(job.phaseId, 'plan-review');
+  assert.deepEqual(nextAction(job, ctx()), {
+    ...ROUND_LAUNCH, phase: 'plan-review', role: 'plan-reviewer', model: 'claude-opus-5-5', maxTurns: 40, purpose: 'review', round: 1, feedbackRound: 2,
+  });
+});
+
+test('per-task waits for round tasks', () => {
+  const reviewed = [...round0, given(1), ...triaged(1, 'subplan'), routedTo(1, 'subplan'), ...fa({ id: 'p1', phase: 'plan', purpose: 'feedback-plan', fr: 1 }),
+    ...fa({ id: 'r1', phase: 'plan-review', purpose: 'review', round: 1, verdict: 'approve', findings: [], fr: 1 }), ev.phaseCompleted('plan-review', 2)];
+  const job = fj(...reviewed);
+  assert.equal(job.phaseId, 'implement');
+  assert.deepEqual(nextAction(job, ctx()), { type: 'load-round-tasks', round: 1 });
+  const appended = fj(...reviewed, { type: 'tasks-appended', round: 1, tasks: [taskCreated('B1')] });
+  assert.deepEqual(pick(nextAction(appended, ctx()), 'type', 'task', 'purpose', 'feedbackRound'), { type: 'launch', task: 'B1', purpose: 'implement', feedbackRound: 1 });
+});
+
+const fixRoundToTest = [...round0, given(1), ...triaged(1, 'fix'), routedTo(1, 'fix', { task: taskCreated('B1-aaaaaaaa') }), ...doneRoundTask('B1-aaaaaaaa', 1), ev.phaseCompleted('implement', 2)];
+
+test('retest in a round gets the next report ordinal', () => {
+  const first = fj(...fixRoundToTest);
+  assert.equal(first.phaseId, 'test');
+  assert.deepEqual(pick(nextAction(first, ctx()), 'type', 'phase', 'purpose', 'n', 'recovery', 'feedbackRound', 'reportOrdinal'), { type: 'launch', phase: 'test', purpose: 'test', n: 1, recovery: false, feedbackRound: 1, reportOrdinal: 1 });
+
+  const failed = [...fixRoundToTest, ...fa({ id: 'tst1', phase: 'test', purpose: 'test', fr: 1, ord: 1, outcome: 'failed', reason: 'failed', signature: 'sig-tst1', findings: TF })];
+  assert.deepEqual(nextAction(fj(...failed), ctx()), { type: 'route-test-failure', attemptId: 'tst1', findings: TF });
+  const fixTask = buildFixTask(fj(...failed), 'tst1', TF);
+  const retest = fj(...failed, ev.testRouted('tst1', fixTask), ...doneRoundTask(fixTask.id, 1), ev.phaseCompleted('implement', 3));
+  assert.equal(retest.phaseId, 'test');
+  assert.deepEqual(pick(nextAction(retest, ctx()), 'type', 'phase', 'n', 'recovery', 'previousAttemptId', 'feedbackRound', 'reportOrdinal'), { type: 'launch', phase: 'test', n: 2, recovery: false, previousAttemptId: null, feedbackRound: 1, reportOrdinal: 2 });
+});
+
+test('a retried tester does not reuse its report ordinal', () => {
+  const failed = [...fixRoundToTest, ...fa({ id: 'tst1', phase: 'test', purpose: 'test', fr: 1, ord: 1, outcome: 'failed', reason: 'no-result', signature: 'no-result|' })];
+  const stuckTest = { type: 'needs-you', reason: 'stuck', detail: { phase: 'test', task: null, why: 'attempt-cap' } };
+  const retry = { type: 'job-retried', needsYouSeq: null, phase: 'test', task: null, feedbackRound: 1, fromAttemptId: 'tst1', handoff: null, note: null };
+  const job = fj(...failed, stuckTest, retry);
+  assert.equal(job.state, 'running');
+  assert.deepEqual(pick(nextAction(job, ctx()), 'type', 'n', 'recovery', 'previousAttemptId', 'reportOrdinal'), { type: 'launch', n: 1, recovery: true, previousAttemptId: 'tst1', reportOrdinal: 2 });
+
+  const interrupted = fj(...fixRoundToTest, ...fa({ id: 'tst1', phase: 'test', purpose: 'test', fr: 1, ord: 1, outcome: 'interrupted' }));
+  assert.deepEqual(pick(nextAction(interrupted, ctx()), 'n', 'recovery', 'reportOrdinal'), { n: 1, recovery: true, reportOrdinal: 2 });
+  const gated = fj(...fixRoundToTest, ...fa({ id: 'tst1', phase: 'test', purpose: 'test', fr: 1, ord: 1, outcome: 'failed', reason: 'folder-changed', signature: 'folder-changed|x' }));
+  assert.deepEqual(pick(nextAction(gated, ctx()), 'n', 'recovery', 'reportOrdinal'), { n: 1, recovery: false, reportOrdinal: 2 });
+});
+
+test('a second round\'s attempt caps start fresh', () => {
+  const planner = [1, 2].flatMap((k) => fa({ id: `p1-${k}`, phase: 'plan', purpose: 'feedback-plan', fr: 1, outcome: 'failed', reason: 'no-result', signature: `no-result|${k}` }))
+    .concat(fa({ id: 'p1', phase: 'plan', purpose: 'feedback-plan', fr: 1 }));
+  const events = [...round0, ...subplanRound(1, { planner }), given(2), ...triaged(2, 'subplan'), routedTo(2, 'subplan')];
+  const job = fj(...events);
+  assert.equal(attemptsFor(job, 'plan', null, 1).length, 3);
+  assert.deepEqual(pick(nextAction(job, ctx()), 'type', 'phase', 'purpose', 'n', 'recovery', 'previousAttemptId', 'feedbackRound'), { type: 'launch', phase: 'plan', purpose: 'feedback-plan', n: 1, recovery: false, previousAttemptId: null, feedbackRound: 2 });
+});
+
+test('reconciled round verifier keeps its contested ids', () => {
+  const B = (id) => F(id, 'blocker');
+  const loop = [rev(1, 'changes', [B('b1')]), fix(1, { b1: 'open' }), rev(2, 'changes', [B('b1')]), fix(2, { b1: 'open' }), rev(3, 'changes', [B('b1'), B('b2')]), fix(3, { b1: 'declined: no', b2: 'fixed' }, true)];
+  const capped = [...round0, given(1), ...triaged(1, 'subplan'), routedTo(1, 'subplan'), ...fa({ id: 'p1', phase: 'plan', purpose: 'feedback-plan', fr: 1 }),
+    ...loop.flatMap((spec, k) => fa({ id: `l${k}`, phase: 'plan-review', fr: 1, ...spec }))];
+  const launched = nextAction(fj(...capped), ctx());
+  assert.deepEqual(pick(launched, 'purpose', 'contested', 'feedbackRound'), { purpose: 'verify', contested: ['b1'], feedbackRound: 1 });
+  const job = fj(...capped, ...fa({ id: 'v1', phase: 'plan-review', purpose: 'verify', fr: 1, outcome: null }));
+  const context = contextOf(job, 'v1');
+  assert.deepEqual(pick(context, 'purpose', 'contested', 'feedbackRound'), { purpose: 'verify', contested: launched.contested, feedbackRound: 1 });
+
+  const tester = fj(...fixRoundToTest, ...fa({ id: 'tst2', phase: 'test', purpose: 'test', fr: 1, ord: 2, outcome: null }));
+  assert.deepEqual(pick(contextOf(tester, 'tst2'), 'feedbackRound', 'reportOrdinal'), { feedbackRound: 1, reportOrdinal: 2 });
+});
+
+test('question cap counts the round only', () => {
+  const asks = [1, 2, 3].flatMap((k) => [...fa({ id: `q0-${k}`, phase: 'plan', purpose: 'author', outcome: 'question', question: `Q${k}?` }), ...answered(`q0-${k}`)]);
+  const base = round0.filter((e) => e.attemptId !== 'p0');
+  const planAt = base.findIndex((e) => e.attemptId === 'r0');
+  const withAsks = [...base.slice(0, planAt), ...asks, ...fa({ id: 'p0', phase: 'plan', purpose: 'author' }), ...base.slice(planAt)];
+  const job = fj(...withAsks, given(1), ...triaged(1, 'subplan'), routedTo(1, 'subplan'), ...fa({ id: 'p1', phase: 'plan', purpose: 'feedback-plan', fr: 1, outcome: 'question', question: 'Round Q?' }));
+  assert.equal(answeredInScope(job, 'plan', null, 0), 3);
+  assert.equal(answeredInScope(job, 'plan'), 0);
+  const action = nextAction(job, ctx());
+  assert.deepEqual([action.type, action.reason, action.detail.attemptId], ['needs-you', 'question', 'p1']);
+});
+
+test('a reopened round retry carries its errors to the feedback-plan launch', () => {
+  const reviewed = [...round0, given(1), ...triaged(1, 'subplan'), routedTo(1, 'subplan'), ...fa({ id: 'p1', phase: 'plan', purpose: 'feedback-plan', fr: 1 }),
+    ...fa({ id: 'r1', phase: 'plan-review', purpose: 'review', round: 1, verdict: 'approve', findings: [], fr: 1 }), ev.phaseCompleted('plan-review', 2),
+    { type: 'needs-you', reason: 'stuck', detail: { phase: 'implement', task: null, why: 'tasks-invalid', errors: ['dup id T1'], round: 1 } }];
+  const job = fj(...reviewed, { type: 'job-retried', needsYouSeq: null, phase: 'plan', task: null, feedbackRound: 1, reopen: true, errors: ['dup id T1'], fromAttemptId: 'p1', handoff: null, note: 'fix ids' });
+  assert.deepEqual(pick(nextAction(job, ctx()), 'type', 'phase', 'purpose', 'n', 'recovery', 'previousAttemptId', 'retryErrors', 'retryNote', 'feedbackRound'), {
+    type: 'launch', phase: 'plan', purpose: 'feedback-plan', n: 1, recovery: true, previousAttemptId: 'p1', retryErrors: ['dup id T1'], retryNote: 'fix ids', feedbackRound: 1,
+  });
 });
