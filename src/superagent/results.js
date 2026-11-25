@@ -24,6 +24,7 @@ import { isSafeSessionId } from '../safe-id.js';
 import { failureSignature } from './sequencer.js';
 import { defaultGit } from './worktree.js';
 import { isTestPath } from './test-paths.js';
+import { roundDir, roundOutputPaths, roundTestReportPaths, roundTriagePath } from './feedback.js';
 
 export const RESULT_FILE = 'result.json';
 export const BRAINSTORM_BATCH = 5;
@@ -71,17 +72,19 @@ export const TASK_ATTEMPT_KINDS = Object.freeze(['report', 'taskReview', 'taskVe
 export const RESERVED_ARTIFACT_KEYS = Object.freeze([...PHASE_ATTEMPT_KINDS, ...TASK_ATTEMPT_KINDS, 'idea']);
 
 // Decision 15. A key whose inputs were not given (no round, no taskId) is null.
-export function reviewPaths(job, { phase = null, round = null, taskId = null }) {
+// A feedback round keeps its phase review, response and verify files under its own folder.
+export function reviewPaths(job, { phase = null, round = null, taskId = null, feedbackRound = 0 }) {
   const jobs = job.artifactRoot === 'ledger' ? ledgerArtifactRoot(job.jobId) : `docs/superpowers/jobs/${job.slug}`;
+  const phaseBase = feedbackRound > 0 ? roundDir(job, feedbackRound) : jobs;
   const p = phase == null ? null : segment('phase', phase);
   const t = taskId == null ? null : segment('taskId', taskId);
   const r = Number.isInteger(round);
   // Plan 5 Decision 10: an extra-round verifier carries its round; the base one (round null) does not.
   const v = r ? `-r${round}` : '';
   return {
-    review: p && r ? `${jobs}/reviews/${p}-r${round}.md` : null,
-    response: p && r ? `${jobs}/reviews/${p}-r${round}-response.md` : null,
-    verify: p ? `${jobs}/reviews/${p}-verify${v}.md` : null,
+    review: p && r ? `${phaseBase}/reviews/${p}-r${round}.md` : null,
+    response: p && r ? `${phaseBase}/reviews/${p}-r${round}-response.md` : null,
+    verify: p ? `${phaseBase}/reviews/${p}-verify${v}.md` : null,
     report: t ? `${jobs}/tasks/${t}-report.md` : null,
     taskReview: t && r ? `${jobs}/tasks/${t}-review-r${round}.md` : null,
     taskVerify: t ? `${jobs}/tasks/${t}-verify${v}.md` : null,
@@ -104,19 +107,26 @@ const PURPOSE_OUTPUT = {
   'task-review': () => 'taskReview',
 };
 
-export function requiredOutputs(job, { phase, purpose, round = null, task = null }) {
+export function requiredOutputs(job, { phase, purpose, round = null, task = null, feedbackRound = 0, reportOrdinal = null }) {
+  if (purpose === 'triage') return [roundTriagePath(job, feedbackRound)];
+  if (purpose === 'feedback-plan') return Object.values(roundOutputPaths(job, feedbackRound, phase?.outputs ?? []));
+  if (purpose === 'test' && feedbackRound > 0) {
+    if (!Number.isInteger(reportOrdinal) || reportOrdinal < 1) throw new Error(`superagent: a round test attempt needs its report ordinal (got ${JSON.stringify(reportOrdinal)})`);
+    return Object.values(roundTestReportPaths(job, feedbackRound, reportOrdinal));
+  }
   if (purpose === 'author' || purpose === 'ask' || purpose === 'test') return outputPaths(job, phase?.outputs ?? []);
   if (purpose === 'answer') return [];
   if (!PURPOSE_OUTPUT[purpose]) throw new Error(`superagent: unknown attempt purpose ${JSON.stringify(purpose)}`);
   const key = PURPOSE_OUTPUT[purpose](task != null);
-  const rel = reviewPaths(job, { phase: phase?.phase ?? null, round, taskId: task })[key];
+  const rel = reviewPaths(job, { phase: phase?.phase ?? null, round, taskId: task, feedbackRound })[key];
   if (!rel) throw new Error(`superagent: ${purpose} outputs need the phase, task and round they belong to (got round ${JSON.stringify(round)})`);
   return [rel];
 }
 
-export function reviseOutputs(job, phase) {
+export function reviseOutputs(job, phase, { feedbackRound = 0 } = {}) {
   const author = job.pipeline.find((p) => p.kind === 'author' && (p.outputs ?? []).includes(phase.target));
-  return author ? outputPaths(job, author.outputs) : [];
+  if (!author) return [];
+  return feedbackRound > 0 ? Object.values(roundOutputPaths(job, feedbackRound, author.outputs)) : outputPaths(job, author.outputs);
 }
 
 // Ids become path segments (tasks/<id>-report.md), so uniqueness and the
@@ -154,7 +164,9 @@ function findCycle(deps) {
   return [];
 }
 
-export function parseTasks(text, job) {
+// `existing` is the job's tasks so far: a round's ids may not collide with them
+// (case-insensitively) and its dependsOn may name them.
+export function parseTasks(text, job, { existing = [] } = {}) {
   let list;
   try {
     list = JSON.parse(typeof text === 'string' && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
@@ -165,7 +177,8 @@ export function parseTasks(text, job) {
   if (list.length === 0) return { ok: false, errors: ['tasks.json must list at least one task'] };
   const errors = [];
   const seen = new Set();
-  const known = new Set(list.filter((t) => isPlainObject(t) && typeof t.id === 'string').map((t) => t.id));
+  const earlier = new Set(existing.map((t) => t.id.toLowerCase()));
+  const known = new Set([...existing.map((t) => t.id), ...list.filter((t) => isPlainObject(t) && typeof t.id === 'string').map((t) => t.id)]);
   const deps = new Map();
   list.forEach((t, i) => {
     const at = `tasks[${i}]`;
@@ -173,6 +186,7 @@ export function parseTasks(text, job) {
     const idOk = typeof t.id === 'string' && TASK_ID_RE.test(t.id);
     if (!idOk) errors.push(`${at}.id must be 1-12 letters, digits or hyphens, starting with a letter or digit: ${JSON.stringify(t.id)}`);
     else if (FIX_TASK_ID_RE.test(t.id)) errors.push(`${at}.id: ${JSON.stringify(t.id)} is reserved for generated fix tasks (F-<8 hex>)`);
+    else if (earlier.has(t.id.toLowerCase())) errors.push(`${at}.id: ${JSON.stringify(t.id)} collides with an existing task`);
     else if (seen.has(t.id.toLowerCase())) errors.push(`${at}.id: duplicate id ${JSON.stringify(t.id)}`);
     if (idOk) seen.add(t.id.toLowerCase());
     if (!isNonEmptyString(t.title)) errors.push(`${at}.title must be a non-empty string`);
@@ -423,10 +437,39 @@ function answerErrors(value, attempt) {
   return errors;
 }
 
+const TRIAGE_ROUTES = ['fix', 'subplan', 'separate'];
+const IDEA_MAX_CHARS = 4000;
+
+// A done triage must carry its own decision fields, so a triage.md left by an
+// earlier rejected result can never back it.
+export function triageErrors(value, job) {
+  const errors = [];
+  if (!isNonEmptyString(value.brief)) errors.push('brief must be a non-empty string');
+  if (!Array.isArray(value.requirementChanges) || value.requirementChanges.some((c) => !isNonEmptyString(c))) errors.push('requirementChanges must be an array of strings');
+  if (!TRIAGE_ROUTES.includes(value.route)) errors.push(`route must be one of ${TRIAGE_ROUTES.join('|')}`);
+  if (value.route === 'fix') {
+    const t = value.task;
+    if (!isPlainObject(t)) errors.push('task must be an object for route fix');
+    else {
+      if (!isNonEmptyString(t.title)) errors.push('task.title must be a non-empty string');
+      if (!isNonEmptyString(t.acceptance)) errors.push('task.acceptance must be a non-empty string');
+      if (typeof t.verify !== 'string') errors.push('task.verify must be a string (may be empty)');
+      if (!Array.isArray(t.repos) || t.repos.length === 0) errors.push('task.repos must be a non-empty array of repo ids');
+      else for (const r of t.repos) if (!job.repos.some((repo) => repo.id === r)) errors.push(`task.repos: unknown repo ${JSON.stringify(r)}`);
+    }
+  }
+  if (value.route === 'separate') {
+    const len = typeof value.idea === 'string' ? value.idea.trim().length : 0;
+    if (len < 1 || len > IDEA_MAX_CHARS) errors.push(`idea must be 1-${IDEA_MAX_CHARS} characters for route separate`);
+  }
+  return errors;
+}
+
 function purposeErrors(value, { attempt, job }) {
   if (attempt.purpose === 'test') return testErrors(value, job);
   if (attempt.purpose === 'ask') return askErrors(value, attempt);
   if (attempt.purpose === 'answer') return answerErrors(value, attempt);
+  if (attempt.purpose === 'triage' && value.status === 'done') return triageErrors(value, job);
   // A blocked worker publishes a question (or nothing) instead of its purpose fields.
   if (value.status === 'blocked') return [];
   switch (attempt.purpose) {
@@ -594,10 +637,10 @@ export async function branchPathErrors(listed, { job, git }) {
 // Decision 16: the author may decline every finding, so the revised artifacts
 // need only exist, be non-empty and (in a legacy job) be clean; no commit has
 // to touch them.
-async function reviseErrors({ phase, job, git }) {
+async function reviseErrors({ phase, job, git, feedbackRound = 0 }) {
   const errors = [];
   const primary = primaryRepo(job);
-  for (const rel of reviseOutputs(job, phase)) {
+  for (const rel of reviseOutputs(job, phase, { feedbackRound })) {
     let info;
     try {
       info = await stat(path.join(primary.worktree, ...rel.split('/')));
@@ -626,8 +669,11 @@ async function outputErrors({ phase, job, commits, git, attempt }) {
   const outputs = {};
   const primary = primaryRepo(job);
   const paths = artifactPaths(job);
+  const feedbackRound = attempt?.feedbackRound ?? 0;
   const required = attempt
-    ? requiredOutputs(job, { phase, purpose: attempt.purpose, round: attempt.round ?? null, task: attempt.task ?? null }).map((rel) => ({ rel }))
+    ? requiredOutputs(job, {
+      phase, purpose: attempt.purpose, round: attempt.round ?? null, task: attempt.task ?? null, feedbackRound, reportOrdinal: attempt.reportOrdinal ?? null,
+    }).map((rel) => ({ rel }))
     : (phase?.outputs ?? []).map((key) => ({ key, rel: paths[key] }));
   const changed = new Map();
   const filesIn = async (sha) => {
@@ -667,25 +713,47 @@ async function outputErrors({ phase, job, commits, git, attempt }) {
     else if (status.stdout.trim() !== '') errors.push(`output changed after its commit: ${rel}`);
   }
   const reviewFix = attempt?.purpose === 'fix' && attempt.task == null && phase?.kind === 'review';
-  if (reviewFix) errors.push(...(await reviseErrors({ phase, job, git })));
-  const publishesTasks = (attempt?.purpose === 'author' && (phase?.outputs ?? []).includes('tasks'))
-    || (reviewFix && reviseOutputs(job, phase).includes(paths.tasks));
-  if (publishesTasks && errors.length === 0) errors.push(...(await tasksFileErrors(job)));
+  if (reviewFix) errors.push(...(await reviseErrors({ phase, job, git, feedbackRound })));
+  const tasksRel = feedbackRound > 0 && paths.tasks ? roundOutputPaths(job, feedbackRound, ['tasks']).tasks : paths.tasks;
+  const publishesTasks = ((attempt?.purpose === 'author' || attempt?.purpose === 'feedback-plan') && (phase?.outputs ?? []).includes('tasks'))
+    || (reviewFix && reviseOutputs(job, phase, { feedbackRound }).includes(tasksRel));
+  if (publishesTasks && errors.length === 0) errors.push(...(await tasksFileErrors(job, tasksRel, feedbackRound > 0 ? (job.tasks ?? []) : [])));
   return { errors, outputs };
 }
 
 // Decision 5: a tasks.json that would deadlock the implement phase is refused
 // whenever it is published, by the planner or by a planner fix.
-async function tasksFileErrors(job) {
-  const rel = artifactPaths(job).tasks;
+async function tasksFileErrors(job, rel, existing) {
   let text;
   try {
     text = await readFile(path.join(primaryRepo(job).worktree, ...rel.split('/')), 'utf8');
   } catch (err) {
     return [`could not read ${rel}: ${err.message}`];
   }
-  const parsed = parseTasks(text, job);
+  const parsed = parseTasks(text, job, { existing });
   return parsed.ok ? [] : parsed.errors.map((e) => `${rel}: ${e}`);
+}
+
+// A round may add files but never change what the job had when feedback was given.
+// Baseline keys are relative to the job's ledger artifact root; the messages name
+// the repo-relative path, like every other output error.
+export async function baselineErrors(job, round) {
+  const baseline = (job.feedbackRounds ?? []).find((r) => r.round === round)?.baseline ?? {};
+  const root = ledgerArtifactRoot(job.jobId);
+  const primary = primaryRepo(job);
+  const errors = [];
+  for (const [key, hash] of Object.entries(baseline)) {
+    const rel = `${root}/${key}`;
+    let data;
+    try {
+      data = await readFile(path.join(primary.worktree, ...rel.split('/')));
+    } catch {
+      errors.push(`missing since feedback was given: ${rel}`);
+      continue;
+    }
+    if (createHash('sha256').update(data).digest('hex') !== hash) errors.push(`changed since feedback was given: ${rel}`);
+  }
+  return errors;
 }
 
 export function headingErrors(text, label) {
@@ -730,6 +798,7 @@ export async function validateResult(value, { expected, phase, job, git = defaul
   if (!isPlainObject(value)) return { ok: false, errors: ['result is not a JSON object'] };
   const errors = identityErrors(value, expected);
   const schema = schemaErrors(value, { phase, job, attempt });
+  if ((attempt?.feedbackRound ?? 0) > 0) errors.push(...(await baselineErrors(job, attempt.feedbackRound)));
   errors.push(...schema.errors);
   if (errors.length) return { ok: false, errors };
 

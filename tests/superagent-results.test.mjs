@@ -9,8 +9,9 @@ import { slugify, createWorktree, defaultGit } from '../src/superagent/worktree.
 import { deriveJob } from '../src/superagent/store.js';
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import {
-  ANSWER_TAGS, BRAINSTORM_BATCH, BRIEF_HEADINGS, RESULT_FILE, artifactPaths, attemptDir, commitPathErrors, headingErrors, ledgerArtifactRoot, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
+  ANSWER_TAGS, BRAINSTORM_BATCH, BRIEF_HEADINGS, RESULT_FILE, artifactPaths, attemptDir, baselineErrors, commitPathErrors, headingErrors, ledgerArtifactRoot, outcomeForResult, parseTasks, readResult, requiredOutputs, reviewPaths, reviseOutputs, validateResult,
 } from '../src/superagent/results.js';
+import { roundOutputPaths } from '../src/superagent/feedback.js';
 
 const JOB_ID = '12345678-aaaa-bbbb-cccc-000000000000';
 const REVIEW_PHASE = { phase: 'spec-review', kind: 'review', role: 'spec-reviewer', author: 'spec-writer', target: 'spec', maxRounds: 3 };
@@ -1253,4 +1254,180 @@ test('a listed offending commit is reported once, before unlisted ones', async (
   const listed = await f.commit('Tests/Editor/BTests.cs', 'x\n');
   const v = await f.author([listed]);
   assert.deepEqual(v, { ok: false, errors: ['commit includes test files: Tests/Editor/BTests.cs', `commit includes test files: Tests/Editor/ATests.cs${onBranch(first)}`] });
+});
+
+// Give feedback: round-aware paths, task parsing, triage schema and the baseline.
+async function roundFixture({ tasks = [task('A1')], baseline = {} } = {}) {
+  const f = await fixture({ pipeline: MILESTONE_2_PIPELINE, commitSpec: false, created: LEDGER });
+  f.job.feedbackRound = 1;
+  f.job.feedbackRounds = [{ round: 1, baseline, route: 'subplan' }];
+  f.job.tasks = tasks;
+  const out = roundOutputPaths(f.job, 1, ['plan', 'tasks']);
+  return { ...f, out };
+}
+
+test('round review paths', async () => {
+  const { job } = await roundFixture();
+  const root = ledgerArtifactRoot(JOB_ID);
+  const round = reviewPaths(job, { phase: 'plan-review', round: 1, feedbackRound: 2 });
+  assert.equal(round.review, `${root}/feedback/round-2/reviews/plan-review-r1.md`);
+  assert.equal(round.response, `${root}/feedback/round-2/reviews/plan-review-r1-response.md`);
+  assert.equal(round.verify, `${root}/feedback/round-2/reviews/plan-review-verify-r1.md`);
+  assert.equal(round.report, null);
+  assert.deepEqual(reviewPaths(job, { phase: 'plan-review', round: 1, feedbackRound: 0 }), reviewPaths(job, { phase: 'plan-review', round: 1 }));
+  assert.equal(reviewPaths(job, { phase: 'plan-review', round: 1 }).review, `${root}/reviews/plan-review-r1.md`);
+  assert.equal(reviewPaths(job, { taskId: 'T1', round: 1, feedbackRound: 2 }).taskReview, `${root}/tasks/T1-review-r1.md`);
+});
+
+test('feedback-plan outputs', async () => {
+  const { job, out } = await roundFixture();
+  const root = ledgerArtifactRoot(JOB_ID);
+  const planOutputs = requiredOutputs(job, { phase: phaseOf(job, 'plan'), purpose: 'feedback-plan', feedbackRound: 1 });
+  assert.deepEqual(planOutputs, [`${root}/feedback/round-1/outputs/plan.md`, `${root}/feedback/round-1/outputs/tasks.json`]);
+  assert.deepEqual(Object.values(out), planOutputs);
+  assert.deepEqual(requiredOutputs(job, { phase: phaseOf(job, 'accept'), purpose: 'triage', feedbackRound: 1 }), [`${root}/feedback/round-1/triage.md`]);
+});
+
+test('round test outputs are numbered by report ordinal', async () => {
+  const f = await roundFixture();
+  const root = ledgerArtifactRoot(JOB_ID);
+  const testPhase = phaseOf(f.job, 'test');
+  assert.deepEqual(requiredOutputs(f.job, { phase: testPhase, purpose: 'test', feedbackRound: 1, reportOrdinal: 2 }), [`${root}/feedback/round-1/tests/testReport-2.md`]);
+  assert.deepEqual(requiredOutputs(f.job, { phase: testPhase, purpose: 'test' }), [artifactPaths(f.job).testReport]);
+  await writeAt(f.worktree, `${root}/feedback/round-1/tests/testReport-1.md`, '# report 1\n');
+  const attempt = { purpose: 'test', round: 1, final: false, task: null, feedbackRound: 1, reportOrdinal: 2 };
+  const value = f.goodResult({ phaseId: 'test', artifacts: [], evidence: {} });
+  const missing = await f.check(value, { phase: testPhase, expect: { phaseId: 'test' }, attempt });
+  assert.equal(missing.ok, false);
+  assert.match(missing.errors.join('\n'), /missing output: .*tests\/testReport-2\.md/);
+  await writeAt(f.worktree, `${root}/feedback/round-1/tests/testReport-2.md`, '# report 2\n');
+  const ok = await f.check(value, { phase: testPhase, expect: { phaseId: 'test' }, attempt });
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+});
+
+test('round review fix revises the round plan', async () => {
+  const { job, out } = await roundFixture();
+  const review = phaseOf(job, 'plan-review');
+  assert.deepEqual(reviseOutputs(job, review, { feedbackRound: 1 }), [out.plan, out.tasks]);
+  assert.deepEqual(reviseOutputs(job, review), [artifactPaths(job).plan, artifactPaths(job).tasks]);
+});
+
+test('round tasks may depend on earlier tasks', async () => {
+  const { job } = await roundFixture();
+  const ok = parseTasks(JSON.stringify([task('B1', { dependsOn: ['A1'] })]), job, { existing: [{ id: 'A1' }] });
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  assert.equal(parseTasks(JSON.stringify([task('B1', { dependsOn: ['A1'] })]), job).ok, false);
+});
+
+test('round task ids may not collide', async () => {
+  const { job } = await roundFixture();
+  const bad = parseTasks(JSON.stringify([task('a1')]), job, { existing: [{ id: 'A1' }] });
+  assert.equal(bad.ok, false);
+  assert.match(bad.errors.join('\n'), /collides with an existing task/);
+});
+
+test('round tasks file is checked at fix time', async () => {
+  const run = async (tasks) => {
+    const f = await roundFixture({ tasks: [task('X')] });
+    const paths = reviewPaths(f.job, { phase: 'plan-review', round: 1, feedbackRound: 1 });
+    await writeAt(f.worktree, f.out.plan, '# round plan\n');
+    await writeAt(f.worktree, f.out.tasks, JSON.stringify(tasks));
+    await writeAt(f.worktree, paths.response, '# response\n');
+    const value = f.goodResult({ phaseId: 'plan-review', artifacts: [], evidence: {}, findings: [finding('F1', 'major', 'declined: fine as is')] });
+    const attempt = { purpose: 'fix', round: 1, final: false, task: null, feedbackRound: 1, reviewFindings: ['F1'] };
+    return f.check(value, { phase: phaseOf(f.job, 'plan-review'), expect: { phaseId: 'plan-review' }, attempt });
+  };
+  const cyclic = await run([task('A', { dependsOn: ['B'] }), task('B', { dependsOn: ['A'] })]);
+  assert.equal(cyclic.ok, false);
+  assert.match(cyclic.errors.join('\n'), /dependsOn: dependency cycle among "A", "B"/);
+  const collides = await run([task('x')]);
+  assert.match(collides.errors.join('\n'), /collides with an existing task/);
+  const ok = await run([task('N1', { dependsOn: ['X'] })]);
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+});
+
+test('round feedback-plan results check the round tasks file', async () => {
+  const f = await roundFixture({ tasks: [task('X')] });
+  await writeAt(f.worktree, f.out.plan, '# round plan\n');
+  await writeAt(f.worktree, f.out.tasks, JSON.stringify([task('x')]));
+  const value = f.goodResult({ phaseId: 'plan', artifacts: [], evidence: {} });
+  const attempt = { purpose: 'feedback-plan', round: 1, final: false, task: null, feedbackRound: 1 };
+  const v = await f.check(value, { phase: phaseOf(f.job, 'plan'), expect: { phaseId: 'plan' }, attempt });
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join('\n'), /feedback\/round-1\/outputs\/tasks\.json: .*collides with an existing task/);
+});
+
+test('triage result schema', async () => {
+  const f = await roundFixture();
+  const root = ledgerArtifactRoot(JOB_ID);
+  await writeAt(f.worktree, `${root}/feedback/round-1/triage.md`, '# stale triage from a rejected result\n');
+  const phase = phaseOf(f.job, 'accept');
+  const run = (over) => f.check(f.goodResult({
+    phaseId: 'accept', artifacts: [], evidence: {}, route: 'subplan', brief: 'Do the thing.', requirementChanges: [], ...over,
+  }), { phase, expect: { phaseId: 'accept' }, attempt: { purpose: 'triage', round: 1, final: false, task: null, feedbackRound: 1 } });
+  const errorsOf = async (over) => {
+    const v = await run(over);
+    assert.equal(v.ok, false, JSON.stringify(over));
+    return v.errors.join('\n');
+  };
+  assert.match(await errorsOf({ brief: undefined }), /brief must be a non-empty string/);
+  assert.match(await errorsOf({ brief: '  ' }), /brief must be a non-empty string/);
+  assert.match(await errorsOf({ route: 'later' }), /route must be one of fix\|subplan\|separate/);
+  assert.match(await errorsOf({ route: 'fix' }), /task must be an object/);
+  assert.match(await errorsOf({ route: 'fix', task: { repos: ['primary'], acceptance: 'x', verify: '' } }), /task\.title must be a non-empty string/);
+  assert.match(await errorsOf({ route: 'separate', idea: 'x'.repeat(4001) }), /idea must be 1-4000 characters/);
+  assert.match(await errorsOf({ route: 'separate' }), /idea must be 1-4000 characters/);
+  assert.match(await errorsOf({ requirementChanges: 'x' }), /requirementChanges must be an array of strings/);
+  assert.match(await errorsOf({ requirementChanges: [1] }), /requirementChanges must be an array of strings/);
+  const good = await run({});
+  assert.equal(good.ok, true, JSON.stringify(good.errors));
+  const fix = await run({ route: 'fix', task: { title: 'Fix it', repos: ['primary'], acceptance: 'It works.', verify: '' } });
+  assert.equal(fix.ok, true, JSON.stringify(fix.errors));
+  const separate = await run({ route: 'separate', idea: 'x'.repeat(4000) });
+  assert.equal(separate.ok, true, JSON.stringify(separate.errors));
+});
+
+test('a blocked triage needs no decision fields', async () => {
+  const f = await roundFixture();
+  const v = await f.check(f.goodResult({ phaseId: 'accept', status: 'blocked', question: 'Which screen?', artifacts: [], evidence: {} }), {
+    phase: phaseOf(f.job, 'accept'), expect: { phaseId: 'accept' }, attempt: { purpose: 'triage', round: 1, final: false, task: null, feedbackRound: 1 },
+  });
+  assert.equal(v.ok, true, JSON.stringify(v.errors));
+});
+
+test('baseline refuses a changed original', async () => {
+  const f = await roundFixture();
+  const root = ledgerArtifactRoot(JOB_ID);
+  const planRel = artifactPaths(f.job).plan;
+  const key = planRel.slice(root.length + 1);
+  const gone = 'reviews/spec-review-r1.md';
+  await writeAt(f.worktree, planRel, '# plan\n');
+  await writeAt(f.worktree, `${root}/${gone}`, '# review\n');
+  f.job.feedbackRounds[0].baseline = { [key]: sha256('# plan\n'), [gone]: sha256('# review\n') };
+  assert.deepEqual(await baselineErrors(f.job, 1), []);
+  await writeAt(f.worktree, planRel, '# plan edited\n');
+  await fs.rm(path.join(f.worktree, ...`${root}/${gone}`.split('/')));
+  assert.deepEqual(await baselineErrors(f.job, 1), [`changed since feedback was given: ${planRel}`, `missing since feedback was given: ${root}/${gone}`]);
+
+  const testPhase = phaseOf(f.job, 'test');
+  const attempt = { purpose: 'test', round: 1, final: false, task: null, feedbackRound: 1, reportOrdinal: 1 };
+  await writeAt(f.worktree, `${root}/feedback/round-1/tests/testReport-1.md`, '# report\n');
+  for (const status of ['done', 'failed']) {
+    const value = f.goodResult({ phaseId: 'test', status, artifacts: [], evidence: {}, findings: [{ id: 'F1', severity: 'major', text: 'Broken.' }] });
+    const v = await f.check(value, { phase: testPhase, expect: { phaseId: 'test' }, attempt });
+    assert.equal(v.ok, false, status);
+    assert.ok(v.errors.includes(`changed since feedback was given: ${planRel}`), status);
+  }
+  await writeAt(f.worktree, planRel, '# plan\n');
+  await writeAt(f.worktree, `${root}/${gone}`, '# review\n');
+  const ok = await f.check(f.goodResult({ phaseId: 'test', artifacts: [], evidence: {} }), { phase: testPhase, expect: { phaseId: 'test' }, attempt });
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+});
+
+test('results and feedback load in either import order', () => {
+  for (const [first, second] of [['results', 'feedback'], ['feedback', 'results']]) {
+    const script = `await import('./src/superagent/${first}.js'); await import('./src/superagent/${second}.js'); console.log('ok');`;
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], { cwd: path.resolve(import.meta.dirname, '..'), encoding: 'utf8' });
+    assert.equal(out.trim(), 'ok', `${first} first`);
+  }
 });
