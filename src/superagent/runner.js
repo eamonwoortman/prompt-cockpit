@@ -251,8 +251,10 @@ export function createRunner({
     const r = verdict.result;
     // Only a done triage's validated decision reaches attempt-ended; its brief
     // lives in triage.md, and any other result's own `triage` field is dropped.
+    // Its summary is the user's one paragraph, kept whole (the validator bounds
+    // it), where the attempt's own summary is cut to a few words.
     const triage = context?.purpose === 'triage' && r.status === 'done'
-      ? { route: r.route, summary: r.summary, requirementChanges: r.requirementChanges, ...(r.task !== undefined ? { task: r.task } : {}), ...(r.idea !== undefined ? { idea: r.idea } : {}) }
+      ? { route: r.route, summary: read.value.summary.trim(), requirementChanges: r.requirementChanges, ...(r.task !== undefined ? { task: r.task } : {}), ...(r.idea !== undefined ? { idea: r.idea } : {}) }
       : undefined;
     return {
       read,

@@ -755,7 +755,7 @@ test('triage card', async () => {
   assert.deepEqual(c.inputs, { spec: paths.spec, plan: paths.plan, tasks: paths.tasks, testReport: paths.testReport });
   assert.deepEqual(c.latestTestReport, { testReport: paths.testReport });
   assert.deepEqual(c.earlierRounds, []);
-  assert.deepEqual(c.feedback, [{ round: 1, text: 'feedback 1', triage: null, requirementChanges: null, pendingChanges: {} }]);
+  assert.deepEqual(c.feedback, [{ round: 1, text: 'feedback 1', route: null, triage: null, requirementChanges: null, pendingChanges: {} }]);
 
   // Round 2, after a subplan round whose second tester passed.
   const later = await featureRounds([
@@ -830,7 +830,7 @@ test('round review card in full', async () => {
     round: 2, previousFindings: rp(1).review, recoveryNote: null, previousAttemptDir: null, handoff: null,
     purpose: 'review', final: false, target: roundPlan.plan, reviseOutputs: null, task: null, taskCommits: null,
     previousResponse: rp(1).response, reviewFindings: null, contested: null,
-    feedback: [{ round: 1, text: 'feedback 1', triage: roundTriagePath(job, 1), requirementChanges: ['change for subplan'], pendingChanges: {} }],
+    feedback: [{ round: 1, text: 'feedback 1', route: 'subplan', triage: roundTriagePath(job, 1), requirementChanges: ['change for subplan'], pendingChanges: {}, outputs: roundPlan }],
     effectiveTasks: [{ id: 'T1', title: T1.title, repos: T1.repos, acceptance: T1.acceptance, verify: T1.verify, origin: 'plan' }],
   });
   const original = [paths.tasks, `${ledgerArtifactRoot('j1')}/reviews/plan-review-r1.md`, `${ledgerArtifactRoot('j1')}/reviews/plan-review-r1-response.md`];
@@ -941,7 +941,27 @@ test('Troubleshooting round cards carry the original diagnosis under requirement
   const tester = await card('verifier-tester', 'verify', { purpose: 'test', feedbackRound: 1, reportOrdinal: 1 });
   assert.equal(tester.inputs.diagnosis, paths.diagnosis);
   assert.ok(!('requirements' in tester));
+  assert.deepEqual(tester.feedback[0].outputs, round);
+  assert.equal(tester.feedback[0].outputs.diagnosis, `${roundDir(job, 1)}/outputs/diagnosis.md`);
   const round0 = await (await featureRounds([], over)).card('diagnosis-reviewer', 'diagnosis-review', { purpose: 'review', round: 1 });
   assert.ok(!('requirements' in round0), 'a round 0 card is unchanged');
   assert.ok((await fs.readFile(path.join(templatesDir(), 'contract.md'), 'utf8')).includes('`requirements` on your card'));
+});
+
+test('feedback entries carry their route; only a subplan round names its outputs', async () => {
+  const fixTask = { task: { title: 'x', repos: ['primary'], acceptance: 'y', verify: '' } };
+  const { job, card } = await featureRounds([
+    READY, given(1), ...triaged('tri1', 1, 'separate', { requirementChanges: [], idea: 'A new job.' }), routed('tri1', 1, 'separate'),
+    given(2), ...triaged('tri2', 2, 'fix', fixTask), routed('tri2', 2, 'fix'),
+    READY, given(3), ...triaged('tri3', 3, 'subplan'), routed('tri3', 3, 'subplan'),
+  ]);
+  const c = await card('tester', 'test', { purpose: 'test', feedbackRound: 3, reportOrdinal: 1 });
+  assert.deepEqual(c.feedback.map((f) => [f.round, f.route, f.outputs ?? null]), [
+    [1, 'separate', null],
+    [2, 'fix', null],
+    [3, 'subplan', roundOutputPaths(job, 3, ['plan', 'tasks'])],
+  ]);
+  const contract = await fs.readFile(path.join(templatesDir(), 'contract.md'), 'utf8');
+  assert.ok(contract.includes('A `separate` round changes nothing in this job'), 'contract: separate rounds');
+  assert.ok(contract.includes('`outputs`'), 'contract: feedback outputs');
 });

@@ -92,14 +92,18 @@ const roundEntry = (job, round) => (job.feedbackRounds ?? []).find((r) => r.roun
 const decisionOf = (job, entry) => (entry.attemptId == null ? null : (job.attempts.find((a) => a.attemptId === entry.attemptId)?.triage ?? null));
 
 // Every round up to the attempt's, oldest first. A round not routed yet (the
-// triage attempt's own) has no triage file or requirement changes.
+// triage attempt's own) has no triage file or requirement changes; a subplan
+// round also names its task-writing outputs.
 function feedbackFor(job, feedbackRound) {
+  const writes = feedbackShape(job)?.taskWriting.outputs ?? [];
   return (job.feedbackRounds ?? []).filter((r) => r.round <= feedbackRound).map((entry) => ({
     round: entry.round,
     text: entry.text,
+    route: entry.route ?? null,
     triage: entry.route == null ? null : roundTriagePath(job, entry.round),
     requirementChanges: entry.route == null ? null : (decisionOf(job, entry)?.requirementChanges ?? null),
     pendingChanges: entry.pendingChanges ?? {},
+    ...(entry.route === 'subplan' ? { outputs: roundOutputPaths(job, entry.round, writes) } : {}),
   }));
 }
 

@@ -615,6 +615,14 @@ test('a separate round links its triage and keeps the older report', () => {
   assert.deepEqual(jobDetail(featureJob(log), notLive).readyInputs, ['feedback:1:triage', 'testReport']);
 });
 
+test('after a separate round the box links the latest earlier round report', () => {
+  const log = [ready];
+  log.push(given(log, 1), start('tri1', 'accept', inRound(1, { role: 'triage', purpose: 'triage' })), endedWith('tri1', { triage: { route: 'fix', summary: 'f', requirementChanges: [] } }), routedTo(1, 'fix'));
+  log.push(start('t1', 'test', inRound(1, { role: 'tester', purpose: 'test', reportOrdinal: 1 })), endedWith('t1'), ready);
+  log.push(given(log, 2), start('tri2', 'accept', inRound(2, { role: 'triage', purpose: 'triage' })), endedWith('tri2', { triage: { route: 'separate', summary: 's', requirementChanges: [], idea: 'i' } }), routedTo(2, 'separate'));
+  assert.deepEqual(jobDetail(featureJob(log), notLive).readyInputs, ['feedback:2:triage', 'feedback:1:test:testReport']);
+});
+
 test('canGiveFeedback is false for a legacy job and for a running job', () => {
   assert.equal(jobDetail(featureJob([ready]), notLive).canGiveFeedback, true);
   assert.equal(jobDetail(featureJob([]), notLive).canGiveFeedback, false);

@@ -9,7 +9,7 @@ The user tried the finished job and gave feedback: `feedbackText` on the card. D
    - `separate`: it is a different feature, not a change to this job. Give `idea` (1-4000 characters): the text a new job would start from. Nothing in this job changes.
 3. List every requirement change in `requirementChanges`: one line per requirement the feedback adds, changes or drops, against the requirements as amended by earlier rounds. It may be empty, and is `[]` for `separate`.
 4. Write `brief` (markdown) for the workers who carry out the round: what the user asked, what to change, and what to leave alone. The engine writes it to `outputs.triage` with your requirement changes; list that path in `artifacts`.
-5. Write `summary` as one paragraph for the user; it is shown beside the job.
+5. Write `summary` as one paragraph for the user (at most 4000 characters); it is shown beside the job.
 6. If you cannot decide without the user, publish `status: "blocked"` with one `question` instead.
 7. Reply with only the result JSON object as your final message; you cannot write files. A `done` result carries `route`, `summary`, `brief` and `requirementChanges`, plus `task` for `fix` or `idea` for `separate`.
 

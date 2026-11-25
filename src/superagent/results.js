@@ -442,6 +442,7 @@ function answerErrors(value, attempt) {
 
 const TRIAGE_ROUTES = ['fix', 'subplan', 'separate'];
 const IDEA_MAX_CHARS = 4000;
+const TRIAGE_SUMMARY_MAX_CHARS = 4000;
 
 // A done triage must carry its own decision fields, so a triage.md left by an
 // earlier rejected result can never back it.
@@ -450,6 +451,7 @@ export function triageErrors(value, job) {
   if (!isNonEmptyString(value.brief)) errors.push('brief must be a non-empty string');
   if (!Array.isArray(value.requirementChanges) || value.requirementChanges.some((c) => !isNonEmptyString(c))) errors.push('requirementChanges must be an array of strings');
   if (!TRIAGE_ROUTES.includes(value.route)) errors.push(`route must be one of ${TRIAGE_ROUTES.join('|')}`);
+  if (typeof value.summary === 'string' && value.summary.trim().length > TRIAGE_SUMMARY_MAX_CHARS) errors.push(`summary must be at most ${TRIAGE_SUMMARY_MAX_CHARS} characters`);
   if (value.route === 'fix') {
     const t = value.task;
     if (!isPlainObject(t)) errors.push('task must be an object for route fix');
@@ -464,6 +466,7 @@ export function triageErrors(value, job) {
   if (value.route === 'separate') {
     const len = typeof value.idea === 'string' ? value.idea.trim().length : 0;
     if (len < 1 || len > IDEA_MAX_CHARS) errors.push(`idea must be 1-${IDEA_MAX_CHARS} characters for route separate`);
+    if (Array.isArray(value.requirementChanges) && value.requirementChanges.length > 0) errors.push('requirementChanges must be empty for route separate: it changes nothing in this job');
   }
   return errors;
 }
@@ -737,6 +740,8 @@ async function tasksFileErrors(job, rel, existing) {
   return parsed.ok ? [] : parsed.errors.map((e) => `${rel}: ${e}`);
 }
 
+const BASELINE_HINT = " (the user's Retry restores the original)";
+
 // A round may add files but never change what the job had when feedback was given.
 // Baseline keys are relative to the job's ledger artifact root; the messages name
 // the repo-relative path, like every other output error.
@@ -751,10 +756,10 @@ export async function baselineErrors(job, round) {
     try {
       data = await readFile(path.join(primary.worktree, ...rel.split('/')));
     } catch {
-      errors.push(`missing since feedback was given: ${rel}`);
+      errors.push(`missing since feedback was given: ${rel}${BASELINE_HINT}`);
       continue;
     }
-    if (createHash('sha256').update(data).digest('hex') !== hash) errors.push(`changed since feedback was given: ${rel}`);
+    if (createHash('sha256').update(data).digest('hex') !== hash) errors.push(`changed since feedback was given: ${rel}${BASELINE_HINT}`);
   }
   return errors;
 }

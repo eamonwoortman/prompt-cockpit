@@ -17,7 +17,7 @@ import { initNotificationsPanel, requestBrowserNotifications, SUPERAGENT_TAB, SU
 import { initHistoryPane } from '/history-pane.js';
 import { ARTIFACT_STATE, artifactErrorText, artifactFileName, artifactMimeType, createJobPane, renderArtifactBody, renderRouterLog } from '/superagent-job-pane.js';
 import { createHandoff } from '/superagent-handoff.js';
-import { statusLabel, workflowLabel } from '/superagent-format.js';
+import { readyInputLabel, statusLabel, workflowLabel } from '/superagent-format.js';
 import { initPaneResizers } from '/superagent-panes.js';
 
 const POLL_MS = 5_000;
@@ -28,7 +28,6 @@ const IN_PLACE_LABEL = 'Use this folder directly (no new worktree)';
 const IN_PLACE_NOTE = "The job switches this folder to its own branch and works there. Don't work in this folder while the job runs.";
 const WORKFLOW_WAIT = 'Wait for the workflow list to load.';
 const WORKFLOW_FAILED = 'The workflow list could not be loaded; pick the primary folder again to retry.';
-const READY_LABEL = { testReport: 'Test report' };
 
 function firstError(workflow) {
   const e = workflow.errors?.[0];
@@ -759,7 +758,7 @@ export function initSuperagentView() {
       // The final human phase's own inputs; the brief, when there is one,
       // is shown as its assumptions section as before.
       for (const key of detail.readyInputs.filter((k) => k !== 'idea' && k !== 'brief')) {
-        box.append(artifactBlock(READY_LABEL[key] ?? key, cachedArtifact(detail.jobId, needsYou.key, key)));
+        box.append(artifactBlock(readyInputLabel(key), cachedArtifact(detail.jobId, needsYou.key, key)));
       }
       if (detail.readyInputs.includes('brief') || detail.artifacts.some((a) => a.key === 'brief')) {
         box.append(artifactBlock('Assumptions made for you', cachedArtifact(detail.jobId, needsYou.key, 'brief'), (text) => briefSection(text)));

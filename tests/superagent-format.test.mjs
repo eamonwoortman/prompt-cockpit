@@ -4,7 +4,7 @@ import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
 const { renderMarkdown } = await import('../public/markdown.js');
-const { linkChipLabel, linkChip, formatUsd, formatMoney, formatTokens, formatDuration, stageColorIndex, statusLabel, workflowLabel, feedbackRoundLabel } =
+const { linkChipLabel, linkChip, formatUsd, formatMoney, formatTokens, formatDuration, stageColorIndex, statusLabel, workflowLabel, feedbackRoundLabel, readyInputLabel } =
   await import('../public/superagent-format.js');
 
 test('linkChipLabel takes the host and the last path segment', () => {
@@ -88,4 +88,13 @@ test('feedbackRoundLabel is empty for the original run and numbered after', () =
   assert.equal(feedbackRoundLabel(undefined), '');
   assert.equal(feedbackRoundLabel(1), 'feedback 1');
   assert.equal(feedbackRoundLabel(2), 'feedback 2');
+});
+
+test('readyInputLabel names workflow keys and round keys readably', () => {
+  assert.equal(readyInputLabel('testReport'), 'Test report');
+  assert.equal(readyInputLabel('diagnosis'), 'diagnosis');
+  assert.equal(readyInputLabel('feedback:1:triage'), 'Feedback 1 triage');
+  assert.equal(readyInputLabel('feedback:2:test:testReport'), 'Test report (feedback 2)');
+  assert.equal(readyInputLabel('feedback:3:out:diagnosis'), 'diagnosis (feedback 3)');
+  assert.equal(readyInputLabel('feedback:1:bogus'), 'feedback:1:bogus');
 });

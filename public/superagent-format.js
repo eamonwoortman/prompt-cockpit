@@ -84,6 +84,17 @@ export function feedbackRoundLabel(n) {
   return n > 0 ? `feedback ${n}` : '';
 }
 
+const READY_LABEL = { testReport: 'Test report' };
+
+// A ready-to-try link's label: a workflow key, or a feedback round's key
+// (feedback:<N>:triage, feedback:<N>:test:<key>, feedback:<N>:out:<key>).
+export function readyInputLabel(key) {
+  const m = /^feedback:(\d+):(?:(triage)|(?:test|out):([^:]+))$/.exec(String(key));
+  if (!m) return READY_LABEL[key] ?? key;
+  if (m[2]) return `Feedback ${m[1]} triage`;
+  return `${READY_LABEL[m[3]] ?? m[3]} (feedback ${m[1]})`;
+}
+
 export function workflowLabel(workflow) {
   const icon = WORKFLOW_ICON[String(workflow?.id ?? '').toLowerCase()] ?? '\u{1F9E9}';
   return `${icon} ${workflow?.name ?? workflow?.id ?? 'Workflow'}`;

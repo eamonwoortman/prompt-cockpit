@@ -1768,3 +1768,50 @@ test('retry on round tasks-invalid reopens authoring', { timeout: TEST_TIMEOUT_M
     await h.sa.stop();
   } finally { registry._reset(); }
 });
+
+test('retry in a round restores an original artifact a round worker changed', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    let plans = 0;
+    // The first round planner also rewrites the job's original plan.md, which
+    // the round may not change; every later result in the round is refused.
+    const planner = ({ card, publish }) => {
+      plans += 1;
+      if (plans === 1) writeFileSync(path.join(card.repos.find((r) => r.id === 'primary').worktree, ...`${card.artifactRoot}/plan.md`.split('/')), '# plan, rewritten\n');
+      return publish({}, { content: { tasks: JSON.stringify([task('R1')], null, 2) } });
+    };
+    const h = await harness({ handlers: handlersWith({ triage: triageSays(SUBPLAN), 'plan:feedback-plan': planner }) });
+    const job = await createFeature(h);
+    const ready = await readyToTry(h, job);
+    const original = (await ledgerFiles(ready))['plan.md'];
+    await h.sa.giveFeedback(ready.jobId, { needsYouSeq: ready.needsYouSeq, text: 'Add a goodbye.' });
+    const stuck = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual([stuck.state, stuck.reason], ['needs-you', 'stuck']);
+    const refused = h.ended(job.jobId).filter((e) => e.reason === 'invalid-result').map((e) => e.detail);
+    assert.ok(refused.length > 0);
+    for (const detail of refused) assert.equal(detail, `changed since feedback was given: ${ledgerOf(job)}/plan.md (the user's Retry restores the original)`);
+
+    await h.sa.retryJob(job.jobId, { needsYouSeq: stuck.needsYouSeq });
+    assert.equal((await ledgerFiles(job))['plan.md'], original, 'Retry restored the original plan.md byte for byte');
+    const done = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual([done.state, done.reason], ['needs-you', 'ready-to-try']);
+    assert.equal(h.ended(job.jobId).filter((e) => e.attemptId === h.started(job.jobId, 'plan').at(-1).attemptId)[0].outcome, 'done');
+    assert.equal((await ledgerFiles(job))['plan.md'], original);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a triage summary is kept whole on the decision; the attempt summary is still cut', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const summary = Array.from({ length: 80 }, (_, i) => `word${i}`).join(' ');
+    const h = await harness({ handlers: handlersWith({ triage: triageSays({ ...SEPARATE, summary }) }) });
+    const job = await createFeature(h);
+    const ready = await readyToTry(h, job);
+    const done = await giveFeedbackAndDrive(h, ready);
+    const triage = done.attempts.find((a) => a.purpose === 'triage');
+    assert.equal(triage.triage.summary, summary);
+    assert.equal(triage.summary.split(' ').length, 60);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});

@@ -44,7 +44,7 @@
 // absolute deadline as the in-flight tick. The queue also snapshots each
 // attempt's artifacts into <jobDir>/artifacts (artifacts.js).
 import { createHash, randomUUID } from 'node:crypto';
-import { access, readFile, readdir, stat } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createAccounting } from './accounting.js';
 import { artifactStates as readArtifactStates, snapshotDirFor } from './artifacts.js';
@@ -117,10 +117,15 @@ const roundEntry = (job, round) => (job?.feedbackRounds ?? []).find((r) => r.rou
 // round's own folder is what the round is about to write.
 const SAVED_TESTS_RE = /^tasks\/[^/]+-tests\//;
 
+const sha256 = (data) => createHash('sha256').update(data).digest('hex');
+const ledgerDir = (job) => path.join(primaryRepo(job).worktree, ...ledgerArtifactRoot(job.jobId).split('/'));
+const baselineCopyDir = (jobDir, round) => path.join(jobDir, 'feedback', `round-${round}`, 'baseline');
+
 // Every file under the job's ledger artifact root, keyed relative to it, with
-// the SHA-256 of its bytes: what no attempt in the round may change.
-async function feedbackBaseline(job, round) {
-  const root = path.join(primaryRepo(job).worktree, ...ledgerArtifactRoot(job.jobId).split('/'));
+// the SHA-256 of its bytes: what no attempt in the round may change. The same
+// bytes are copied under `copyDir`, out of the workers' reach, for Retry.
+async function feedbackBaseline(job, round, copyDir) {
+  const root = ledgerDir(job);
   let names;
   try {
     names = await readdir(root, { recursive: true });
@@ -134,9 +139,38 @@ async function feedbackBaseline(job, round) {
     if (name.toLowerCase().startsWith(roundPrefix) || SAVED_TESTS_RE.test(name)) continue;
     const file = path.join(root, ...name.split('/'));
     if (!(await stat(file)).isFile()) continue;
-    baseline[name] = createHash('sha256').update(await readFile(file)).digest('hex');
+    const data = await readFile(file);
+    const copy = path.join(copyDir, ...name.split('/'));
+    await mkdir(path.dirname(copy), { recursive: true });
+    await writeFile(copy, data);
+    baseline[name] = sha256(data);
   }
   return baseline;
+}
+
+// Retry in a round puts back every baseline file a worker changed or removed,
+// from the copy taken when feedback was given. A copy that is missing or no
+// longer matches its recorded hash is skipped: the round then stays refused
+// on that file, as it would without the copy.
+async function restoreBaseline(job, round, copyDir, log) {
+  const baseline = (job.feedbackRounds ?? []).find((r) => r.round === round)?.baseline ?? {};
+  const root = ledgerDir(job);
+  for (const [name, hash] of Object.entries(baseline)) {
+    const file = path.join(root, ...name.split('/'));
+    const current = await readFile(file).catch(() => null);
+    if (current && sha256(current) === hash) continue;
+    const copy = await readFile(path.join(copyDir, ...name.split('/'))).catch(() => null);
+    if (!copy || sha256(copy) !== hash) {
+      log(`job ${job.jobId} round ${round}: no good copy of ${name} to restore`);
+      continue;
+    }
+    try {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, copy);
+    } catch (err) {
+      log(`job ${job.jobId} round ${round}: could not restore ${name}`, err);
+    }
+  }
 }
 
 // The id of a feedback round's fix task, unique per triage attempt and
@@ -1098,7 +1132,8 @@ export function createSuperagent({
   // triage model comes from config only, so a job created before triage
   // existed, or whose workflow file is gone, still gets one. The baseline and
   // every repo's pending changes are read now, under the job's queue, so the
-  // round is judged against what the user had when they asked.
+  // round is judged against what the user had when they asked; the baseline
+  // files are copied under the job dir for retryJob to restore.
   function giveFeedback(jobId, { needsYouSeq, text } = {}) {
     return withJob(jobId, async () => {
       const job = await requireJob(jobId);
@@ -1121,7 +1156,7 @@ export function createSuperagent({
         forNeedsYouSeq: needsYouSeq,
         text: body,
         triageModel: resolveEngineModel(config.raw(), primaryRepo(job).origin, 'triage'),
-        baseline: await feedbackBaseline(job, round),
+        baseline: await feedbackBaseline(job, round, baselineCopyDir(store.jobDir(jobId), round)),
         pendingChanges,
       };
       return appendConfirmed(jobId, event, (j) => (j.feedbackRounds ?? []).some((r) => r.forNeedsYouSeq === needsYouSeq));
@@ -1156,6 +1191,7 @@ export function createSuperagent({
   // list reopens its task-writing phase (and its plan review) instead, as a
   // recovery of the round's last done feedback-plan attempt with the parse
   // errors on its card: reading the same file again would only go stuck again.
+  // In a round, Retry first puts back any baseline file a worker changed.
   function retryJob(jobId, { needsYouSeq, note } = {}) {
     return withJob(jobId, async () => {
       const job = await requireJob(jobId);
@@ -1177,6 +1213,10 @@ export function createSuperagent({
         ? job.attempts.findLast((a) => inRound(a) && a.purpose === 'feedback-plan' && a.outcome === 'done')
         : job.attempts.findLast((a) => inRound(a) && !gatedOut(a))) ?? null;
       const handoffFile = last?.dir ? path.join(last.dir, 'handoff.md') : null;
+      if (feedbackRound > 0) {
+        await restoreBaseline(job, feedbackRound, baselineCopyDir(store.jobDir(jobId), feedbackRound), log)
+          .catch((err) => log(`could not restore the baseline of job ${jobId} round ${feedbackRound}`, err));
+      }
       const event = {
         type: 'job-retried',
         needsYouSeq: job.needsYouSeq,

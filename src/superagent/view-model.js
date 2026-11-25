@@ -268,15 +268,23 @@ function needsYouView(job) {
 }
 
 // After a feedback round the links name that round's files: its triage, then
-// each input the round rewrote (the latest done tester's report, a sub-plan's
-// outputs) in place of the original.
+// each input the latest round that rewrote it (the latest done tester's
+// report, a sub-plan's outputs) has in place of the original, so a round that
+// wrote neither (separate) keeps the earlier round's.
 function readyInputs(job) {
   const last = (job.pipeline ?? []).findLast((p) => p.kind === 'human');
   const inputs = [...(last?.inputs ?? [])];
   const round = currentRound(job);
   if (round === 0) return inputs;
   const writers = artifactWriters(job);
-  const swapped = inputs.map((key) => [`test:${key}`, `out:${key}`].map((k) => roundKey(round, k)).find((k) => writers.has(k)) ?? key);
+  const latest = (key) => {
+    for (let r = round; r > 0; r--) {
+      const found = [`test:${key}`, `out:${key}`].map((k) => roundKey(r, k)).find((k) => writers.has(k));
+      if (found) return found;
+    }
+    return key;
+  };
+  const swapped = inputs.map(latest);
   const triage = roundKey(round, 'triage');
   return writers.has(triage) ? [triage, ...swapped] : swapped;
 }

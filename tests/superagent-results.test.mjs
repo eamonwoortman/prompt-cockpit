@@ -1379,12 +1379,16 @@ test('triage result schema', async () => {
   assert.match(await errorsOf({ route: 'separate' }), /idea must be 1-4000 characters/);
   assert.match(await errorsOf({ requirementChanges: 'x' }), /requirementChanges must be an array of strings/);
   assert.match(await errorsOf({ requirementChanges: [1] }), /requirementChanges must be an array of strings/);
+  assert.match(await errorsOf({ route: 'separate', idea: 'A new job.', requirementChanges: ['GET /bye says goodbye'] }), /requirementChanges must be empty for route separate/);
+  assert.match(await errorsOf({ summary: 'x'.repeat(4001) }), /summary must be at most 4000 characters/);
   const good = await run({});
   assert.equal(good.ok, true, JSON.stringify(good.errors));
   const fix = await run({ route: 'fix', task: { title: 'Fix it', repos: ['primary'], acceptance: 'It works.', verify: '' } });
   assert.equal(fix.ok, true, JSON.stringify(fix.errors));
   const separate = await run({ route: 'separate', idea: 'x'.repeat(4000) });
   assert.equal(separate.ok, true, JSON.stringify(separate.errors));
+  const long = await run({ summary: 'x'.repeat(4000) });
+  assert.equal(long.ok, true, JSON.stringify(long.errors));
 });
 
 test('a blocked triage needs no decision fields', async () => {
@@ -1407,7 +1411,10 @@ test('baseline refuses a changed original', async () => {
   assert.deepEqual(await baselineErrors(f.job, 1), []);
   await writeAt(f.worktree, planRel, '# plan edited\n');
   await fs.rm(path.join(f.worktree, ...`${root}/${gone}`.split('/')));
-  assert.deepEqual(await baselineErrors(f.job, 1), [`changed since feedback was given: ${planRel}`, `missing since feedback was given: ${root}/${gone}`]);
+  assert.deepEqual(await baselineErrors(f.job, 1), [
+    `changed since feedback was given: ${planRel} (the user's Retry restores the original)`,
+    `missing since feedback was given: ${root}/${gone} (the user's Retry restores the original)`,
+  ]);
 
   const testPhase = phaseOf(f.job, 'test');
   const attempt = { purpose: 'test', round: 1, final: false, task: null, feedbackRound: 1, reportOrdinal: 1 };
@@ -1416,7 +1423,7 @@ test('baseline refuses a changed original', async () => {
     const value = f.goodResult({ phaseId: 'test', status, artifacts: [], evidence: {}, findings: [{ id: 'F1', severity: 'major', text: 'Broken.' }] });
     const v = await f.check(value, { phase: testPhase, expect: { phaseId: 'test' }, attempt });
     assert.equal(v.ok, false, status);
-    assert.ok(v.errors.includes(`changed since feedback was given: ${planRel}`), status);
+    assert.ok(v.errors.includes(`changed since feedback was given: ${planRel} (the user's Retry restores the original)`), status);
   }
   await writeAt(f.worktree, planRel, '# plan\n');
   await writeAt(f.worktree, `${root}/${gone}`, '# review\n');

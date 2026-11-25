@@ -1754,6 +1754,38 @@ test('giveFeedback validates and records the round', async () => {
     const expected = Object.fromEntries(['plan.md', 'reviews/plan-review-r1.md', 'spec.md', 'tasks.json', 'tasks/T1-report.md', 'test-report.md'].map((k) => [k, sha256(files[k])]));
     assert.deepEqual(given.baseline, expected);
     assert.deepEqual(given.pendingChanges, { primary: { paths: ['notes.txt'], total: 1 } });
+    // The supervisor keeps its own copy of every baseline file, outside the worktree.
+    const copies = path.join(h.jobsRoot, job.jobId, 'feedback', 'round-1', 'baseline');
+    for (const key of Object.keys(expected)) assert.equal(await fs.readFile(path.join(copies, ...key.split('/')), 'utf8'), files[key], key);
+    const copied = (await fs.readdir(copies, { recursive: true })).map((n) => n.split(path.sep).join('/'));
+    assert.ok(!copied.some((n) => n.startsWith('feedback') || n.includes('-tests')), copied.join(', '));
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('retryJob in a round restores changed and missing baseline files from the copy, skipping a bad copy', async () => {
+  try {
+    const h = await harness();
+    const job = await readyM2(h);
+    const files = { 'spec.md': '# spec\n', 'plan.md': '# plan\n', 'tasks.json': '[]\n', 'test-report.md': '# report\n' };
+    await writeLedger(job, files);
+    await h.sa.giveFeedback(job.jobId, { needsYouSeq: job.needsYouSeq, text: 'more' });
+    const ledgerFile = (rel) => path.join(job.repos[0].worktree, ...`${ledgerRoot(job)}/${rel}`.split('/'));
+    const copy = (rel) => path.join(h.jobsRoot, job.jobId, 'feedback', 'round-1', 'baseline', ...rel.split('/'));
+    await fs.writeFile(ledgerFile('plan.md'), '# plan, edited by a worker\n');
+    await fs.rm(ledgerFile('spec.md'));
+    await fs.writeFile(ledgerFile('tasks.json'), '[1]\n');
+    await fs.writeFile(copy('tasks.json'), 'not the baseline\n');
+    await fs.writeFile(ledgerFile('test-report.md'), '# report, edited\n');
+    await fs.rm(copy('test-report.md'));
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'stuck', detail: { phase: 'plan', task: null, why: 'attempt-cap' } });
+
+    await h.sa.retryJob(job.jobId, { needsYouSeq: h.store.get(job.jobId).needsYouSeq });
+    assert.equal(typed(h, job.jobId, 'job-retried').length, 1);
+    assert.equal(await fs.readFile(ledgerFile('plan.md'), 'utf8'), files['plan.md']);
+    assert.equal(await fs.readFile(ledgerFile('spec.md'), 'utf8'), files['spec.md']);
+    assert.equal(await fs.readFile(ledgerFile('tasks.json'), 'utf8'), '[1]\n', 'a copy that does not match the baseline is not used');
+    assert.equal(await fs.readFile(ledgerFile('test-report.md'), 'utf8'), '# report, edited\n', 'a missing copy is skipped');
     await h.sa.stop();
   } finally { registry._reset(); }
 });
