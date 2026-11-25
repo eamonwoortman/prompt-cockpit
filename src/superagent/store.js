@@ -19,6 +19,7 @@ import path from 'node:path';
 import { writeJsonAtomic } from '../json-store.js';
 import { isSafeSessionId } from '../safe-id.js';
 import { defaultConfig, defaultSuperagentRoot } from './config.js';
+import { feedbackIndexes } from './feedback.js';
 import { ledgerArtifactRoot } from './results.js';
 import { LEDGER_LEGACY_ARTIFACTS, LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
 
@@ -43,20 +44,6 @@ function resolveArtifacts(first, legacy) {
   const base = legacy ? LEDGER_LEGACY_ARTIFACTS : first.artifacts ?? {};
   const root = ledgerArtifactRoot(first.jobId);
   return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, `${root}/${value}`]));
-}
-
-// Phases a feedback round re-enters; Task 2's feedbackShape replaces this.
-function roundPhases(pipeline) {
-  const only = (list) => (list.length === 1 ? list[0] : -1);
-  const taskWriting = only(pipeline.flatMap((p, i) => (p.kind === 'author' && (p.outputs ?? []).includes('tasks') ? [i] : [])));
-  const next = taskWriting >= 0 ? pipeline[taskWriting + 1] : null;
-  const review = next?.kind === 'review' && next.author === pipeline[taskWriting].role && (pipeline[taskWriting].outputs ?? []).includes(next.target) ? taskWriting + 1 : -1;
-  return {
-    taskWriting,
-    review,
-    perTask: only(pipeline.flatMap((p, i) => (p.kind === 'per-task' ? [i] : []))),
-    human: pipeline.findLastIndex((p) => p.kind === 'human'),
-  };
 }
 
 export function deriveJob(events) {
@@ -169,7 +156,7 @@ export function deriveJob(events) {
         }
         const at = job.pipeline.findIndex((p) => p.phase === ev.phase);
         if (ev.reopen === true && at >= 0) {
-          const review = roundPhases(job.pipeline).review;
+          const review = feedbackIndexes(job).planReview;
           const phases = [at, review === at + 1 ? review : -1].filter((i) => i >= 0).map((i) => job.pipeline[i].phase);
           for (const a of job.attempts) {
             if (a.feedbackRound === round && phases.includes(a.phase)) a.retried = true;
@@ -312,7 +299,7 @@ export function deriveJob(events) {
       case 'feedback-routed': {
         const entry = job.feedbackRounds.find((r) => r.round === ev.round);
         if (!entry || entry.round !== job.feedbackRound || entry.route !== null) break;
-        const where = roundPhases(job.pipeline);
+        const where = feedbackIndexes(job);
         const bump = (index) => {
           const id = job.pipeline[index].phase;
           job.visits[id] = (job.visits[id] ?? 1) + 1;
@@ -324,7 +311,7 @@ export function deriveJob(events) {
         } else if (ev.route === 'subplan' && where.taskWriting >= 0) {
           job.phaseIndex = where.taskWriting;
           bump(where.taskWriting);
-          if (where.review >= 0) bump(where.review);
+          if (where.planReview >= 0) bump(where.planReview);
         } else if (ev.route === 'separate' && where.human >= 0) {
           setState('needs-you', 'ready-to-try', { phase: job.pipeline[where.human].phase, feedback: { round: ev.round } });
           job.needsYouSeq = ev.seq ?? null;
@@ -335,7 +322,7 @@ export function deriveJob(events) {
       }
       case 'tasks-appended': {
         const entry = job.feedbackRounds.find((r) => r.round === ev.round);
-        const perTask = roundPhases(job.pipeline).perTask;
+        const perTask = feedbackIndexes(job).perTask;
         if (!entry || entry.round !== job.feedbackRound || entry.route !== 'subplan' || entry.tasksAppended || perTask < 0) break;
         job.tasks = [...(job.tasks ?? []), ...(ev.tasks ?? []).map((t) => ({ ...structuredClone(t), origin: 'feedback', round: ev.round }))];
         job.visits[job.pipeline[perTask].phase] = (job.visits[job.pipeline[perTask].phase] ?? 1) + 1;

@@ -141,6 +141,7 @@ test('validation refuses', async (t) => {
     ['an artifact path inside the job\'s reviews/', (d) => { d.artifacts.spec = 'reviews/{date}-spec.md'; }, /reserved reviews\//],
     ['an artifact path inside the job\'s tasks/', (d) => { d.artifacts.spec = 'tasks/spec.md'; }, /reserved tasks\//],
     ['an artifact path equal to the job\'s reviews', (d) => { d.artifacts.spec = 'reviews'; }, /reserved reviews\//],
+    ['an artifact path inside the job\'s feedback/', (d) => { d.artifacts.x = 'feedback/x.md'; }, /reserved feedback\//],
     ['an unknown placeholder', (d) => { d.artifacts.spec = 'docs/{user}/spec.md'; }, /only \{slug\} and \{date\}/],
     ['tasks mapped to a non-.json path', (d) => { d.artifacts.tasks = 'docs/custom/tasks.md'; }, /"tasks" must be a \.json path/],
   ];
