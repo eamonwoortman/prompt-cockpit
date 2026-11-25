@@ -94,7 +94,7 @@ async function harness({ handlers = handlersWith(), limits = null, defaults = {}
     });
     const events = (jobId) => readFileSync(path.join(jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     const h = {
-      clock, store, factory, worker, sa, events,
+      root, clock, store, factory, worker, sa, events,
       started: (jobId, phase) => events(jobId).filter((e) => e.type === 'attempt-started' && e.dir && (phase === undefined || e.phase === phase)),
       ended: (jobId) => events(jobId).filter((e) => e.type === 'attempt-ended'),
       // One tick per step, the clock moved past any back-off (max 5 minutes)
@@ -1476,6 +1476,295 @@ test('an investigator that cannot reproduce asks the user', { timeout: TEST_TIME
     const cards = h.worker.cards().filter((c) => c.phaseId === 'investigate');
     assert.equal(cards.length, 2);
     assert.deepEqual(cards[1].userAnswers, [{ question: 'Which build shows the 500?', answer: 'the release build' }]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+// --- Give feedback (step 6): feedback rounds end to end with scripted workers ---
+
+const ledgerOf = (job) => `.superpowers/superagent/${job.jobId}/artifacts`;
+const primaryWt = (job) => job.repos.find((r) => r.id === 'primary').worktree;
+
+async function writeRel(job, rel, text) {
+  const file = path.join(primaryWt(job), ...rel.split('/'));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, text);
+}
+
+async function recordDone(h, job, start, end = {}) {
+  const attemptId = randomUUID();
+  await h.store.append(job.jobId, { type: 'attempt-started', attemptId, task: null, role: 'fast-forward', model: 'claude-opus-5-5', n: 1, recovery: false, previousAttemptId: null, dir: null, round: null, final: false, ...start });
+  await h.store.append(job.jobId, { type: 'attempt-ended', attemptId, outcome: 'done', summary: 'fast-forwarded', commits: [], ...end });
+}
+
+// Puts a workflow job at ready-to-try without running workers: every artifact
+// and one review file are written, and every phase before the human one is
+// recorded as synthetic done attempts (dir null) and completions.
+async function readyToTry(h, job, { tasks = [task('T1')] } = {}) {
+  for (const [key, rel] of Object.entries(artifactPaths(job))) await writeRel(job, rel, key === 'tasks' ? JSON.stringify(tasks, null, 2) : `# ${key}\n`);
+  for (const phase of job.pipeline) {
+    if (phase.kind === 'human') break;
+    if (phase.kind === 'brainstorm') await recordDone(h, job, { phase: phase.phase, purpose: 'ask' }, { questions: [] });
+    else if (phase.kind === 'author') await recordDone(h, job, { phase: phase.phase, purpose: phase.test ? 'test' : 'author' });
+    else if (phase.kind === 'review') {
+      await writeRel(job, `${ledgerOf(job)}/reviews/${phase.phase}-r1.md`, `# ${phase.phase} approves\n`);
+      await h.store.append(job.jobId, ev.phaseCompleted(phase.phase, 1));
+    } else if (phase.kind === 'per-task') {
+      await h.store.append(job.jobId, ev.tasksLoaded(tasks.map((t) => ({ ...t, origin: 'plan', fromAttemptId: null }))));
+      for (const t of tasks) {
+        await recordDone(h, job, { phase: phase.phase, task: t.id, purpose: 'implement' });
+        if (phase.taskReview) await recordDone(h, job, { phase: phase.phase, task: t.id, purpose: 'task-review', round: 1 }, { verdict: 'approve', findings: [] });
+      }
+      await h.store.append(job.jobId, ev.phaseCompleted(phase.phase, 1));
+    }
+  }
+  const ready = await h.drive(job.jobId);
+  assert.deepEqual([ready.state, ready.reason], ['needs-you', 'ready-to-try']);
+  return ready;
+}
+
+async function ledgerFiles(job) {
+  const root = path.join(primaryWt(job), ...ledgerOf(job).split('/'));
+  const out = {};
+  for (const rel of await fs.readdir(root, { recursive: true })) {
+    const file = path.join(root, rel);
+    if ((await fs.stat(file)).isFile()) out[rel.split(path.sep).join('/')] = await fs.readFile(file, 'utf8');
+  }
+  return out;
+}
+
+// Triage answers in its final message (resultVia final-message), never through
+// publish(), which would write the card's triage.md itself.
+const triageSays = (decision) => () => ({ status: 'done', artifacts: [], question: null, brief: `# Triage\n\n${decision.summary}\n`, ...decision });
+const SUBPLAN = { route: 'subplan', summary: 'Plan a goodbye endpoint.', requirementChanges: ['GET /bye says goodbye'] };
+const FIX = { route: 'fix', summary: 'One task: say hi.', requirementChanges: ['GET /hello says hi'], task: { title: 'Say hi', repos: ['primary'], acceptance: 'GET /hello says hi', verify: 'npm test' } };
+const SEPARATE = { route: 'separate', summary: 'This is its own feature.', requirementChanges: [], idea: 'Build a separate admin page.' };
+const roundTasks = (tasks) => ({ publish }) => publish({}, { content: { tasks: JSON.stringify(tasks, null, 2) } });
+const createFeature = (h, over = {}) => createJob(h, { fixture: null, workflow: 'feature', ...over });
+const roundSteps = (h, jobId, after) => steps(h.started(jobId).filter((e) => e.feedbackRound === after));
+
+async function giveFeedbackAndDrive(h, ready, text = 'Please change it.') {
+  const before = await ledgerFiles(ready);
+  await h.sa.giveFeedback(ready.jobId, { needsYouSeq: ready.needsYouSeq, text });
+  const done = await h.drive(ready.jobId);
+  assert.deepEqual(h.worker.errors, []);
+  assert.deepEqual([done.state, done.reason], ['needs-you', 'ready-to-try']);
+  assert.ok(done.needsYouSeq > ready.needsYouSeq, 'a new needs-you');
+  const after = await ledgerFiles(ready);
+  for (const [rel, text2] of Object.entries(before)) assert.equal(after[rel], text2, `${rel} is unchanged`);
+  return done;
+}
+
+test('feature subplan round end to end', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ triage: triageSays(SUBPLAN), 'plan:feedback-plan': roundTasks([task('R1', { dependsOn: ['T1'] })]) }) });
+    const job = await createFeature(h);
+    const ready = await readyToTry(h, job);
+    const before = await ledgerFiles(ready);
+    for (const rel of ['plan.md', 'tasks.json', 'test-report.md', 'reviews/plan-review-r1.md', 'reviews/spec-review-r1.md']) assert.ok(rel in before, rel);
+
+    const done = await giveFeedbackAndDrive(h, ready);
+    assert.deepEqual(roundSteps(h, job.jobId, 1), [
+      ['accept', null, 'triage', 'triage'],
+      ['plan', null, 'feedback-plan', 'planner'],
+      ['plan-review', null, 'review', 'plan-reviewer'],
+      ['implement', 'R1', 'implement', 'implementer'],
+      ['implement', 'R1', 'task-review', 'task-reviewer'],
+      ['test', null, 'test', 'tester'],
+    ]);
+    assert.equal(h.started(job.jobId).filter((e) => !e.feedbackRound).length, 0, 'every worker ran in the round');
+    assert.deepEqual(h.events(job.jobId).filter((e) => e.type === 'feedback-routed').map((e) => e.route), ['subplan']);
+    assert.deepEqual(h.events(job.jobId).filter((e) => e.type === 'tasks-appended').map((e) => e.tasks.map((t) => t.id)), [['R1']]);
+    assert.deepEqual(done.tasks.map((t) => [t.id, t.origin]), [['T1', 'plan'], ['R1', 'feedback']]);
+
+    const round = `${ledgerOf(job)}/feedback/round-1`;
+    const after = await ledgerFiles(done);
+    for (const rel of ['triage.md', 'outputs/plan.md', 'outputs/tasks.json', 'reviews/plan-review-r1.md', 'tests/testReport-1.md']) assert.ok(`feedback/round-1/${rel}` in after, rel);
+    assert.match(after['feedback/round-1/triage.md'], /## Requirement changes\n\n- GET \/bye says goodbye\n/);
+    const cards = h.worker.cards();
+    assert.deepEqual(cards.find((c) => c.purpose === 'feedback-plan').outputs, { plan: `${round}/outputs/plan.md`, tasks: `${round}/outputs/tasks.json` });
+    assert.equal(cards.find((c) => c.phaseId === 'plan-review').target, `${round}/outputs/plan.md`);
+    assert.deepEqual(cards.find((c) => c.purpose === 'test').outputs, { testReport: `${round}/tests/testReport-1.md` });
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('feature fix round end to end', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ triage: triageSays(FIX) }) });
+    const job = await createFeature(h);
+    const ready = await readyToTry(h, job);
+    const done = await giveFeedbackAndDrive(h, ready);
+    const triage = h.started(job.jobId, 'accept').at(-1).attemptId;
+    const id = `B1-${triage.slice(0, 8)}`;
+    assert.deepEqual(roundSteps(h, job.jobId, 1), [
+      ['accept', null, 'triage', 'triage'],
+      ['implement', id, 'implement', 'implementer'],
+      ['implement', id, 'task-review', 'task-reviewer'],
+      ['test', null, 'test', 'tester'],
+    ]);
+    assert.deepEqual(done.tasks.at(-1), { id, title: 'Say hi', repos: ['primary'], dependsOn: [], acceptance: 'GET /hello says hi', verify: 'npm test', origin: 'feedback', round: 1, fromAttemptId: triage });
+    const impl = h.worker.log.find((e) => e.card.taskId === id && e.card.purpose === 'implement');
+    assert.deepEqual(impl.body.evidence.checks, [{ cmd: 'npm test', exit: 0 }]);
+    assert.equal(h.events(job.jobId).filter((e) => e.type === 'tasks-appended').length, 0);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('separate returns to ready-to-try', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ triage: triageSays(SEPARATE) }) });
+    const job = await createFeature(h);
+    const ready = await readyToTry(h, job);
+    const done = await giveFeedbackAndDrive(h, ready);
+    assert.deepEqual(roundSteps(h, job.jobId, 1), [['accept', null, 'triage', 'triage']]);
+    const routed = h.events(job.jobId).find((e) => e.type === 'feedback-routed');
+    assert.equal(done.needsYouSeq, routed.seq);
+    assert.deepEqual(done.detail, { phase: 'accept', feedback: { round: 1 } });
+    assert.equal(done.attempts.find((a) => a.purpose === 'triage').triage.idea, 'Build a separate admin page.');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+const createTroubleshootingRound = (h) => createJob(h, { fixture: null, workflow: 'troubleshooting', title: 'Fix hello', idea: 'GET /hello returns 500.' });
+const REPRO = 'The reproduction is now: GET /hello?name= returns 500';
+
+test('troubleshooting subplan round end to end', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ triage: triageSays({ ...SUBPLAN, requirementChanges: [REPRO] }), 'investigate:feedback-plan': roundTasks([task('R1', { dependsOn: ['T1'] })]) }) });
+    const job = await createTroubleshootingRound(h);
+    const ready = await readyToTry(h, job);
+    await giveFeedbackAndDrive(h, ready);
+    assert.deepEqual(roundSteps(h, job.jobId, 1), [
+      ['accept', null, 'triage', 'triage'],
+      ['investigate', null, 'feedback-plan', 'investigator'],
+      ['diagnosis-review', null, 'review', 'diagnosis-reviewer'],
+      ['fix', 'R1', 'implement', 'fixer'],
+      ['fix', 'R1', 'task-review', 'fix-reviewer'],
+      ['verify', null, 'test', 'verifier-tester'],
+    ]);
+    const round = `${ledgerOf(job)}/feedback/round-1`;
+    const cards = h.worker.cards();
+    assert.deepEqual(cards.find((c) => c.purpose === 'feedback-plan').outputs, { diagnosis: `${round}/outputs/diagnosis.md`, tasks: `${round}/outputs/tasks.json` });
+    assert.equal(cards.find((c) => c.phaseId === 'diagnosis-review').target, `${round}/outputs/diagnosis.md`);
+    const verify = cards.find((c) => c.phaseId === 'verify');
+    assert.deepEqual(verify.feedback.map((f) => [f.round, f.requirementChanges]), [[1, [REPRO]]]);
+    assert.deepEqual(verify.outputs, { testReport: `${round}/tests/testReport-1.md` });
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('troubleshooting fix round end to end', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ triage: triageSays(FIX) }) });
+    const job = await createTroubleshootingRound(h);
+    const ready = await readyToTry(h, job);
+    await giveFeedbackAndDrive(h, ready);
+    const id = `B1-${h.started(job.jobId, 'accept').at(-1).attemptId.slice(0, 8)}`;
+    assert.deepEqual(roundSteps(h, job.jobId, 1), [
+      ['accept', null, 'triage', 'triage'],
+      ['fix', id, 'implement', 'fixer'],
+      ['fix', id, 'task-review', 'fix-reviewer'],
+      ['verify', null, 'test', 'verifier-tester'],
+    ]);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('troubleshooting separate', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ triage: triageSays(SEPARATE) }) });
+    const job = await createTroubleshootingRound(h);
+    const ready = await readyToTry(h, job);
+    const done = await giveFeedbackAndDrive(h, ready);
+    assert.deepEqual(roundSteps(h, job.jobId, 1), [['accept', null, 'triage', 'triage']]);
+    assert.deepEqual(done.detail, { phase: 'accept', feedback: { round: 1 } });
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+const MINI = {
+  format: 1,
+  id: 'mini',
+  name: 'Plan and build',
+  artifacts: { plan: 'plan.md', tasks: 'tasks.json', testReport: 'test-report.md' },
+  phases: [
+    { phase: 'plan', kind: 'author', role: 'planner', inputs: ['idea'], outputs: ['plan', 'tasks'] },
+    { phase: 'implement', kind: 'per-task', role: 'implementer', inputs: ['tasks'] },
+    { phase: 'test', kind: 'author', role: 'tester', inputs: ['tasks'], outputs: ['testReport'], test: true },
+    { phase: 'accept', kind: 'human', inputs: ['testReport'] },
+  ],
+};
+
+test('subplan round without a review phase', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    const h = await harness({ handlers: handlersWith({ triage: triageSays(SUBPLAN), 'plan:feedback-plan': roundTasks([task('R1')]) }) });
+    await fs.mkdir(path.join(h.root, 'workflows'), { recursive: true });
+    await fs.writeFile(path.join(h.root, 'workflows', 'mini.json'), JSON.stringify(MINI));
+    const job = await createJob(h, { fixture: null, workflow: 'mini' });
+    const ready = await readyToTry(h, job);
+    await giveFeedbackAndDrive(h, ready);
+    assert.deepEqual(roundSteps(h, job.jobId, 1), [
+      ['accept', null, 'triage', 'triage'],
+      ['plan', null, 'feedback-plan', 'planner'],
+      ['implement', 'R1', 'implement', 'implementer'],
+      ['test', null, 'test', 'tester'],
+    ]);
+    const evs = h.events(job.jobId);
+    const planEnd = evs.findIndex((e) => e.type === 'attempt-ended' && e.attemptId === h.started(job.jobId, 'plan').at(-1).attemptId);
+    assert.equal(evs.slice(planEnd + 1).find((e) => e.type !== 'attempt-session').type, 'tasks-appended');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('retry on round tasks-invalid reopens authoring', { timeout: TEST_TIMEOUT_MS }, async () => {
+  try {
+    let reviews = 0;
+    // The first plan review corrupts the round's tasks file after the planner
+    // published it, so the append finds a collision.
+    const corrupting = ({ card, publish }) => {
+      reviews += 1;
+      if (reviews === 1) writeFileSync(path.join(card.repos.find((r) => r.id === 'primary').worktree, ...card.inputs.tasks.split('/')), JSON.stringify([task('t1')]));
+      return publish({ verdict: 'approve', findings: [] });
+    };
+    const h = await harness({ handlers: handlersWith({ triage: triageSays(SUBPLAN), 'plan:feedback-plan': roundTasks([task('R1')]), 'plan-review:review': corrupting }) });
+    const job = await createFeature(h);
+    const ready = await readyToTry(h, job);
+    await h.sa.giveFeedback(ready.jobId, { needsYouSeq: ready.needsYouSeq, text: 'Add a goodbye.' });
+    const stuck = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual([stuck.state, stuck.reason, stuck.detail.why, stuck.detail.round], ['needs-you', 'stuck', 'tasks-invalid', 1]);
+    const errors = stuck.detail.errors;
+    assert.match(errors[0], /collides with an existing task/);
+    const planner = h.started(job.jobId, 'plan').at(-1).attemptId;
+
+    await h.sa.retryJob(job.jobId, { needsYouSeq: stuck.needsYouSeq, note: 'use new ids' });
+    const retried = h.events(job.jobId).filter((e) => e.type === 'job-retried').at(-1);
+    assert.deepEqual(
+      { phase: retried.phase, task: retried.task, feedbackRound: retried.feedbackRound, reopen: retried.reopen, errors: retried.errors, fromAttemptId: retried.fromAttemptId },
+      { phase: 'plan', task: null, feedbackRound: 1, reopen: true, errors, fromAttemptId: planner },
+    );
+
+    const done = await h.drive(job.jobId);
+    assert.deepEqual(h.worker.errors, []);
+    assert.deepEqual([done.state, done.reason], ['needs-you', 'ready-to-try']);
+    const relaunch = h.started(job.jobId, 'plan').at(-1);
+    assert.deepEqual([relaunch.purpose, relaunch.recovery, relaunch.previousAttemptId, relaunch.feedbackRound], ['feedback-plan', true, planner, 1]);
+    const card = h.worker.cards().find((c) => c.attemptId === relaunch.attemptId);
+    assert.deepEqual(card.retryErrors, errors);
+    assert.equal(card.retryNote, 'use new ids');
+    assert.deepEqual(roundSteps(h, job.jobId, 1), [
+      ['accept', null, 'triage', 'triage'],
+      ['plan', null, 'feedback-plan', 'planner'],
+      ['plan-review', null, 'review', 'plan-reviewer'],
+      ['plan', null, 'feedback-plan', 'planner'],
+      ['plan-review', null, 'review', 'plan-reviewer'],
+      ['implement', 'R1', 'implement', 'implementer'],
+      ['implement', 'R1', 'task-review', 'task-reviewer'],
+      ['test', null, 'test', 'tester'],
+    ]);
+    assert.deepEqual(h.started(job.jobId, 'plan-review').map((e) => e.round), [1, 1]);
+    assert.deepEqual(h.events(job.jobId).filter((e) => e.type === 'tasks-appended').map((e) => e.tasks.map((t) => t.id)), [['R1']]);
     await h.sa.stop();
   } finally { registry._reset(); }
 });

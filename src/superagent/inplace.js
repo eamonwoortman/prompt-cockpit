@@ -81,15 +81,23 @@ export async function checkInPlace({ git = defaultGit, folder, branch }) {
   const onBranch = await refuseJobBranch({ git, folder });
   if (onBranch === null) throw fail('ERR_FOLDER_BUSY_GIT', `superagent: ${folder} has a detached HEAD; switch it to a branch first`);
 
+  const pending = await readPendingChanges({ git, folder });
+
+  const ref = await git(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: folder });
+  if (ref.code === 0) throw fail('ERR_BRANCH_EXISTS', `superagent: branch ${branch} already exists`);
+  return { toplevel, head: head.stdout.trim(), pending };
+}
+
+// The user's uncommitted and untracked paths (ignored ones, the job's ledger
+// included, are not listed): read-only, never refreshes the index. Recorded at
+// job-created and again at every feedback-given.
+export async function readPendingChanges({ git = defaultGit, folder }) {
   const status = await git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'], { cwd: folder });
   if (status.code !== 0) {
     throw fail('ERR_FOLDER_DIRTY', `superagent: could not read the git status of ${folder}: ${status.stderr.trim()}`);
   }
   const changed = status.stdout.split(/\r?\n/).filter(Boolean).map((line) => line.slice(3));
-
-  const ref = await git(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: folder });
-  if (ref.code === 0) throw fail('ERR_BRANCH_EXISTS', `superagent: branch ${branch} already exists`);
-  return { toplevel, head: head.stdout.trim(), pending: { paths: changed.slice(0, PENDING_PATHS_KEPT), total: changed.length } };
+  return { paths: changed.slice(0, PENDING_PATHS_KEPT), total: changed.length };
 }
 
 function ledgerDirRel(jobId) {

@@ -12,6 +12,8 @@ import {
   createSuperagentConfig,
   templateFor,
   resolveProjectConfig,
+  ENGINE_ROLES,
+  resolveEngineModel,
 } from '../src/superagent/config.js';
 import { tempDir } from './superagent-helpers.mjs';
 
@@ -399,4 +401,18 @@ test('a branchTemplates key overrides the layer below whatever its case', () => 
   const project = resolveProjectConfig(fileConfig, repo).branchTemplates;
   assert.deepEqual(project, { troubleshooting: 'hotfix/{ticket}', feature: 'feat/{description}' });
   assert.equal(templateFor(project, 'Troubleshooting'), 'hotfix/{ticket}');
+});
+
+test('triage is an engine role whose model comes from config only', () => {
+  assert.ok(ENGINE_ROLES.includes('triage'));
+  const origin = path.resolve('proj-a');
+  const other = path.resolve('proj-b');
+  assert.deepEqual(resolveEngineModel({}, origin, 'triage'), { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 20 });
+  const fileConfig = {
+    defaults: { models: { triage: { maxTurns: 30 } } },
+    projects: { [origin]: { models: { triage: { model: 'claude-opus-5-5' } } } },
+  };
+  assert.deepEqual(resolveEngineModel(fileConfig, origin, 'triage'), { provider: 'claude', model: 'claude-opus-5-5', maxTurns: 30 });
+  assert.deepEqual(resolveEngineModel(fileConfig, other, 'triage'), { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 30 });
+  assert.deepEqual(resolveEngineModel(fileConfig, null, 'triage'), { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 30 });
 });

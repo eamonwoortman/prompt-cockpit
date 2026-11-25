@@ -134,6 +134,8 @@ export function reviseOutputs(job, phase, { feedbackRound = 0 } = {}) {
 // would share one report file on a case-insensitive filesystem.
 const TASK_ID_RE = /^[a-z0-9][a-z0-9-]{0,11}$/i;
 const FIX_TASK_ID_RE = /^F-[0-9a-f]{8}$/i;
+// A feedback round's fix task: B<round>-<first 8 of the triage attempt id>.
+export const FEEDBACK_TASK_ID_RE = /^B[1-9][0-9]*-[0-9a-f]{8}$/i;
 
 // Iterative DFS; returns the ids on the first cycle found, in path order.
 // Self and unknown dependencies are reported separately, so they are skipped.
@@ -186,6 +188,7 @@ export function parseTasks(text, job, { existing = [] } = {}) {
     const idOk = typeof t.id === 'string' && TASK_ID_RE.test(t.id);
     if (!idOk) errors.push(`${at}.id must be 1-12 letters, digits or hyphens, starting with a letter or digit: ${JSON.stringify(t.id)}`);
     else if (FIX_TASK_ID_RE.test(t.id)) errors.push(`${at}.id: ${JSON.stringify(t.id)} is reserved for generated fix tasks (F-<8 hex>)`);
+    else if (FEEDBACK_TASK_ID_RE.test(t.id)) errors.push(`${at}.id: ${JSON.stringify(t.id)} is reserved for feedback fix tasks (B<round>-<8 hex>)`);
     else if (earlier.has(t.id.toLowerCase())) errors.push(`${at}.id: ${JSON.stringify(t.id)} collides with an existing task`);
     else if (seen.has(t.id.toLowerCase())) errors.push(`${at}.id: duplicate id ${JSON.stringify(t.id)}`);
     if (idOk) seen.add(t.id.toLowerCase());

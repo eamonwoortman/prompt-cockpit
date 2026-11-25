@@ -1,6 +1,6 @@
 // Superagent supervisor: createSuperagent owns one heartbeat that reviews and
-// advances every running job, plus job creation, accept, answerQuestion,
-// retryJob, renameJob and stop.
+// advances every running job, plus job creation, accept, giveFeedback,
+// answerQuestion, retryJob, renameJob and stop.
 //
 // Modelled on createAutopilot (src/autopilot.js): everything injected, one
 // timer, a tick that never overlaps itself, an idempotent start/stop and a
@@ -9,7 +9,7 @@
 // src/server.js.
 //
 // Per-job serialisation: tick's job step, createJob's provisioning, stopJob,
-// accept, answerQuestion, retryJob and renameJob all run on one promise chain per job (withJob),
+// accept, giveFeedback, answerQuestion, retryJob and renameJob all run on one promise chain per job (withJob),
 // so a stop can never interleave with a launch. stopJob marks the job in
 // stopRequested synchronously, before it queues, so a tick step already
 // waiting on a budget check sees the stop on its recheck and launches nothing.
@@ -43,16 +43,17 @@
 // accounting queue (accounting.js), never awaited; stop() gives it the same
 // absolute deadline as the in-flight tick. The queue also snapshots each
 // attempt's artifacts into <jobDir>/artifacts (artifacts.js).
-import { randomUUID } from 'node:crypto';
-import { access, readFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { access, readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createAccounting } from './accounting.js';
 import { artifactStates as readArtifactStates, snapshotDirFor } from './artifacts.js';
 import { isValidBranchName } from './branch-name.js';
-import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, templateFor, validateMilestoneFixture } from './config.js';
-import { checkGate, checkInPlace, folderChangedEvent, normaliseTop, provisionInPlace, refuseJobBranch } from './inplace.js';
+import { FIXTURES, STAND_IN_ROLE, defaultSuperagentRoot, resolveEngineModel, templateFor, validateMilestoneFixture } from './config.js';
+import { currentRound, feedbackEligibility, feedbackShape, roundOf, roundOutputPaths } from './feedback.js';
+import { checkGate, checkInPlace, folderChangedEvent, normaliseTop, provisionInPlace, readPendingChanges, refuseJobBranch } from './inplace.js';
 import { hasTemplate } from './prompts.js';
-import { RESULT_FILE, artifactPaths, attemptDir, parseTasks, primaryRepo } from './results.js';
+import { RESULT_FILE, artifactPaths, attemptDir, ledgerArtifactRoot, parseTasks, primaryRepo } from './results.js';
 import { allowedActions, buildRouterRequest } from './router.js';
 import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, attemptsFor, buildFixTask, gatedOut, nextAction } from './sequencer.js';
@@ -110,6 +111,39 @@ function needsYouDetail({ reason, detail }) {
 }
 
 const hasDecision = (job, attemptId) => (job?.routerDecisions ?? []).some((d) => d.forAttemptId === attemptId);
+const roundEntry = (job, round) => (job?.feedbackRounds ?? []).find((r) => r.round === round) ?? null;
+
+// Saved tests come and go as workers restore and remove them; the current
+// round's own folder is what the round is about to write.
+const SAVED_TESTS_RE = /^tasks\/[^/]+-tests\//;
+
+// Every file under the job's ledger artifact root, keyed relative to it, with
+// the SHA-256 of its bytes: what no attempt in the round may change.
+async function feedbackBaseline(job, round) {
+  const root = path.join(primaryRepo(job).worktree, ...ledgerArtifactRoot(job.jobId).split('/'));
+  let names;
+  try {
+    names = await readdir(root, { recursive: true });
+  } catch (err) {
+    if (err?.code === 'ENOENT') return {};
+    throw err;
+  }
+  const roundPrefix = `feedback/round-${round}/`;
+  const baseline = {};
+  for (const name of names.map((n) => n.split(path.sep).join('/')).sort()) {
+    if (name.toLowerCase().startsWith(roundPrefix) || SAVED_TESTS_RE.test(name)) continue;
+    const file = path.join(root, ...name.split('/'));
+    if (!(await stat(file)).isFile()) continue;
+    baseline[name] = createHash('sha256').update(await readFile(file)).digest('hex');
+  }
+  return baseline;
+}
+
+// The id of a feedback round's fix task, unique per triage attempt and
+// reserved in parseTasks (FEEDBACK_TASK_ID_RE).
+function feedbackFixTask(round, attemptId, task) {
+  return { id: `B${round}-${attemptId.slice(0, 8)}`, title: task.title, repos: [...task.repos], dependsOn: [], acceptance: task.acceptance, verify: task.verify ?? '' };
+}
 
 async function fileExists(file) {
   try {
@@ -346,6 +380,43 @@ export function createSuperagent({
     await appendConfirmed(jobId, event, (j) => (j.tasks ?? []).some((t) => t.fromAttemptId === attemptId));
   }
 
+  // The done triage's decision, recorded once per round: deriveJob ignores a
+  // second feedback-routed for a round already routed.
+  async function routeFeedbackStep(jobId, job, { round, attemptId }) {
+    const decision = job.attempts.find((a) => a.attemptId === attemptId)?.triage;
+    if (!decision) throw new Error(`superagent: triage attempt ${attemptId} has no decision to route`);
+    const event = {
+      type: 'feedback-routed',
+      round,
+      attemptId,
+      route: decision.route,
+      ...(decision.route === 'fix' && { task: feedbackFixTask(round, attemptId, decision.task) }),
+    };
+    await appendConfirmed(jobId, event, (j) => roundEntry(j, round)?.route != null);
+  }
+
+  // A subplan round's tasks, checked against the tasks the job had before them
+  // (loadTasksStep's gate and read rules). deriveJob ignores a second
+  // tasks-appended for the round.
+  async function appendRoundTasksStep(jobId, job, { round }) {
+    if (hasInPlace(job) && !(await passGate(jobId, job))) return;
+    const rel = roundOutputPaths(job, round, ['tasks']).tasks;
+    let parsed;
+    try {
+      parsed = parseTasks(await readFile(path.join(primaryRepo(job).worktree, ...rel.split('/')), 'utf8'), job, { existing: job.tasks ?? [] });
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+      parsed = { ok: false, errors: [`could not read ${rel}: ${messageOf(err)}`] };
+    }
+    if (stepStale(jobId)) return;
+    if (parsed.ok) {
+      const tasks = parsed.tasks.map((t) => ({ ...t, origin: 'feedback', round }));
+      await appendConfirmed(jobId, { type: 'tasks-appended', round, tasks }, (j) => roundEntry(j, round)?.tasksAppended === true);
+    } else {
+      await store.append(jobId, { type: 'needs-you', reason: 'stuck', detail: { why: 'tasks-invalid', errors: parsed.errors, round } });
+    }
+  }
+
   // A decision that did not land is kept for the next tick (Decision 10).
   async function appendDecision(jobId, event) {
     try {
@@ -516,6 +587,10 @@ export function createSuperagent({
         await store.append(jobId, { type: 'phase-completed', phase, visit, unresolved, verification });
       } else if (action.type === 'route-test-failure') {
         await routeTestFailureStep(jobId, job, action);
+      } else if (action.type === 'route-feedback') {
+        await routeFeedbackStep(jobId, job, action);
+      } else if (action.type === 'load-round-tasks') {
+        await appendRoundTasksStep(jobId, job, action);
       } else if (action.type === 'route') {
         await routeStep(jobId, job, action);
       }
@@ -945,9 +1020,19 @@ export function createSuperagent({
 
   // `needsYouSeq`, when given, is the needs-you the caller saw (the view
   // sends it): a job that has since moved on is refused, never acted on.
-  function requireSeen(job, needsYouSeq) {
+  // Feedback passes `required`, so an omitted one is a bad request there.
+  function requireSeen(job, needsYouSeq, { required = false } = {}) {
+    if (required && !Number.isInteger(needsYouSeq)) {
+      throw fail('ERR_INVALID_REQUEST', 'superagent: needsYouSeq must be the integer seq of the needs-you this was written for');
+    }
     if (needsYouSeq !== undefined && needsYouSeq !== job.needsYouSeq) {
       throw fail('ERR_INVALID_STATE', `superagent: job ${job.jobId} no longer needs what was shown (needs-you ${needsYouSeq}, now ${job.needsYouSeq ?? 'none'})`);
+    }
+  }
+
+  function requireReadyToTry(job) {
+    if (job.state !== 'needs-you' || job.reason !== 'ready-to-try') {
+      throw fail('ERR_INVALID_STATE', `superagent: job ${job.jobId} is ${job.state}${job.reason ? ` (${job.reason})` : ''}, not ready to try`);
     }
   }
 
@@ -994,9 +1079,7 @@ export function createSuperagent({
     return withJob(jobId, async () => {
       const job = await requireJob(jobId);
       requireSeen(job, needsYouSeq);
-      if (job.state !== 'needs-you' || job.reason !== 'ready-to-try') {
-        throw fail('ERR_INVALID_STATE', `superagent: job ${jobId} is ${job.state}${job.reason ? ` (${job.reason})` : ''}, not ready to try`);
-      }
+      requireReadyToTry(job);
       if (branch != null && typeof branch !== 'string') throw fail('ERR_INVALID_BRANCH', 'superagent: a branch name must be text');
       const from = job.finalBranch ?? job.branch;
       const to = branch?.trim() || from;
@@ -1008,6 +1091,40 @@ export function createSuperagent({
       releaseIfFinished(jobId);
       await archive(accepted);
       return accepted;
+    });
+  }
+
+  // Give feedback on a ready-to-try job: starts round N+1 (triage first). The
+  // triage model comes from config only, so a job created before triage
+  // existed, or whose workflow file is gone, still gets one. The baseline and
+  // every repo's pending changes are read now, under the job's queue, so the
+  // round is judged against what the user had when they asked.
+  function giveFeedback(jobId, { needsYouSeq, text } = {}) {
+    return withJob(jobId, async () => {
+      const job = await requireJob(jobId);
+      requireSeen(job, needsYouSeq, { required: true });
+      requireReadyToTry(job);
+      const body = typeof text === 'string' ? text.trim() : '';
+      if (body.length < 1 || body.length > ANSWER_MAX_CHARS) {
+        throw fail('ERR_INVALID_REQUEST', `superagent: feedback must be 1-${ANSWER_MAX_CHARS} characters`);
+      }
+      const eligible = feedbackEligibility(job);
+      if (!eligible.ok) throw fail('ERR_FEEDBACK_UNSUPPORTED', `superagent: job ${jobId} cannot take feedback (${eligible.why})`, { why: eligible.why });
+      const round = currentRound(job) + 1;
+      const pendingChanges = {};
+      for (const repo of job.repos) {
+        if (repo.worktree) pendingChanges[repo.id] = await readPendingChanges({ git, folder: repo.worktree });
+      }
+      const event = {
+        type: 'feedback-given',
+        round,
+        forNeedsYouSeq: needsYouSeq,
+        text: body,
+        triageModel: resolveEngineModel(config.raw(), primaryRepo(job).origin, 'triage'),
+        baseline: await feedbackBaseline(job, round),
+        pendingChanges,
+      };
+      return appendConfirmed(jobId, event, (j) => (j.feedbackRounds ?? []).some((r) => r.forNeedsYouSeq === needsYouSeq));
     });
   }
 
@@ -1034,7 +1151,11 @@ export function createSuperagent({
 
   // Retry on a stuck job: the stuck scope's failed attempts stop counting and
   // the next attempt resumes from its last one, with that attempt's
-  // handoff.md when it wrote one and the user's optional note.
+  // handoff.md when it wrote one and the user's optional note. Only the
+  // current feedback round's attempts are looked at. A round's invalid task
+  // list reopens its task-writing phase (and its plan review) instead, as a
+  // recovery of the round's last done feedback-plan attempt with the parse
+  // errors on its card: reading the same file again would only go stuck again.
   function retryJob(jobId, { needsYouSeq, note } = {}) {
     return withJob(jobId, async () => {
       const job = await requireJob(jobId);
@@ -1045,9 +1166,16 @@ export function createSuperagent({
       if (note != null && typeof note !== 'string') throw fail('ERR_INVALID_ANSWER', 'superagent: a retry note must be text');
       const text = (note ?? '').trim();
       if (text.length > ANSWER_MAX_CHARS) throw fail('ERR_INVALID_ANSWER', `superagent: a retry note must be at most ${ANSWER_MAX_CHARS} characters`);
-      const phase = job.detail?.phase ?? job.phaseId;
-      const task = job.detail?.task ?? null;
-      const last = job.attempts.findLast((a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a)) ?? null;
+      const feedbackRound = currentRound(job);
+      const reopen = job.detail?.why === 'tasks-invalid' && Number.isInteger(job.detail.round) && job.detail.round > 0;
+      const writing = reopen ? feedbackShape(job)?.taskWriting.phase : null;
+      if (reopen && !writing) throw fail('ERR_INVALID_STATE', `superagent: job ${jobId} has no task-writing phase to reopen`);
+      const phase = writing ?? job.detail?.phase ?? job.phaseId;
+      const task = reopen ? null : (job.detail?.task ?? null);
+      const inRound = (a) => a.phase === phase && (a.task ?? null) === task && roundOf(a) === feedbackRound;
+      const last = (reopen
+        ? job.attempts.findLast((a) => inRound(a) && a.purpose === 'feedback-plan' && a.outcome === 'done')
+        : job.attempts.findLast((a) => inRound(a) && !gatedOut(a))) ?? null;
       const handoffFile = last?.dir ? path.join(last.dir, 'handoff.md') : null;
       const event = {
         type: 'job-retried',
@@ -1057,6 +1185,8 @@ export function createSuperagent({
         fromAttemptId: last?.attemptId ?? null,
         handoff: handoffFile && (await fileExists(handoffFile)) ? handoffFile : null,
         note: text || null,
+        feedbackRound,
+        ...(reopen && { reopen: true, errors: job.detail.errors ?? [] }),
       };
       return appendConfirmed(jobId, event, (j) => (j.retries ?? []).some((r) => r.needsYouSeq === event.needsYouSeq));
     });
@@ -1139,5 +1269,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, answerQuestion, retryJob, renameJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, giveFeedback, answerQuestion, retryJob, renameJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
 }

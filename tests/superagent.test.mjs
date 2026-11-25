@@ -708,9 +708,9 @@ let synthetic = 0;
 const syntheticId = () => `${(++synthetic).toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
 
 // Records a finished attempt straight into the store, as if a worker had run.
-async function recordAttempt(h, job, { phase, purpose = 'author', round = null, final = false, task = null, outcome = 'done', ...end }) {
+async function recordAttempt(h, job, { phase, purpose = 'author', round = null, final = false, task = null, outcome = 'done', feedbackRound = 0, ...end }) {
   const attemptId = syntheticId();
-  await h.store.append(job.jobId, { type: 'attempt-started', attemptId, phase, task, role: 'stand-in', model: 'claude-opus-5-5', n: 1, recovery: false, previousAttemptId: null, dir: null, purpose, round, final });
+  await h.store.append(job.jobId, { type: 'attempt-started', attemptId, phase, task, role: 'stand-in', model: 'claude-opus-5-5', n: 1, recovery: false, previousAttemptId: null, dir: null, purpose, round, final, ...(feedbackRound > 0 && { feedbackRound }) });
   await h.store.append(job.jobId, { type: 'attempt-ended', attemptId, outcome, ...end });
   return attemptId;
 }
@@ -1690,5 +1690,296 @@ test('createJob records the workflow branch template, null for a fixture job', a
     assert.equal(h.store.get(ts.jobId).branchTemplate, 'bugfix/{ticket}-{description}');
     assert.equal(h.events(fx.jobId)[0].branchTemplate, null);
     assert.equal(h.store.get(fx.jobId).branchTemplate, null);
+  } finally { registry._reset(); }
+});
+
+// --- Give feedback (step 6): the supervisor records, routes and appends rounds ---
+
+const sha256 = (data) => createHash('sha256').update(data).digest('hex');
+const ledgerRoot = (job) => `.superpowers/superagent/${job.jobId}/artifacts`;
+
+async function writeLedger(job, files) {
+  const wt = job.repos[0].worktree;
+  for (const [rel, text] of Object.entries(files)) {
+    const file = path.join(wt, ...`${ledgerRoot(job)}/${rel}`.split('/'));
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, text);
+  }
+}
+
+// A milestone-2 job whose T1 was implemented and reviewed, at ready-to-try.
+async function readyM2(h, over = {}) {
+  const job = await createM2(h, over);
+  await advanceTo(h, job, 'implement');
+  await h.store.append(job.jobId, ev.tasksLoaded([taskCreated('T1')]));
+  await recordAttempt(h, job, { phase: 'implement', task: 'T1', purpose: 'implement' });
+  await recordAttempt(h, job, { phase: 'implement', task: 'T1', purpose: 'task-review', round: 1, verdict: 'approve', findings: [] });
+  await h.store.append(job.jobId, ev.phaseCompleted('implement', 1));
+  await recordAttempt(h, job, { phase: 'test', purpose: 'test' });
+  await h.sa.tick();
+  const ready = h.store.get(job.jobId);
+  assert.deepEqual([ready.state, ready.reason], ['needs-you', 'ready-to-try']);
+  return ready;
+}
+
+const FIX_DECISION = { route: 'fix', summary: 'One more task.', requirementChanges: ['hello says hi'], task: { title: 'Say hi', repos: ['primary'], acceptance: 'GET /hello says hi', verify: 'npm test' } };
+const SUBPLAN_DECISION = { route: 'subplan', summary: 'A small plan.', requirementChanges: [] };
+const typed = (h, jobId, type) => h.events(jobId).filter((e) => e.type === type);
+const roundTasksFile = (job, round) => path.join(job.repos[0].worktree, ...`${ledgerRoot(job)}/feedback/round-${round}/outputs/tasks.json`.split('/'));
+
+test('giveFeedback validates and records the round', async () => {
+  try {
+    const h = await harness();
+    const job = await readyM2(h);
+    const files = {
+      'spec.md': '# spec\n',
+      'plan.md': '# plan\n',
+      'tasks.json': '[]\n',
+      'test-report.md': '# report\n',
+      'reviews/plan-review-r1.md': '# review\n',
+      'tasks/T1-report.md': '# T1\n',
+      'tasks/T1-tests/primary/test/hello.test.js': 'test()\n',
+      'feedback/round-1/triage.md': '# left by nothing\n',
+    };
+    await writeLedger(job, files);
+    await fs.writeFile(path.join(job.repos[0].worktree, 'notes.txt'), 'mine\n');
+
+    const got = await h.sa.giveFeedback(job.jobId, { needsYouSeq: job.needsYouSeq, text: '  Also say hi.  ' });
+    assert.deepEqual([got.state, got.feedbackRound], ['running', 1]);
+    const [given] = typed(h, job.jobId, 'feedback-given');
+    assert.deepEqual(
+      { round: given.round, forNeedsYouSeq: given.forNeedsYouSeq, text: given.text, triageModel: given.triageModel },
+      { round: 1, forNeedsYouSeq: job.needsYouSeq, text: 'Also say hi.', triageModel: { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 20 } },
+    );
+    const expected = Object.fromEntries(['plan.md', 'reviews/plan-review-r1.md', 'spec.md', 'tasks.json', 'tasks/T1-report.md', 'test-report.md'].map((k) => [k, sha256(files[k])]));
+    assert.deepEqual(given.baseline, expected);
+    assert.deepEqual(given.pendingChanges, { primary: { paths: ['notes.txt'], total: 1 } });
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('giveFeedback refuses', async () => {
+  try {
+    const h = await harness();
+    const job = await readyM2(h);
+    const seq = job.needsYouSeq;
+    const lines = lineCount(h, job.jobId);
+    await assert.rejects(h.sa.giveFeedback(job.jobId, { text: 'more' }), { code: 'ERR_INVALID_REQUEST' });
+    await assert.rejects(h.sa.giveFeedback(job.jobId, { needsYouSeq: seq - 1, text: 'more' }), { code: 'ERR_INVALID_STATE' });
+    await assert.rejects(h.sa.giveFeedback(job.jobId, { needsYouSeq: seq, text: '   ' }), { code: 'ERR_INVALID_REQUEST' });
+    await assert.rejects(h.sa.giveFeedback(job.jobId, { needsYouSeq: seq, text: 'x'.repeat(4001) }), { code: 'ERR_INVALID_REQUEST' });
+    await assert.rejects(h.sa.giveFeedback(job.jobId, { needsYouSeq: seq, text: 7 }), { code: 'ERR_INVALID_REQUEST' });
+    await assert.rejects(h.sa.giveFeedback('nope', { needsYouSeq: seq, text: 'more' }), { code: 'ERR_UNKNOWN_JOB' });
+    assert.equal(lineCount(h, job.jobId), lines);
+    assert.equal((await h.sa.giveFeedback(job.jobId, { needsYouSeq: seq, text: 'x'.repeat(4000) })).feedbackRound, 1);
+    await assert.rejects(h.sa.giveFeedback(job.jobId, { needsYouSeq: seq, text: 'again' }), { code: 'ERR_INVALID_STATE' });
+
+    const running = await createM2(h, { title: 'Other thing' });
+    await assert.rejects(h.sa.giveFeedback(running.jobId, { needsYouSeq: 1, text: 'more' }), { code: 'ERR_INVALID_STATE' });
+
+    const m1 = await create(h, { title: 'Third thing' });
+    await h.store.append(m1.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+    await assert.rejects(h.sa.giveFeedback(m1.jobId, { needsYouSeq: h.store.get(m1.jobId).needsYouSeq, text: 'more' }), (err) => {
+      assert.equal(err.code, 'ERR_FEEDBACK_UNSUPPORTED');
+      assert.equal(err.why, 'workflow-shape');
+      return true;
+    });
+
+    // A legacy job: its artifacts are committed (no artifactRoot).
+    const legacy = await createM2(h, { title: 'Legacy thing' });
+    const file = path.join(h.jobsRoot, legacy.jobId, 'events.jsonl');
+    const [first, ...rest] = readFileSync(file, 'utf8').split('\n');
+    const { artifactRoot, ...created } = JSON.parse(first);
+    assert.equal(artifactRoot, 'ledger');
+    await fs.writeFile(file, [JSON.stringify(created), ...rest].join('\n'));
+    await h.sa.stop();
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    await fresh.store.append(legacy.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+    const legacySeq = fresh.store.get(legacy.jobId).needsYouSeq;
+    await assert.rejects(fresh.sa.giveFeedback(legacy.jobId, { needsYouSeq: legacySeq, text: 'more' }), (err) => {
+      assert.equal(err.code, 'ERR_FEEDBACK_UNSUPPORTED');
+      assert.equal(err.why, 'legacy-artifacts');
+      return true;
+    });
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('giveFeedback resolves the triage model for a job created before triage existed', async () => {
+  try {
+    const h = await harness();
+    const job = await readyM2(h);
+    await h.sa.stop();
+    const file = path.join(h.jobsRoot, job.jobId, 'events.jsonl');
+    const [first, ...rest] = readFileSync(file, 'utf8').split('\n');
+    const created = JSON.parse(first);
+    delete created.models.triage;
+    await fs.writeFile(file, [JSON.stringify(created), ...rest].join('\n'));
+
+    const old = await h.restart();
+    await old.sa.start();
+    assert.equal(old.store.get(job.jobId).models.triage, undefined);
+    await old.sa.giveFeedback(job.jobId, { needsYouSeq: job.needsYouSeq, text: 'more' });
+    assert.deepEqual(typed(old, job.jobId, 'feedback-given')[0].triageModel, { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 20 });
+    await old.sa.stop();
+
+    const opus = await harness({ configJson: (repo) => ({ projects: { [repo]: { models: { triage: { model: 'claude-opus-5-5' } } } } }) });
+    const other = await readyM2(opus);
+    await opus.sa.giveFeedback(other.jobId, { needsYouSeq: other.needsYouSeq, text: 'more' });
+    assert.deepEqual(typed(opus, other.jobId, 'feedback-given')[0].triageModel, { provider: 'claude', model: 'claude-opus-5-5', maxTurns: 20 });
+    await opus.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('feedback works when the workflow file is gone', async () => {
+  try {
+    const h = await harness();
+    const feature = JSON.parse(await fs.readFile(path.join(workflowsDir(), 'feature.json'), 'utf8'));
+    const doc = { ...feature, id: 'my-feature', name: 'My feature' };
+    await fs.mkdir(h.globalWorkflows, { recursive: true });
+    const file = path.join(h.globalWorkflows, 'my-feature.json');
+    await fs.writeFile(file, JSON.stringify(doc));
+    const job = await createFrom(h, 'my-feature');
+    assert.equal(h.store.get(job.jobId).workflow.id, 'my-feature');
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+    await fs.rm(file);
+    const got = await h.sa.giveFeedback(job.jobId, { needsYouSeq: h.store.get(job.jobId).needsYouSeq, text: 'more' });
+    assert.equal(got.feedbackRound, 1);
+    assert.equal(typed(h, job.jobId, 'feedback-given')[0].triageModel.model, 'claude-sonnet-5-5');
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('feedback and accept on one needs-you: only the first lands', async () => {
+  try {
+    for (const feedbackFirst of [true, false]) {
+      const h = await harness();
+      const job = await readyM2(h);
+      const seq = job.needsYouSeq;
+      const calls = [() => h.sa.giveFeedback(job.jobId, { needsYouSeq: seq, text: 'more' }), () => h.sa.accept(job.jobId, { needsYouSeq: seq })];
+      const [a, b] = await Promise.allSettled((feedbackFirst ? calls : calls.reverse()).map((call) => call()));
+      assert.equal(a.status, 'fulfilled');
+      assert.equal(b.status, 'rejected');
+      assert.equal(b.reason.code, 'ERR_INVALID_STATE');
+      const landed = h.events(job.jobId).filter((e) => e.type === 'feedback-given' || e.type === 'job-accepted').map((e) => e.type);
+      assert.deepEqual(landed, [feedbackFirst ? 'feedback-given' : 'job-accepted']);
+      await h.sa.stop();
+    }
+  } finally { registry._reset(); }
+});
+
+test('routes after a restart before feedback-routed', async () => {
+  try {
+    const h = await harness();
+    const job = await readyM2(h);
+    await h.sa.giveFeedback(job.jobId, { needsYouSeq: job.needsYouSeq, text: 'Also say hi.' });
+    const triage = await recordAttempt(h, job, { phase: 'accept', purpose: 'triage', feedbackRound: 1, triage: FIX_DECISION });
+    await h.sa.stop();
+
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    await fresh.sa.tick();
+    await fresh.sa.tick();
+    const routed = typed(fresh, job.jobId, 'feedback-routed');
+    const id = `B1-${triage.slice(0, 8)}`;
+    assert.deepEqual(routed.map(({ type, round, attemptId, route, task }) => ({ type, round, attemptId, route, task })), [{
+      type: 'feedback-routed', round: 1, attemptId: triage, route: 'fix',
+      task: { id, title: 'Say hi', repos: ['primary'], dependsOn: [], acceptance: 'GET /hello says hi', verify: 'npm test' },
+    }]);
+    const got = fresh.store.get(job.jobId);
+    assert.deepEqual(got.tasks.filter((t) => t.origin === 'feedback'), [{ id, title: 'Say hi', repos: ['primary'], dependsOn: [], acceptance: 'GET /hello says hi', verify: 'npm test', origin: 'feedback', round: 1, fromAttemptId: triage }]);
+    assert.equal(got.phaseId, 'implement');
+    const launched = fresh.started(job.jobId).at(-1);
+    assert.deepEqual([launched.phase, launched.task, launched.feedbackRound], ['implement', id, 1]);
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+// A subplan round whose planner wrote the round's files and whose plan review completed.
+async function subplanReviewed(h, tasksText) {
+  const job = await readyM2(h);
+  await h.sa.giveFeedback(job.jobId, { needsYouSeq: job.needsYouSeq, text: 'Add a goodbye.' });
+  const triage = await recordAttempt(h, job, { phase: 'accept', purpose: 'triage', feedbackRound: 1, triage: SUBPLAN_DECISION });
+  await h.store.append(job.jobId, { type: 'feedback-routed', round: 1, attemptId: triage, route: 'subplan' });
+  await recordAttempt(h, job, { phase: 'plan', purpose: 'feedback-plan', feedbackRound: 1 });
+  await h.store.append(job.jobId, ev.phaseCompleted('plan-review', 2));
+  const file = roundTasksFile(job, 1);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, tasksText);
+  assert.equal(h.store.get(job.jobId).phaseId, 'implement');
+  return job;
+}
+
+test('appends round tasks after a restart before tasks-appended', async () => {
+  try {
+    const h = await harness();
+    const job = await subplanReviewed(h, JSON.stringify([{ id: 'R1', title: 'Goodbye', repos: ['primary'], dependsOn: ['T1'], acceptance: 'GET /bye works', verify: '' }]));
+    await h.sa.stop();
+    const fresh = await h.restart();
+    await fresh.sa.start();
+    await fresh.sa.tick();
+    await fresh.sa.tick();
+    const appended = typed(fresh, job.jobId, 'tasks-appended');
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0].round, 1);
+    assert.deepEqual(appended[0].tasks.map((t) => [t.id, t.dependsOn, t.origin, t.round]), [['R1', ['T1'], 'feedback', 1]]);
+    const got = fresh.store.get(job.jobId);
+    assert.deepEqual(got.tasks.map((t) => t.id), ['T1', 'R1']);
+    assert.equal(got.visits.implement, 2);
+    const launched = fresh.started(job.jobId).at(-1);
+    assert.deepEqual([launched.phase, launched.task, launched.purpose], ['implement', 'R1', 'implement']);
+    await fresh.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('invalid round tasks go stuck with the round', async () => {
+  try {
+    const h = await harness();
+    const job = await subplanReviewed(h, JSON.stringify([{ id: 't1', title: 'Clash', repos: ['primary'], dependsOn: [], acceptance: 'x', verify: '' }]));
+    await h.sa.tick();
+    const parked = h.events(job.jobId).at(-1);
+    assert.deepEqual([parked.type, parked.reason, parked.detail.why, parked.detail.round], ['needs-you', 'stuck', 'tasks-invalid', 1]);
+    assert.match(parked.detail.errors[0], /collides with an existing task/);
+    assert.equal(typed(h, job.jobId, 'tasks-appended').length, 0);
+    await h.sa.stop();
+
+    // A feedback task id is reserved like a generated fix id.
+    const other = await harness();
+    const reserved = await subplanReviewed(other, JSON.stringify([{ id: 'B1-0123abcd', title: 'Taken', repos: ['primary'], dependsOn: [], acceptance: 'x', verify: '' }]));
+    await other.sa.tick();
+    assert.match(other.events(reserved.jobId).at(-1).detail.errors[0], /reserved/);
+    await other.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('retry in a round never resumes from an earlier round\'s attempt', async () => {
+  try {
+    const h = await harness();
+    const job = await readyM2(h);
+    await h.sa.giveFeedback(job.jobId, { needsYouSeq: job.needsYouSeq, text: 'more' });
+    const triage = await recordAttempt(h, job, { phase: 'accept', purpose: 'triage', feedbackRound: 1, triage: FIX_DECISION });
+    await h.store.append(job.jobId, { type: 'feedback-routed', round: 1, attemptId: triage, route: 'fix', task: { id: 'B1-00000000', title: 'Say hi', repos: ['primary'], dependsOn: [], acceptance: 'hi', verify: '' } });
+    await recordAttempt(h, job, { phase: 'implement', task: 'B1-00000000', purpose: 'implement', feedbackRound: 1 });
+    await recordAttempt(h, job, { phase: 'implement', task: 'B1-00000000', purpose: 'task-review', round: 1, verdict: 'approve', findings: [], feedbackRound: 1 });
+    await h.store.append(job.jobId, ev.phaseCompleted('implement', 2));
+    assert.equal(h.store.get(job.jobId).phaseId, 'test');
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'stuck', detail: { phase: 'test', task: null, why: 'attempt-cap' } });
+    const retried = await h.sa.retryJob(job.jobId, { needsYouSeq: h.store.get(job.jobId).needsYouSeq });
+    const event = typed(h, job.jobId, 'job-retried').at(-1);
+    assert.deepEqual([event.phase, event.feedbackRound, event.fromAttemptId, event.reopen], ['test', 1, null, undefined]);
+    assert.equal(retried.retries.at(-1).feedbackRound, 1);
+    await h.sa.stop();
+  } finally { registry._reset(); }
+});
+
+test('a round-0 retry event carries feedbackRound 0', async () => {
+  try {
+    const h = await harness();
+    const job = await create(h);
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'stuck', detail: { phase: 'spec', task: null, why: 'attempt-cap' } });
+    await h.sa.retryJob(job.jobId, {});
+    assert.equal(typed(h, job.jobId, 'job-retried')[0].feedbackRound, 0);
+    await h.sa.stop();
   } finally { registry._reset(); }
 });

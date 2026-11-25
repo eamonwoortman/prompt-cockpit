@@ -15,7 +15,7 @@ const { createSuperagentStore } = await import('../src/superagent/store.js');
 const { createSuperagentConfig } = await import('../src/superagent/config.js');
 const { createSuperagent } = await import('../src/superagent/index.js');
 const { workflowsDir } = await import('../src/superagent/workflows.js');
-const { addLedgerExclude, checkGate, checkInPlace, normaliseTop } = await import('../src/superagent/inplace.js');
+const { addLedgerExclude, checkGate, checkInPlace, normaliseTop, readPendingChanges } = await import('../src/superagent/inplace.js');
 const { defaultGit } = await import('../src/superagent/worktree.js');
 
 const quiet = () => {};
@@ -178,6 +178,35 @@ test('checkInPlace ignores ignored files and reports pending changes, keeping at
   const { pending } = await checkInPlace({ folder: repo, branch: 'superagent/x-1' });
   assert.equal(pending.total, 207);
   assert.equal(pending.paths.length, 200);
+});
+
+test("readPendingChanges reads the folder's uncommitted and untracked paths, and refuses an unreadable status", async () => {
+  const root = await tempDir('sa-inplace-pending-');
+  const repo = path.join(root, 'repo');
+  await initRepo(repo);
+  assert.deepEqual(await readPendingChanges({ folder: repo }), { paths: [], total: 0 });
+  await fs.writeFile(path.join(repo, 'README.md'), '# edited\n');
+  await fs.writeFile(path.join(repo, 'untracked.txt'), 'mine\n');
+  assert.deepEqual(await readPendingChanges({ folder: repo }), { paths: ['README.md', 'untracked.txt'], total: 2 });
+  const broken = async () => ({ code: 128, stdout: '', stderr: 'fatal: injected' });
+  await assert.rejects(readPendingChanges({ git: broken, folder: repo }), { code: 'ERR_FOLDER_DIRTY' });
+});
+
+test("feedback on an in-place job records the folder's pending changes again", async () => {
+  try {
+    const h = await harness();
+    await fs.writeFile(path.join(h.repo, 'notes.txt'), 'before\n');
+    const job = await create(h, { fixture: 'milestone-2', inPlace: [h.repo] });
+    assert.deepEqual(job.repos[0].pendingChanges, { paths: ['notes.txt'], total: 1 });
+    await fs.writeFile(path.join(h.repo, 'README.md'), '# tried it\n');
+    await fs.writeFile(path.join(h.repo, 'later.txt'), 'while trying\n');
+    await h.store.append(job.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: null });
+    await h.sa.giveFeedback(job.jobId, { needsYouSeq: h.store.get(job.jobId).needsYouSeq, text: 'more' });
+    const given = h.events(job.jobId).find((e) => e.type === 'feedback-given');
+    assert.deepEqual(given.pendingChanges, { primary: { paths: ['README.md', 'later.txt', 'notes.txt'], total: 3 } });
+    assert.deepEqual(h.store.get(job.jobId).feedbackRounds[0].pendingChanges, given.pendingChanges);
+    await h.sa.stop();
+  } finally { registry._reset(); }
 });
 
 test('a folder with pending changes is switched in place and keeps them', async () => {

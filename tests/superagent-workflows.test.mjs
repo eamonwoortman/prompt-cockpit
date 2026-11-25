@@ -129,6 +129,7 @@ test('validation refuses', async (t) => {
     ['the engine role verifier in roles', (d) => { d.roles = { verifier: { model: 'claude-haiku-5-5', maxTurns: 1 } }; }, /roles\.verifier: "verifier" is an engine role; set its model in config\.json/],
     ['the engine role stand-in in roles', (d) => { d.roles = { 'stand-in': { maxTurns: 2 } }; }, /"stand-in" is an engine role/],
     ['the engine role router in roles', (d) => { d.roles = { router: { maxTurns: 1 } }; }, /"router" is an engine role/],
+    ['the engine role triage in roles', (d) => { d.roles = { triage: { model: 'claude-opus-5-5', maxTurns: 20 } }; }, /roles\.triage: "triage" is an engine role/],
     ['the artifact key review (a reserved attempt-key kind)', (d) => { d.artifacts.review = 'docs/custom/review.md'; }, /artifact key "review" is reserved/],
     ['the artifact key idea', (d) => { d.artifacts.idea = 'docs/custom/idea.md'; }, /artifact key "idea" is reserved/],
     ['an artifact key with a colon', (d) => { d.artifacts['a:b'] = 'docs/custom/ab.md'; }, /artifact key "a:b" must be/],

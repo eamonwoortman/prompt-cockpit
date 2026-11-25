@@ -14,7 +14,7 @@ import { CLAUDE_EFFORTS } from '../provider-registry.js';
 export const PHASE_KINDS = ['author', 'brainstorm', 'review', 'per-task', 'human'];
 export const STAND_IN_ROLE = 'stand-in';
 // Roles the engine runs itself; their models come from config.json only, never from a workflow file.
-export const ENGINE_ROLES = Object.freeze(['verifier', STAND_IN_ROLE, 'router']);
+export const ENGINE_ROLES = Object.freeze(['verifier', STAND_IN_ROLE, 'router', 'triage']);
 export const WORKER_PERMISSION_MODES = ['auto', 'acceptEdits', 'bypassPermissions', 'dontAsk'];
 const MODES = ['automatic', 'manual'];
 // The router's answer limit; its generation cap adds a thinking allowance on top.
@@ -363,6 +363,12 @@ export function resolveProjectConfig(fileConfig, projectPath, base = defaultConf
   const merged = merge(lowerTemplateKeys(base), lowerTemplateKeys(fileConfig?.defaults ?? {}));
   const entry = findProjectEntry(fileConfig, projectPath);
   return entry === undefined ? merged : merge(merged, lowerTemplateKeys(entry));
+}
+
+// An engine role's model: defaultConfig() < defaults.models < projects[<path>].models,
+// never a workflow file's roles, so it resolves even when the job's workflow file is gone.
+export function resolveEngineModel(fileConfig, projectPath, role) {
+  return resolveProjectConfig(fileConfig, projectPath).models[role] ?? null;
 }
 
 function configError(code, message, extra = {}) {
