@@ -15,11 +15,13 @@
 //   brainstormer's AskUserQuestion: no question reaches the user except through
 //   needs-you. The session is started with interceptEveryPermission so asks
 //   reach the interceptor at all.
-// - Read-only roles (the stand-in) run with READ_ONLY_TOOLS and no MCP, so they
-//   reply with their result JSON as the final message. review() writes it to
-//   result.json as soon as scan sees it (materialize, not a claimer), so
+// - Read-only roles (the stand-in, triage) run with READ_ONLY_TOOLS and no MCP,
+//   so they reply with their result JSON as the final message. review() writes
+//   it to result.json as soon as scan sees it (materialize, not a claimer), so
 //   removal, stall, stop and reconcile all judge the on-disk file. A reply
 //   whose row is removed, or whose cockpit dies, before the next scan is lost.
+//   A done triage decision with a brief writes the round's triage.md first, so
+//   the file its validation requires exists before result.json does.
 // - Tokens: attempt-ended carries the row's usage totals at finish, the last
 //   scan's snapshot once the row is removed, or null with no live record
 //   (reconcile).
@@ -45,12 +47,13 @@
 // attempt up by session id and either can fire during that await (same reason
 // as src/autopilot.js:517).
 import { randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { writeJsonAtomic } from '../json-store.js';
 import { RESULT_FILE, attemptDir, outcomeForResult, primaryRepo, readResult, validateResult } from './results.js';
 import { READ_ONLY_ROLES, READ_ONLY_TOOLS, buildWorkerPrompt, denyMessageFor, nudgeText } from './prompts.js';
 import { folderChangedEvent } from './inplace.js';
+import { roundTriagePath } from './feedback.js';
 import { attemptContext, failureSignature } from './sequencer.js';
 import { defaultGit } from './worktree.js';
 
@@ -95,6 +98,7 @@ export function createRunner({
   logImpl = console.error,
   projectDirFor = (job) => primaryRepo(job).origin,
   writeJsonImpl = writeJsonAtomic,
+  writeFileImpl = writeFile,
   beforeSession = null,
 }) {
   const lives = new Map();
@@ -188,7 +192,27 @@ export function createRunner({
     }
   }
 
-  const contextOf = ({ purpose, round, final, task, taskDef, reviewFindings, contested, openQuestions, askedIds }) => ({ purpose, round, final, task, taskDef, reviewFindings, contested, openQuestions, askedIds });
+  // As on the launch action and attemptContext(): absent means round 0, no
+  // report ordinal and no retry errors.
+  const contextOf = ({ purpose, round, final, task, taskDef, reviewFindings, contested, openQuestions, askedIds, feedbackRound, reportOrdinal, retryErrors }) => ({
+    purpose, round, final, task, taskDef, reviewFindings, contested, openQuestions, askedIds,
+    ...(feedbackRound > 0 ? { feedbackRound } : {}),
+    ...(reportOrdinal != null ? { reportOrdinal } : {}),
+    ...(retryErrors != null ? { retryErrors } : {}),
+  });
+
+  const isText = (v) => typeof v === 'string' && v.trim() !== '';
+
+  // Spec Flow 2 "Publication": the brief, then its requirement changes. The
+  // same reply always gives the same bytes, so a rewrite is harmless.
+  async function publishTriage(live, value) {
+    if (!live.triageFile || value.status !== 'done' || !isText(value.brief)) return;
+    const changes = value.requirementChanges;
+    if (!Array.isArray(changes) || !changes.every(isText)) return;
+    const lines = changes.length ? changes.map((c) => `- ${c}`).join('\n') : '- None';
+    await mkdir(path.dirname(live.triageFile), { recursive: true });
+    await writeFileImpl(live.triageFile, `${value.brief.trimEnd()}\n\n## Requirement changes\n\n${lines}\n`);
+  }
 
   // Not a claimer: a failed write leaves materialized false for the next scan.
   async function materialize(live) {
@@ -197,6 +221,7 @@ export function createRunner({
     const value = extractResultJson(text);
     if (!value) return;
     try {
+      await publishTriage(live, value);
       await writeJsonImpl(path.join(live.dir, RESULT_FILE), { ...value, jobId: live.jobId, phaseId: live.phase, taskId: live.task, attemptId: live.attemptId });
       if (live.finalText === text) live.materialized = true;
     } catch (err) {
@@ -224,6 +249,11 @@ export function createRunner({
     }
     if (!verdict.ok) return { read, invalid: failed('invalid-result', verdict.errors?.[0] ?? '') };
     const r = verdict.result;
+    // Only a done triage's validated decision reaches attempt-ended; its brief
+    // lives in triage.md, and any other result's own `triage` field is dropped.
+    const triage = context?.purpose === 'triage' && r.status === 'done'
+      ? { route: r.route, summary: r.summary, requirementChanges: r.requirementChanges, ...(r.task !== undefined ? { task: r.task } : {}), ...(r.idea !== undefined ? { idea: r.idea } : {}) }
+      : undefined;
     return {
       read,
       payload: {
@@ -238,7 +268,7 @@ export function createRunner({
         questions: r.questions ?? null,
         answers: r.answers ?? null,
         escalated: r.escalated ?? null,
-        ...outcomeForResult(r),
+        ...outcomeForResult({ ...r, triage }),
       },
     };
   }
@@ -413,9 +443,11 @@ export function createRunner({
     const phaseDef = job.pipeline.find((p) => p.phase === action.phase);
     let attemptId;
     let dir;
+    let triageFile = null;
     try {
       attemptId = idImpl();
       dir = attemptDir(primaryRepo(job).worktree, { jobId, phase: action.phase, task, attemptId });
+      if (action.role === 'triage' && action.feedbackRound > 0) triageFile = path.join(primaryRepo(job).worktree, ...roundTriagePath(job, action.feedbackRound).split('/'));
     } catch (err) {
       log(`could not prepare an attempt for job ${jobId}`, err);
       return { error: 'launch-failed' };
@@ -437,6 +469,10 @@ export function createRunner({
       contested: action.contested ?? null,
       openQuestions: action.openQuestions ?? null,
       askedIds: action.askedIds ?? null,
+      feedbackRound: action.feedbackRound ?? 0,
+      reportOrdinal: action.reportOrdinal ?? null,
+      retryErrors: action.retryErrors ?? null,
+      triageFile,
       readOnly: READ_ONLY_ROLES.has(action.role),
       finalText: null,
       materialized: false,
@@ -475,6 +511,9 @@ export function createRunner({
         purpose: live.purpose,
         round: live.round,
         final: live.final,
+        ...(live.feedbackRound > 0 ? { feedbackRound: live.feedbackRound } : {}),
+        ...(live.reportOrdinal != null ? { reportOrdinal: live.reportOrdinal } : {}),
+        ...(live.retryErrors != null ? { retryErrors: live.retryErrors } : {}),
       });
     } catch (err) {
       drop(live);

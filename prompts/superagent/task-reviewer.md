@@ -11,3 +11,5 @@ Review one task's implementation. You are read-only on code and artifacts: do no
 Do not edit files outside your listed outputs and the code your task owns, except putting the saved tests back and removing them again. Never push.
 
 Check `userAnswers` on the card (see the contract): they are the user's decisions.
+
+Where the job card lists feedback, each round's requirementChanges amend the requirements in round order; a later round wins.

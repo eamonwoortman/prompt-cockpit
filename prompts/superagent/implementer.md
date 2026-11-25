@@ -12,3 +12,5 @@ Implement exactly one task: the object in `task` on the card. Do not touch other
 Do not edit files outside your listed outputs and the code your task owns (the saved tests under `tasks/<task>-tests/` count as outputs). If the task cannot be done, publish `status: blocked` with a question.
 
 Check `userAnswers` on the card (see the contract): they are the user's decisions.
+
+Where the job card lists feedback, each round's requirementChanges amend the requirements in round order; a later round wins.

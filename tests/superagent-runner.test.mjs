@@ -10,7 +10,8 @@ import { tempDir, initRepo, jobCreated, sessionFactory, scriptedWorker, liveJob,
 import { createSuperagentStore } from '../src/superagent/store.js';
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import { createWorktree } from '../src/superagent/worktree.js';
-import { RESULT_FILE, artifactPaths, attemptDir, readResult, reviewPaths } from '../src/superagent/results.js';
+import { RESULT_FILE, artifactPaths, attemptDir, ledgerArtifactRoot, readResult, reviewPaths } from '../src/superagent/results.js';
+import { roundTestReportPaths, roundTriagePath } from '../src/superagent/feedback.js';
 import { UNATTENDED_DENY_MESSAGE, denyMessageFor, nudgeText } from '../src/superagent/prompts.js';
 import { createRunner, extractResultJson, PROGRESS_TYPES } from '../src/superagent/runner.js';
 import { writeJsonAtomic } from '../src/json-store.js';
@@ -890,12 +891,12 @@ test('reconcile ends in-flight attempts with their result or as interrupted', as
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 const F = (id, severity, disposition) => ({ id, severity, text: `Finding ${id}.`, ...(disposition ? { disposition } : {}) });
 
-async function gitSetup({ tasks = null, pipeline = MILESTONE_2_PIPELINE, artifactRoot = null } = {}) {
+async function gitSetup({ tasks = null, pipeline = MILESTONE_2_PIPELINE, artifactRoot = null, createdOver = {} } = {}) {
   const root = await tempDir('sa-runner-git-');
   const store = createSuperagentStore({ rootDir: path.join(root, 'jobs'), now: () => T0, logImpl: quiet });
   const origin = path.join(root, 'origin');
   await initRepo(origin);
-  const created = jobCreated({ pipeline, repos: [{ id: 'primary', origin }], ...(artifactRoot && { artifactRoot }) });
+  const created = jobCreated({ pipeline, repos: [{ id: 'primary', origin }], ...(artifactRoot && { artifactRoot }), ...createdOver });
   const { jobId, branch } = created;
   const worktree = path.join(root, 'wt');
   const { baseSha } = await createWorktree({ origin, worktree, branch, copyLocalClaudeSettings: false });
@@ -1494,5 +1495,183 @@ test('a stop during beforeSession ends the attempt as stopped, with no pause', a
     const got = store.get(job.jobId);
     assert.equal(got.attempts[0].outcome, 'stopped');
     assert.equal(got.state, 'stopped');
+  } finally { registry._reset(); }
+});
+
+// Give feedback (Task 5): the read-only triage worker and round attempts.
+const FEATURE = JSON.parse(await fs.readFile(new URL('../workflows/feature.json', import.meta.url), 'utf8'));
+
+// A Feature ledger job in feedback round 1.
+async function roundSetup() {
+  const g = await gitSetup({ pipeline: FEATURE.phases, artifactRoot: 'ledger', createdOver: { workflow: { id: 'feature' }, artifacts: FEATURE.artifacts } });
+  await g.store.append(g.jobId, { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } });
+  await g.store.append(g.jobId, { type: 'feedback-given', round: 1, forNeedsYouSeq: g.store.get(g.jobId).needsYouSeq, text: 'Make it blue.', triageModel: { model: 'claude-sonnet-5-5', effort: null, maxTurns: 20 }, baseline: {}, pendingChanges: {} });
+  assert.equal(g.store.get(g.jobId).feedbackRound, 1);
+  return { ...g, triageFile: path.join(g.worktree, ...roundTriagePath(g.job, 1).split('/')) };
+}
+
+const FIX_TASK = { title: 'Make it blue', repos: ['primary'], acceptance: 'the header is blue', verify: '' };
+const triageBody = (over = {}) => ({ status: 'done', artifacts: [], summary: 'One small change.', question: null, route: 'fix', task: FIX_TASK, brief: 'B', requirementChanges: ['add X'], ...over });
+
+// A triage attempt on its own runner, with the real validator; turn() replies
+// with a final message and lets the runner review it.
+async function launchTriage(g, over = {}) {
+  const factory = sessionFactory(registry);
+  const runner = createRunner({ registry: factory.registry, store: g.store, now: () => T0, idImpl: ids(`tri${++liveRuns}-`), logImpl: quiet, ...over });
+  const launched = await runner.launch(g.store.get(g.jobId), launchAction({ phase: 'accept', role: 'triage', model: 'claude-sonnet-5-5', maxTurns: 20, purpose: 'triage', feedbackRound: 1 }));
+  assert.ok(launched.attemptId, JSON.stringify(launched));
+  const attempt = lastAttempt(g.store, g.jobId);
+  const turn = async (body, { idle = true } = {}) => {
+    reply(factory.impls.get(attempt.sessionId), JSON.stringify(body), { idle });
+    await runner.review(g.store.get(g.jobId));
+    await runner.drain();
+  };
+  return { factory, attempt, turn };
+}
+
+test('materialises triage.md before result.json', async () => {
+  registry._reset();
+  try {
+    const g = await roundSetup();
+    const seen = [];
+    const writeJsonImpl = async (file, value) => {
+      seen.push(await fs.readFile(g.triageFile, 'utf8'));
+      return writeJsonAtomic(file, value);
+    };
+    const { factory, attempt, turn } = await launchTriage(g, { writeJsonImpl });
+    assert.deepEqual(factory.calls[0].sdkOptions.tools, ['Read', 'Grep', 'Glob']);
+    assert.deepEqual(factory.calls[0].sdkOptions.disallowedTools, ['mcp__*']);
+    const want = 'B\n\n## Requirement changes\n\n- add X\n';
+    await turn(triageBody(), { idle: false });
+    assert.deepEqual(seen, [want]);
+    const first = await fs.readFile(g.triageFile);
+    await turn(triageBody());
+    assert.equal(seen.length, 2, 'the same text was materialised again');
+    assert.ok((await fs.readFile(g.triageFile)).equals(first), 'byte-identical');
+    const end = await g.endOf(attempt.attemptId);
+    assert.equal(end.outcome, 'done', JSON.stringify(end));
+    assert.deepEqual(Object.keys(end.outputs), [roundTriagePath(g.job, 1)]);
+
+    const none = await launchTriage(g);
+    await none.turn(triageBody({ brief: 'B2\n', requirementChanges: [] }));
+    assert.equal(await fs.readFile(g.triageFile, 'utf8'), 'B2\n\n## Requirement changes\n\n- None\n');
+    assert.equal((await g.endOf(none.attempt.attemptId)).outcome, 'done');
+  } finally { registry._reset(); }
+});
+
+test('a blocked triage writes no triage.md', async () => {
+  registry._reset();
+  try {
+    const g = await roundSetup();
+    const { attempt, turn } = await launchTriage(g);
+    await turn(triageBody({ status: 'blocked', question: 'Which blue?' }));
+    assert.equal(await exists(path.join(attempt.dir, RESULT_FILE)), true);
+    assert.equal(await exists(g.triageFile), false);
+    const end = await g.endOf(attempt.attemptId);
+    assert.equal(end.outcome, 'question', JSON.stringify(end));
+    assert.equal(end.question, 'Which blue?');
+    assert.equal('triage' in end, false);
+    assert.equal(lastAttempt(g.store, g.jobId).triage, null);
+  } finally { registry._reset(); }
+});
+
+test('a malformed triage decision writes no triage.md', async () => {
+  registry._reset();
+  try {
+    const { brief: _brief, ...noBrief } = triageBody();
+    const g = await roundSetup();
+    const { attempt, turn } = await launchTriage(g);
+    await turn(noBrief);
+    assert.equal(await exists(g.triageFile), false);
+    assert.deepEqual(lastAttempt(g.store, g.jobId).nudges.map((n) => n.kind), ['invalid-result']);
+    await turn(noBrief);
+    const end = await g.endOf(attempt.attemptId);
+    assert.deepEqual([end.outcome, end.reason, end.detail], ['failed', 'invalid-result', 'brief must be a non-empty string']);
+    assert.equal(await exists(g.triageFile), false);
+
+    // A stale triage.md from a rejected result never backs a later decision.
+    const g2 = await roundSetup();
+    const second = await launchTriage(g2);
+    await second.turn(triageBody({ route: 'later' }));
+    assert.equal(await fs.readFile(g2.triageFile, 'utf8'), 'B\n\n## Requirement changes\n\n- add X\n');
+    assert.equal((await g2.endOf(second.attempt.attemptId)), undefined, 'nudged, not ended');
+    await second.turn(noBrief);
+    const end2 = await g2.endOf(second.attempt.attemptId);
+    assert.deepEqual([end2.outcome, end2.reason, end2.detail], ['failed', 'invalid-result', 'brief must be a non-empty string']);
+    assert.equal(lastAttempt(g2.store, g2.jobId).triage, null);
+  } finally { registry._reset(); }
+});
+
+test('live and reconciled round attempts validate against round files', async () => {
+  registry._reset();
+  try {
+    const g = await roundSetup();
+    const report = (n) => roundTestReportPaths(g.job, 1, n).testReport;
+    assert.equal(report(2), `${ledgerArtifactRoot(g.jobId)}/feedback/round-1/tests/testReport-2.md`);
+    const testAction = (reportOrdinal) => launchAction({ phase: 'test', role: 'tester', purpose: 'test', feedbackRound: 1, reportOrdinal });
+    await g.write({ [artifactPaths(g.job).testReport]: '# original\n', [report(1)]: '# round report 1\n' });
+
+    const stale = await runLive(g, testAction(2), (a) => g.result(a, { artifacts: [report(1)] }));
+    assert.deepEqual([stale.outcome, stale.reason, stale.detail], ['failed', 'invalid-result', `missing output: ${report(2)}`]);
+    await g.write({ [report(2)]: '# round report 2\n' });
+    const live = await runLive(g, testAction(2), (a) => g.result(a, { artifacts: [report(2)] }));
+    assert.equal(live.outcome, 'done', JSON.stringify(await g.endOf(live.attemptId)));
+    assert.deepEqual(Object.keys((await g.endOf(live.attemptId)).outputs), [report(2)]);
+    const started = (await g.events()).find((e) => e.type === 'attempt-started' && e.attemptId === live.attemptId);
+    assert.deepEqual([started.feedbackRound, started.reportOrdinal, 'retryErrors' in started], [1, 2, false]);
+    assert.deepEqual([live.feedbackRound, live.reportOrdinal], [1, 2]);
+
+    const t3 = await g.startedOnly('t3', { phase: 'test', role: 'tester', purpose: 'test', feedbackRound: 1, reportOrdinal: 3 });
+    await g.publish(t3, g.result(t3, { artifacts: [report(2)] }));
+    const t2 = await g.startedOnly('t2', { phase: 'test', role: 'tester', purpose: 'test', feedbackRound: 1, reportOrdinal: 2 });
+    await g.publish(t2, g.result(t2, { artifacts: [report(2)] }));
+    const tri = await g.startedOnly('tri', { phase: 'accept', role: 'triage', purpose: 'triage', feedbackRound: 1 });
+    assert.equal(tri.feedbackRound, 1);
+    await g.write({ [roundTriagePath(g.job, 1)]: 'B\n\n## Requirement changes\n\n- None\n' });
+    await g.publish(tri, g.result(tri, { route: 'separate', idea: 'A new job.', brief: 'B', requirementChanges: [] }));
+    await reconcileWith(g);
+    const t3End = await g.endOf('t3');
+    assert.deepEqual([t3End.outcome, t3End.reason, t3End.detail], ['failed', 'invalid-result', `missing output: ${report(3)}`]);
+    assert.equal((await g.endOf('t2')).outcome, 'done', JSON.stringify(await g.endOf('t2')));
+    const triEnd = await g.endOf('tri');
+    assert.equal(triEnd.outcome, 'done', JSON.stringify(triEnd));
+    assert.deepEqual(triEnd.triage, { route: 'separate', summary: 'Did the work.', requirementChanges: [], idea: 'A new job.' });
+    assert.equal(g.store.get(g.jobId).attempts.find((a) => a.attemptId === 'tri').feedbackRound, 1);
+  } finally { registry._reset(); }
+});
+
+test('attempt-ended carries the triage decision', async () => {
+  registry._reset();
+  try {
+    const g = await roundSetup();
+    const { attempt, turn } = await launchTriage(g);
+    const started = (await g.events()).find((e) => e.type === 'attempt-started' && e.attemptId === attempt.attemptId);
+    assert.deepEqual([started.role, started.purpose, started.feedbackRound, 'reportOrdinal' in started], ['triage', 'triage', 1, false]);
+    await turn(triageBody({ triage: 'forged by the worker' }));
+    const end = await g.endOf(attempt.attemptId);
+    const want = { route: 'fix', summary: 'One small change.', requirementChanges: ['add X'], task: FIX_TASK };
+    assert.deepEqual(end.triage, want);
+    assert.equal('brief' in end, false);
+    assert.equal('idea' in end.triage, false);
+    assert.deepEqual(lastAttempt(g.store, g.jobId).triage, want);
+  } finally { registry._reset(); }
+});
+
+test('a launch action\'s retryErrors reach attempt-started and the card; round 0 launches carry no round fields', async () => {
+  registry._reset();
+  try {
+    const g = await gitSetup();
+    const cards = [];
+    const factory = sessionFactory(registry);
+    const reg = { ...factory.registry, sendInput: async (id, text) => { cards.push(text); return factory.registry.sendInput(id, text); } };
+    const runner = createRunner({ registry: reg, store: g.store, now: () => T0, idImpl: ids(), logImpl: quiet });
+    await runner.launch(g.job, launchAction({ retryErrors: ['tasks.json: bad id'] }));
+    const started = (await g.events()).find((e) => e.type === 'attempt-started');
+    assert.deepEqual(started.retryErrors, ['tasks.json: bad id']);
+    assert.equal('feedbackRound' in started, false);
+    assert.equal('reportOrdinal' in started, false);
+    assert.match(cards[0], /"retryErrors": \[\s*"tasks.json: bad id"\s*\]/);
+    await runner.stopAttempt(g.jobId);
+    await runner.drain();
   } finally { registry._reset(); }
 });

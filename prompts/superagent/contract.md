@@ -50,12 +50,20 @@ If the job card has a `purpose`, it says which kind of attempt this is and which
 - `ask` (brainstormer): `questions`, a list of at most `maxQuestions` objects `{ "id": "Q<n>", "text": "..." }`, where `Q<n>` has n of 1 or more and an id is never reused across turns. To finish, write the brief to `outputs.brief` and publish `questions: []` explicitly; a missing `questions` is rejected. When `final` is true, `questions` must be `[]`. A brainstormer never publishes `blocked`.
 - `answer` (stand-in): `answers`, a list of `{ "id", "tag", "answer", "reason" }` covering every id in `openQuestions` (`tag` is `from-idea`, `from-project` or `assumed`). To escalate one question, publish `status: "blocked"` with `question` (for the user), `escalated` (that question's id) and `answers` for all the others (it may be empty). A `done` result must not carry `escalated`. `failed` is allowed. It writes no files and has no commits.
 - `test`: on success `status: done`; on failure `status: failed` with `findings` (each `id`, `severity` (`blocker`, `major` or `minor`), `text`, optional `repo`).
+- `feedback-plan`: like `author`, for a feedback round: write the round's outputs listed on your card. Its tasks file holds only the new tasks; their ids must not repeat any id in `effectiveTasks`.
+- `triage` (read-only, final message): `route` (`fix`, `subplan` or `separate`), `summary`, `brief` and `requirementChanges` (a list of strings, may be empty); `task` for `fix`, `idea` for `separate`.
 
 A `blocked` result needs none of these purpose fields; publish your question instead. Exception: a blocked `answer` still needs `escalated` and `answers`. `ask` never blocks. Tester `findings`, if you include them, must still be well-formed.
 
 ## Answers
 
 `userAnswers` on your card (`{ question, answer }`) are the user's decisions for this scope: they override the reviewer, the spec and your own judgement. A blocker the user dismissed is closed: do not raise, confirm or fix it. In a spec, `## Your answers` are the user's decisions and `## Assumptions made for you` are reviewable defaults, whether or not your card has `userAnswers`.
+
+## Feedback
+
+`feedback` on your card lists the rounds of feedback the user gave after trying the job, oldest first: each with its `text`, its `triage` file (the brief for that round's work) and its `requirementChanges`. Where the job card lists feedback, each round's requirementChanges amend the requirements in round order; a later round wins. A requirement a round dropped or changed is superseded: never fail the job on it, and never route or make a fix that undoes the change. Anything no round lists still stands as written.
+
+Each round's `pendingChanges` (per repo id, `paths`, at most 200 of `total`) are the user's own edits made while trying the job. Leave them untouched and unstaged: never stage, commit, edit, revert or delete them, as for `pendingChanges` on a repo.
 
 ## Never ask the user
 
@@ -88,3 +96,5 @@ If the job card has `previousFailure`, the previous attempt failed for that `rea
 If the job card's `handoff` is set, read that file first and continue from the state it describes; check the worktrees' git status before trusting it.
 
 If the job card has a `retryNote`, the job was stuck and the user retried it with that note. It is the user's instruction for this attempt: it overrides the handoff, the previous attempt's plan and your own judgement where they conflict.
+
+If the job card has `retryErrors`, the job was stuck because your phase's earlier outputs were refused for these errors (for example an invalid tasks file). Fix them first.

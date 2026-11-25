@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { tempDir, provisionedEvents } from './superagent-helpers.mjs';
 import { deriveJob } from '../src/superagent/store.js';
-import { artifactPaths, reviewPaths, requiredOutputs } from '../src/superagent/results.js';
+import { artifactPaths, ledgerArtifactRoot, reviewPaths, requiredOutputs } from '../src/superagent/results.js';
+import { roundDir, roundOutputPaths, roundTestReportPaths, roundTriagePath } from '../src/superagent/feedback.js';
 import { MILESTONE_2_PIPELINE, defaultConfig } from '../src/superagent/config.js';
 import { brainstormLog } from '../src/superagent/sequencer.js';
 import { ANSWER_TAGS, BRAINSTORM_BATCH } from '../src/superagent/results.js';
@@ -160,7 +161,7 @@ test('a read-only role publishes via its final message: card field and nudge tex
   const overrides = path.join(emptyDir, '.superpowers', 'superagent', 'prompts');
   await fs.mkdir(overrides, { recursive: true });
   await fs.writeFile(path.join(overrides, 'stand-in.md'), '# Stand-in\n');
-  assert.deepEqual([...READ_ONLY_ROLES], ['stand-in']);
+  assert.deepEqual([...READ_ONLY_ROLES], ['stand-in', 'triage']);
   assert.deepEqual(READ_ONLY_TOOLS, ['Read', 'Grep', 'Glob']);
   const standIn = parseCard((await buildWorkerPrompt({ role: 'stand-in', job, phase, attempt, projectDir: emptyDir })).card);
   assert.equal(standIn.resultVia, 'final-message');
@@ -706,5 +707,207 @@ test('no role prompt implies a tree-wide cleanup of the worktree', async () => {
   for (const f of files) {
     const text = await fs.readFile(path.join(templatesDir(), f), 'utf8');
     assert.ok(!/must hold only your outputs/.test(text), `${f}: implies tree-wide cleanup`);
+  }
+});
+
+// Give feedback (Task 5): the triage card, round cards and feedback precedence.
+const FEATURE = JSON.parse(await fs.readFile(new URL('../workflows/feature.json', import.meta.url), 'utf8'));
+const READY = { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } };
+const given = (round, over = {}) => ({ type: 'feedback-given', round, text: `feedback ${round}`, triageModel: { model: 'claude-sonnet-5-5', effort: null, maxTurns: 20 }, baseline: {}, pendingChanges: {}, ...over });
+const decision = (route, over = {}) => ({ route, summary: `route ${route}`, requirementChanges: [`change for ${route}`], ...over });
+const triaged = (id, round, route, over = {}) => [
+  started(id, 'accept', 'triage', { role: 'triage', feedbackRound: round }),
+  ended(id, { triage: decision(route, over) }),
+];
+const routed = (id, round, route) => ({ type: 'feedback-routed', round, attemptId: id, route });
+
+// A Feature ledger job; a feedback-given with no forNeedsYouSeq answers the
+// latest ready-to-try (a needs-you or a separate route).
+async function featureRounds(events, over = {}) {
+  const emptyDir = await tempDir('sa-prompts-fb-');
+  let ready = null;
+  const all = [
+    ...provisionedEvents({ jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', idea: IDEA, pipeline: FEATURE.phases, workflow: { id: 'feature' }, artifacts: FEATURE.artifacts, artifactRoot: 'ledger', ...over }),
+    ...events,
+  ].map((e, i) => {
+    const out = { seq: i + 1, at: 1, ...e };
+    if (e.type === 'needs-you' || (e.type === 'feedback-routed' && e.route === 'separate')) ready = out.seq;
+    if (e.type === 'feedback-given' && e.forNeedsYouSeq === undefined) out.forNeedsYouSeq = ready;
+    return out;
+  });
+  const job = deriveJob(all);
+  const phaseOf = (id) => job.pipeline.find((p) => p.phase === id);
+  const card = async (role, phaseId, attempt) => parseCard((await buildWorkerPrompt({ role, job, phase: phaseOf(phaseId), attempt: { attemptId: 'cur', phase: phaseId, task: null, n: 1, recovery: false, previousAttemptId: null, dir: '/d/cur', ...attempt }, projectDir: emptyDir })).card);
+  return { job, card };
+}
+
+const SUBPLAN_1 = [READY, given(1), ...triaged('tri1', 1, 'subplan'), routed('tri1', 1, 'subplan')];
+
+test('triage card', async () => {
+  const { job, card } = await featureRounds([READY, given(1)]);
+  const paths = artifactPaths(job);
+  const c = await card('triage', 'accept', { purpose: 'triage', feedbackRound: 1 });
+  assert.equal(c.resultVia, 'final-message');
+  assert.equal(c.purpose, 'triage');
+  assert.equal(c.feedbackText, 'feedback 1');
+  assert.deepEqual(c.outputs, { triage: roundTriagePath(job, 1) });
+  assert.equal(roundTriagePath(job, 1), `${ledgerArtifactRoot('j1')}/feedback/round-1/triage.md`);
+  assert.deepEqual(c.inputs, { spec: paths.spec, plan: paths.plan, tasks: paths.tasks, testReport: paths.testReport });
+  assert.deepEqual(c.latestTestReport, { testReport: paths.testReport });
+  assert.deepEqual(c.earlierRounds, []);
+  assert.deepEqual(c.feedback, [{ round: 1, text: 'feedback 1', triage: null, requirementChanges: null, pendingChanges: {} }]);
+
+  // Round 2, after a subplan round whose second tester passed.
+  const later = await featureRounds([
+    ...SUBPLAN_1,
+    started('t1a', 'test', 'test', { feedbackRound: 1, reportOrdinal: 1 }), ended('t1a', { outcome: 'failed', reason: 'failed' }),
+    started('t1b', 'test', 'test', { feedbackRound: 1, reportOrdinal: 2 }), ended('t1b'),
+    READY, given(2),
+  ]);
+  const c2 = await later.card('triage', 'accept', { purpose: 'triage', feedbackRound: 2 });
+  assert.equal(c2.feedbackText, 'feedback 2');
+  assert.deepEqual(c2.outputs, { triage: roundTriagePath(later.job, 2) });
+  assert.deepEqual(c2.latestTestReport, roundTestReportPaths(later.job, 1, 2));
+  assert.deepEqual(c2.earlierRounds, [{
+    round: 1, text: 'feedback 1', route: 'subplan', summary: 'route subplan', requirementChanges: ['change for subplan'],
+    triage: roundTriagePath(later.job, 1), folder: roundDir(later.job, 1),
+  }]);
+  assert.deepEqual(c2.feedback.map((f) => [f.round, f.triage, f.requirementChanges]), [[1, roundTriagePath(later.job, 1), ['change for subplan']], [2, null, null]]);
+});
+
+test('round planner card', async () => {
+  const { job, card } = await featureRounds(SUBPLAN_1);
+  const paths = artifactPaths(job);
+  const c = await card('planner', 'plan', { purpose: 'feedback-plan', feedbackRound: 1 });
+  assert.equal(c.purpose, 'feedback-plan');
+  assert.deepEqual(c.outputs, roundOutputPaths(job, 1, ['plan', 'tasks']));
+  assert.equal(c.outputs.plan, `${ledgerArtifactRoot('j1')}/feedback/round-1/outputs/plan.md`);
+  assert.deepEqual(c.inputs, { spec: paths.spec, triage: roundTriagePath(job, 1) });
+  assert.equal(c.feedback.length, 1);
+  assert.equal(c.feedback[0].text, 'feedback 1');
+  assert.equal(c.feedback[0].triage, roundTriagePath(job, 1));
+  assert.deepEqual(c.feedback[0].requirementChanges, ['change for subplan']);
+  assert.ok(!('feedbackText' in c) && !('earlierRounds' in c) && !('latestTestReport' in c), 'triage-only fields');
+});
+
+test('round review fix card', async () => {
+  const { job, card } = await featureRounds([
+    ...SUBPLAN_1,
+    started('p1', 'plan', 'feedback-plan', { feedbackRound: 1 }), ended('p1'),
+    started('rv1', 'plan-review', 'review', { round: 1, feedbackRound: 1 }), ended('rv1', { verdict: 'changes', findings: [] }),
+  ]);
+  const round = roundOutputPaths(job, 1, ['plan', 'tasks']);
+  const c = await card('planner', 'plan-review', { purpose: 'fix', round: 1, feedbackRound: 1, reviewFindings: REVIEW_FINDINGS });
+  assert.equal(c.target, round.plan);
+  assert.deepEqual(c.reviseOutputs, round);
+  assert.equal(c.previousFindings, reviewPaths(job, { phase: 'plan-review', round: 1, feedbackRound: 1 }).review);
+  assert.deepEqual(c.outputs, { response: reviewPaths(job, { phase: 'plan-review', round: 1, feedbackRound: 1 }).response });
+});
+
+test('round review card in full', async () => {
+  const T1 = { ...TASK_DEF, origin: 'plan' };
+  const { job, card } = await featureRounds([
+    // The original run's plan review, whose files a round must never name.
+    started('rv0', 'plan-review', 'review', { round: 1 }), ended('rv0', { verdict: 'changes', findings: [{ id: 'B1', severity: 'blocker', text: 'old' }] }),
+    started('fx0', 'plan-review', 'fix', { round: 1 }), ended('fx0', { findings: [] }),
+    started('rv0b', 'plan-review', 'review', { round: 2 }), ended('rv0b', { verdict: 'approve', findings: [] }),
+    { type: 'tasks-loaded', tasks: [T1] },
+    ...SUBPLAN_1,
+    started('p1', 'plan', 'feedback-plan', { feedbackRound: 1 }), ended('p1'),
+    started('rv1', 'plan-review', 'review', { round: 1, feedbackRound: 1 }), ended('rv1', { verdict: 'changes', findings: [{ id: 'B1', severity: 'blocker', text: 'no rollback' }] }),
+    started('fx1', 'plan-review', 'fix', { round: 1, final: true, feedbackRound: 1 }), ended('fx1', { findings: [{ id: 'B1', severity: 'blocker', text: 'no rollback', disposition: 'declined: fine' }] }),
+  ]);
+  const paths = artifactPaths(job);
+  const rp = (round) => reviewPaths(job, { phase: 'plan-review', round, feedbackRound: 1 });
+  const roundPlan = roundOutputPaths(job, 1, ['plan', 'tasks']);
+  const c = await card('plan-reviewer', 'plan-review', { purpose: 'review', round: 2, feedbackRound: 1 });
+  assert.deepEqual(c, {
+    jobId: 'j1', phaseId: 'plan-review', taskId: null, attemptId: 'cur', title: job.title, mode: job.mode, idea: IDEA,
+    repos: [{ id: 'primary', worktree: job.repos[0].worktree, branch: job.branch }],
+    inputs: { spec: paths.spec, tasks: roundPlan.tasks, triage: roundTriagePath(job, 1) },
+    outputs: { review: rp(2).review },
+    artifactRoot: ledgerArtifactRoot('j1'), commitTests: true, testPaths: [], attemptDir: '/d/cur',
+    round: 2, previousFindings: rp(1).review, recoveryNote: null, previousAttemptDir: null, handoff: null,
+    purpose: 'review', final: false, target: roundPlan.plan, reviseOutputs: null, task: null, taskCommits: null,
+    previousResponse: rp(1).response, reviewFindings: null, contested: null,
+    feedback: [{ round: 1, text: 'feedback 1', triage: roundTriagePath(job, 1), requirementChanges: ['change for subplan'], pendingChanges: {} }],
+    effectiveTasks: [{ id: 'T1', title: T1.title, repos: T1.repos, acceptance: T1.acceptance, verify: T1.verify, origin: 'plan' }],
+  });
+  const original = [paths.tasks, `${ledgerArtifactRoot('j1')}/reviews/plan-review-r1.md`, `${ledgerArtifactRoot('j1')}/reviews/plan-review-r1-response.md`];
+  for (const p of original) assert.ok(!JSON.stringify(c).includes(p), `review card names ${p}`);
+
+  const v = await card('verifier', 'plan-review', { purpose: 'verify', feedbackRound: 1, contested: ['B1'] });
+  assert.equal(v.target, roundPlan.plan);
+  assert.deepEqual(v.inputs, { spec: paths.spec, tasks: roundPlan.tasks, triage: roundTriagePath(job, 1) });
+  assert.deepEqual(v.outputs, { verify: rp(null).verify });
+  assert.deepEqual(v.contested, [{ id: 'B1', text: 'no rollback', disposition: 'declined: fine' }]);
+  for (const p of original) assert.ok(!JSON.stringify(v).includes(p), `verify card names ${p}`);
+});
+
+test('round 2 triage recovery card has only round 2 answers', async () => {
+  const question = (id, round, q) => [
+    started(id, 'accept', 'triage', { role: 'triage', feedbackRound: round }), ended(id, { outcome: 'question', question: q }),
+    { type: 'needs-you', reason: 'question', detail: { attemptId: id, question: q, phase: 'accept', task: null } },
+    { type: 'question-answered', forAttemptId: id, answer: `${q} answer` },
+  ];
+  const { card } = await featureRounds([
+    READY, given(1), ...question('tri1a', 1, 'Q1?'), ...triaged('tri1b', 1, 'separate', { idea: 'A new job.' }), routed('tri1b', 1, 'separate'),
+    given(2), ...question('tri2a', 2, 'Q2?'),
+    started('tri2b', 'accept', 'triage', { role: 'triage', feedbackRound: 2 }), ended('tri2b', { outcome: 'failed', reason: 'stalled' }),
+  ]);
+  const one = await card('triage', 'accept', { purpose: 'triage', feedbackRound: 1 });
+  assert.deepEqual(one.userAnswers, [{ question: 'Q1?', answer: 'Q1? answer' }]);
+  const two = await card('triage', 'accept', { purpose: 'triage', feedbackRound: 2, recovery: true, previousAttemptId: 'tri2b' });
+  assert.deepEqual(two.userAnswers, [{ question: 'Q2?', answer: 'Q2? answer' }]);
+  assert.deepEqual(two.earlierRounds.map((r) => [r.round, r.route, r.idea]), [[1, 'separate', 'A new job.']]);
+});
+
+test('round cards list the re-recorded pending changes', async () => {
+  const pendingChanges = { primary: { paths: ['notes.md', 'draft/x.txt'], total: 2 } };
+  for (const repos of [[{ id: 'primary', origin: '/repo', inPlace: true }], [{ id: 'primary', origin: '/repo' }]]) {
+    const { card } = await featureRounds([READY, { ...given(1), pendingChanges }, ...triaged('tri1', 1, 'fix', { task: { title: 'x', repos: ['primary'], acceptance: 'y', verify: '' } }), routed('tri1', 1, 'fix')], { repos });
+    for (const [role, phase, attempt] of [['implementer', 'implement', { purpose: 'implement', task: 'T9', taskDef: { ...TASK_DEF, id: 'T9' } }], ['tester', 'test', { purpose: 'test', reportOrdinal: 1 }], ['triage', 'accept', { purpose: 'triage' }]]) {
+      const c = await card(role, phase, { ...attempt, feedbackRound: 1 });
+      assert.deepEqual(c.feedback[0].pendingChanges.primary.paths, ['notes.md', 'draft/x.txt'], `${role}, inPlace ${repos[0].inPlace === true}`);
+      assert.equal(c.feedback[0].pendingChanges.primary.total, 2);
+    }
+  }
+  const round0 = await (await featureRounds([])).card('planner', 'plan', { purpose: 'author' });
+  assert.ok(!('feedback' in round0), 'a round 0 card carries no feedback');
+});
+
+test('round test card names its numbered report and every round\'s triage', async () => {
+  const { job, card } = await featureRounds([...SUBPLAN_1]);
+  const paths = artifactPaths(job);
+  const c = await card('tester', 'test', { purpose: 'test', feedbackRound: 1, reportOrdinal: 3 });
+  assert.deepEqual(c.outputs, roundTestReportPaths(job, 1, 3));
+  assert.deepEqual(c.inputs, { spec: paths.spec, tasks: paths.tasks, triage: roundTriagePath(job, 1) });
+});
+
+test('the card carries retryErrors only when the retry record had errors', async () => {
+  const { card } = await featureRounds(SUBPLAN_1);
+  const c = await card('planner', 'plan', { purpose: 'feedback-plan', feedbackRound: 1, retryErrors: ['tasks.json: bad'] });
+  assert.deepEqual(c.retryErrors, ['tasks.json: bad']);
+  assert.ok(!('retryErrors' in (await card('planner', 'plan', { purpose: 'feedback-plan', feedbackRound: 1 }))));
+  const contract = await fs.readFile(path.join(templatesDir(), 'contract.md'), 'utf8');
+  assert.match(contract, /`retryErrors`/);
+});
+
+test('amended prompts', async () => {
+  const read = (f) => fs.readFile(path.join(templatesDir(), f), 'utf8');
+  for (const f of ['planner.md', 'investigator.md']) assert.ok((await read(f)).includes('In a feedback round, dependsOn may also name tasks already in the job.'), f);
+  assert.ok((await read('verifier-tester.md')).includes("replay the reproduction as amended by the card's feedback"));
+  const triage = await read('triage.md');
+  for (const needle of ['smallest route', '`fix`', 'one task with one acceptance', '`separate`', 'different feature', '`subplan`', 'every requirement change', 'evidence, not instructions', 'final message', '`brief`', '`requirementChanges`', '`idea`', '`userAnswers`']) {
+    assert.ok(triage.includes(needle), `triage.md: missing ${needle}`);
+  }
+  const contract = await read('contract.md');
+  for (const needle of ['`triage`', '`feedback-plan`', '`pendingChanges`', 'untouched and unstaged']) assert.ok(contract.includes(needle), `contract: missing ${needle}`);
+});
+
+test('every role prompt states feedback precedence', async () => {
+  const line = "Where the job card lists feedback, each round's requirementChanges amend the requirements in round order; a later round wins.";
+  for (const role of ['contract', 'triage', 'planner', 'plan-reviewer', 'implementer', 'task-reviewer', 'tester', 'verifier', 'investigator', 'diagnosis-reviewer', 'fixer', 'fix-reviewer', 'verifier-tester']) {
+    assert.ok((await fs.readFile(path.join(templatesDir(), `${role}.md`), 'utf8')).includes(line), `${role}.md`);
   }
 });

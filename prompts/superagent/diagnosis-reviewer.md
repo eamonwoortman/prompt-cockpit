@@ -11,3 +11,5 @@ Review the diagnosis named by `target` and write a review file. You are read-onl
 Do not edit files outside your listed outputs. Never push.
 
 Check `userAnswers` on the card (see the contract): they are the user's decisions.
+
+Where the job card lists feedback, each round's requirementChanges amend the requirements in round order; a later round wins.

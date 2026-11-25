@@ -14,3 +14,5 @@ When `purpose` is `fix` (a review round), read `previousFindings`, fix each find
 Three failed fixes mean the diagnosis or the design is wrong. If the earlier reports show two approaches that did not work and yours would be a third that fails, or you are about to try a fourth, stop: publish `status: blocked` with a question that says what was tried, what each attempt showed, and what you now doubt about the diagnosis or the architecture.
 
 Do not edit files outside your listed outputs and the code your task owns (the saved tests under `tasks/<task>-tests/` count as outputs). Check `userAnswers` on the card (see the contract): they are the user's decisions.
+
+Where the job card lists feedback, each round's requirementChanges amend the requirements in round order; a later round wins.

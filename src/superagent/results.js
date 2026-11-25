@@ -827,7 +827,7 @@ export async function validateResult(value, { expected, phase, job, git = defaul
 // summary's first line, so repeated-error can trip on it.
 export function outcomeForResult(result) {
   const extra = {};
-  for (const key of ['verdict', 'findings', 'verified', 'questions', 'answers', 'escalated']) if (result[key] !== undefined) extra[key] = result[key];
+  for (const key of ['verdict', 'findings', 'verified', 'questions', 'answers', 'escalated', 'triage']) if (result[key] !== undefined) extra[key] = result[key];
   if (result.status === 'done') return { outcome: 'done', ...extra };
   if (result.status === 'blocked' && result.question) return { outcome: 'question', question: result.question, ...extra };
   const reason = result.status === 'blocked' ? 'blocked' : 'failed';
