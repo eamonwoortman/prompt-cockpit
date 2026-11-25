@@ -15,7 +15,7 @@
 // while Node (tests/superagent-job-pane.test.mjs) would resolve a root-absolute
 // one against the drive root.
 import { renderMarkdown } from './markdown.js';
-import { formatDuration, formatMoney, formatTokens, linkChip, stageColorIndex, statusLabel, workflowLabel } from './superagent-format.js';
+import { feedbackRoundLabel, formatDuration, formatMoney, formatTokens, linkChip, stageColorIndex, statusLabel, workflowLabel } from './superagent-format.js';
 
 const FINISHED = new Set(['done', 'stopped', 'failed']);
 const STEP_MARK = { done: '✓', running: '●', waiting: '!' };
@@ -395,6 +395,7 @@ export function createJobPane({ root, onOpenArtifact = () => {}, onInspect = () 
     // A gated attempt never launched and takes no attempt number.
     if (!a.pausedBeforeLaunch) line.append(el('span', 'sa-attempt-n', `#${a.n}/${a.cap ?? '?'}`));
     line.append(el('span', 'sa-attempt-role', a.role ?? 'worker'));
+    if (a.feedbackRound > 0) line.append(el('span', 'sa-attempt-flag', feedbackRoundLabel(a.feedbackRound)));
     const facts = [shortModel(a.model)];
     if (a.round != null) facts.push(`round ${a.round}`);
     if (a.task != null) facts.push(`task ${a.task}`);

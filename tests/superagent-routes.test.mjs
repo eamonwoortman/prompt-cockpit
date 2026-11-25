@@ -269,6 +269,35 @@ test('retry passes the needs-you and note through, requires the needs-you, and m
   assert.deepEqual(calls.slice(0, 2), [{ needsYouSeq: 7, note: 'from code only' }, { needsYouSeq: 4, note: undefined }]);
 });
 
+test('feedback requires the needs-you, passes seq and text, and maps refusals', async (t) => {
+  const calls = [];
+  const supervisor = {
+    giveFeedback: async (jobId, opts) => {
+      calls.push(opts);
+      if (opts.needsYouSeq === 8) throw Object.assign(new Error('unsupported'), { code: 'ERR_FEEDBACK_UNSUPPORTED', why: 'layout' });
+      if (opts.needsYouSeq !== 7) throw Object.assign(new Error('stale'), { code: 'ERR_INVALID_STATE' });
+      return job({ jobId, state: 'running' });
+    },
+  };
+  const api = await serve(t, { host: fakeHost({ supervisor }) });
+  for (const needsYouSeq of [undefined, null, '7', 7.5]) {
+    const res = await api('/api/superagent/jobs/job-1/feedback', { method: 'POST', body: { needsYouSeq, text: 'x' } });
+    assert.deepEqual([res.status, res.body.code, res.body.error], [400, 'ERR_INVALID_REQUEST', 'needsYouSeq is required: the needs-you this feedback was written for'], String(needsYouSeq));
+  }
+  for (const text of [5, null, undefined, ['x']]) {
+    const res = await api('/api/superagent/jobs/job-1/feedback', { method: 'POST', body: { needsYouSeq: 7, text } });
+    assert.deepEqual([res.status, res.body.code], [400, 'ERR_INVALID_REQUEST'], String(text));
+  }
+  assert.deepEqual(calls, [], 'nothing reaches the supervisor');
+  const ok = await api('/api/superagent/jobs/job-1/feedback', { method: 'POST', body: { needsYouSeq: 7, text: 'make it readable' } });
+  assert.deepEqual([ok.status, ok.body.status], [200, 'running']);
+  assert.deepEqual(calls, [{ needsYouSeq: 7, text: 'make it readable' }]);
+  const unsupported = await api('/api/superagent/jobs/job-1/feedback', { method: 'POST', body: { needsYouSeq: 8, text: 'x' } });
+  assert.deepEqual([unsupported.status, unsupported.body.code], [400, 'ERR_FEEDBACK_UNSUPPORTED']);
+  const stale = await api('/api/superagent/jobs/job-1/feedback', { method: 'POST', body: { needsYouSeq: 4, text: 'x' } });
+  assert.deepEqual([stale.status, stale.body.code], [409, 'ERR_INVALID_STATE']);
+});
+
 test('rename passes the title through, refuses a non-text title before the supervisor, and maps refusals', async (t) => {
   const calls = [];
   const supervisor = {

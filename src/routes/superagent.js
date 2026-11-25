@@ -28,6 +28,7 @@ const BAD_REQUEST = new Set([
   'ERR_INVALID_CONFIG', 'ERR_NO_TEMPLATE', 'ERR_PATH_TOO_LONG', 'ERR_PHASE_KIND_UNSUPPORTED', 'ERR_MODE_UNSUPPORTED',
   'ERR_UNKNOWN_WORKFLOW', 'ERR_INVALID_WORKFLOW', 'ERR_INVALID_REQUEST', 'ERR_INVALID_BRANCH',
   'ERR_FOLDER_DIRTY', 'ERR_FOLDER_BUSY_GIT', 'ERR_FOLDER_ON_JOB_BRANCH', 'ERR_FOLDER_CHANGED',
+  'ERR_FEEDBACK_UNSUPPORTED',
 ]);
 
 function statusFor(err) {
@@ -287,6 +288,7 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
     answer: (supervisor, id, body) => supervisor.answerQuestion(id, body.text, { needsYouSeq: body.needsYouSeq }),
     accept: (supervisor, id, body) => supervisor.accept(id, { needsYouSeq: body.needsYouSeq, branch: body.branch }),
     retry: (supervisor, id, body) => supervisor.retryJob(id, { needsYouSeq: body.needsYouSeq, note: body.note }),
+    feedback: (supervisor, id, body) => supervisor.giveFeedback(id, { needsYouSeq: body.needsYouSeq, text: body.text }),
     stop: (supervisor, id) => supervisor.stopJob(id),
     rename: (supervisor, id, body) => supervisor.renameJob(id, body.title),
   };
@@ -304,6 +306,14 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
       }
       if (name === 'retry' && !Number.isInteger(body.needsYouSeq)) {
         return respondJson(res, 400, { error: 'needsYouSeq is required: the stuck entry this retry was made for', code: 'ERR_INVALID_REQUEST' });
+      }
+      if (name === 'feedback') {
+        if (!Number.isInteger(body.needsYouSeq)) {
+          return respondJson(res, 400, { error: 'needsYouSeq is required: the needs-you this feedback was written for', code: 'ERR_INVALID_REQUEST' });
+        }
+        if (typeof body.text !== 'string') {
+          return respondJson(res, 400, { error: 'text must be text', code: 'ERR_INVALID_REQUEST' });
+        }
       }
       try {
         return respondJson(res, 200, jobSummary(await host.admit((supervisor) => act(supervisor, id, body))));

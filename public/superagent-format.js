@@ -80,6 +80,10 @@ export function statusLabel(job) {
 // a project override of a built-in keeps its emoji; any other workflow gets 🧩.
 const WORKFLOW_ICON = { feature: '\u{1F4A1}', troubleshooting: '\u{1F575}\u{FE0F}' };
 
+export function feedbackRoundLabel(n) {
+  return n > 0 ? `feedback ${n}` : '';
+}
+
 export function workflowLabel(workflow) {
   const icon = WORKFLOW_ICON[String(workflow?.id ?? '').toLowerCase()] ?? '\u{1F9E9}';
   return `${icon} ${workflow?.name ?? workflow?.id ?? 'Workflow'}`;

@@ -764,6 +764,23 @@ export function initSuperagentView() {
       if (detail.readyInputs.includes('brief') || detail.artifacts.some((a) => a.key === 'brief')) {
         box.append(artifactBlock('Assumptions made for you', cachedArtifact(detail.jobId, needsYou.key, 'brief'), (text) => briefSection(text)));
       }
+      const round = detail.feedbackRounds?.at(-1);
+      if (round?.summary) {
+        box.append(el('h3', 'sa-subheading', `Feedback ${round.round}: ${round.route}`), preBlock(round.summary));
+        if (round.requirementChanges?.length) box.append(preBlock(round.requirementChanges.map((c) => `- ${c}`).join('\n')));
+        if (round.route === 'separate' && round.idea) {
+          box.append(el('h3', 'sa-subheading', 'Idea for a separate job'), preBlock(round.idea));
+          const copy = button('Copy idea', null, async () => {
+            try {
+              await navigator.clipboard.writeText(round.idea);
+              copy.textContent = 'Copied';
+            } catch (err) {
+              showError(rightError, err);
+            }
+          });
+          box.appendChild(el('div', 'sa-actions')).append(copy);
+        }
+      }
       const branchLabel = el('label', 'sa-field');
       const branchInput = el('input');
       branchInput.type = 'text';
@@ -779,7 +796,25 @@ export function initSuperagentView() {
         if (!(await act('accept', rightError, payload))) accept.disabled = false;
       });
       accept.title = 'Mark the job done and rename the branch. Nothing is merged or pushed.';
-      row.append(accept, stopButton(rightError));
+      row.append(accept);
+      if (detail.canGiveFeedback) {
+        const feedbackKey = `feedback|${needsYou.key}`;
+        const feedback = el('textarea', 'sa-answer');
+        feedback.maxLength = ANSWER_MAX_CHARS;
+        feedback.rows = 4;
+        feedback.placeholder = 'What should change? Give feedback instead of accepting.';
+        feedback.value = answerDrafts.get(feedbackKey) ?? '';
+        feedback.addEventListener('input', () => answerDrafts.set(feedbackKey, feedback.value));
+        const give = button('Give feedback', null, async () => {
+          give.disabled = true;
+          if (await act('feedback', rightError, { needsYouSeq: needsYou.seq, text: feedback.value })) answerDrafts.delete(feedbackKey);
+          else give.disabled = false;
+        });
+        give.title = 'Send this back to the team: it is routed as a fix, a sub-plan or a separate job, then the job returns here.';
+        box.append(feedback);
+        row.append(give);
+      }
+      row.append(stopButton(rightError));
       box.append(row);
     } else if (needsYou.reason === 'folder-changed') {
       // Not terminal: the supervisor re-checks the folder every heartbeat.

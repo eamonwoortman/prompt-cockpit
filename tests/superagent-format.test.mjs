@@ -4,7 +4,7 @@ import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
 const { renderMarkdown } = await import('../public/markdown.js');
-const { linkChipLabel, linkChip, formatUsd, formatMoney, formatTokens, formatDuration, stageColorIndex, statusLabel, workflowLabel } =
+const { linkChipLabel, linkChip, formatUsd, formatMoney, formatTokens, formatDuration, stageColorIndex, statusLabel, workflowLabel, feedbackRoundLabel } =
   await import('../public/superagent-format.js');
 
 test('linkChipLabel takes the host and the last path segment', () => {
@@ -81,4 +81,11 @@ test('workflowLabel puts an emoji before the name: built-ins by id, any other wo
   assert.equal(workflowLabel({ id: 'Troubleshooting', name: 'Troubleshooting' }), '🕵️ Troubleshooting');
   assert.equal(workflowLabel({ id: 'mine', name: 'My flow' }), '🧩 My flow');
   assert.equal(workflowLabel({ id: null, name: 'broken.json' }), '🧩 broken.json');
+});
+
+test('feedbackRoundLabel is empty for the original run and numbered after', () => {
+  assert.equal(feedbackRoundLabel(0), '');
+  assert.equal(feedbackRoundLabel(undefined), '');
+  assert.equal(feedbackRoundLabel(1), 'feedback 1');
+  assert.equal(feedbackRoundLabel(2), 'feedback 2');
 });

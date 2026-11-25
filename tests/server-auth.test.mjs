@@ -331,6 +331,15 @@ test('a request with a foreign Origin is rejected, even with the right Host', as
   assert.equal(res.status, 403);
 });
 
+test('a superagent feedback POST from a foreign Origin is rejected', async () => {
+  const res = await fetch(`${ORIGIN}/api/superagent/jobs/job-1/feedback`, {
+    method: 'POST',
+    headers: { origin: 'http://evil.example', 'content-type': 'application/json' },
+    body: JSON.stringify({ needsYouSeq: 1, text: 'x' }),
+  });
+  assert.equal(res.status, 403);
+});
+
 test('a session-scoped route rejects a missing or wrong token, and accepts the right one', async () => {
   registry._reset();
   const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
