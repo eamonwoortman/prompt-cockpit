@@ -212,7 +212,7 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
 function commitPathHint(error) {
   const tests = error.startsWith('commit includes test files: ');
   if (!tests && !error.startsWith('commit includes superagent files: ')) return '';
-  const rewrite = 'A later commit does not take that commit off the branch: rewrite it (`git commit --amend`, or `git reset --soft` to before it), then re-commit by explicit path.';
+  const rewrite = 'A later commit does not take that commit off the branch: rewrite it (`git commit --amend`, or `git reset --soft` to before it), then re-commit by explicit path. If you did not make that commit (the user\'s own commit or a merge on the branch), do not rewrite it: publish `blocked` and name the commit.';
   return tests ? `${rewrite} What counts as a test comes from \`testPaths\` on your card; if a path is matched wrongly, say so in your result rather than renaming files.\n` : `${rewrite}\n`;
 }
 

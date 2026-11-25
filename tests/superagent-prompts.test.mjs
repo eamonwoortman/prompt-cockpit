@@ -110,7 +110,7 @@ test('the invalid-result nudge carries the validator\'s error; the turn-cap nudg
 });
 
 test('a commit-path rejection tells the worker to rewrite the commit; a test-path one points at testPaths', () => {
-  const rewrite = ['`git commit --amend`', '`git reset --soft`', 'by explicit path', 'does not take'];
+  const rewrite = ['`git commit --amend`', '`git reset --soft`', 'by explicit path', 'does not take', 'If you did not make that commit', 'publish `blocked`'];
   const test = nudgeText('invalid-result', { dir: '/d', ledger: true, error: 'commit includes test files: Tests/FooTests.cs (commit abc1234 in primary, already on the branch)' });
   for (const s of [...rewrite, '`testPaths`', 'rather than renaming']) assert.ok(test.includes(s), s);
   const superagent = nudgeText('invalid-result', { dir: '/d', ledger: true, error: 'commit includes superagent files: .superpowers/x.md' });
