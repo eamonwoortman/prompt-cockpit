@@ -539,3 +539,131 @@ test('deriveJob reads branchTemplate from job-created, null when absent', () => 
   assert.equal(withT.branchTemplate, 'feature/{description}');
   assert.equal(without.branchTemplate, null);
 });
+
+const featureWorkflow = JSON.parse(await fs.readFile(new URL('../workflows/feature.json', import.meta.url), 'utf8'));
+const featureLog = (...more) => stamp([...provisionedEvents({ pipeline: featureWorkflow.phases, workflow: { id: 'feature' }, artifacts: featureWorkflow.artifacts, artifactRoot: 'ledger' }), ...more]);
+const readyToTry = [{ type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } }];
+const readySeq = featureLog(...readyToTry).length;
+const given = (over = {}) => ({ type: 'feedback-given', round: 1, forNeedsYouSeq: readySeq, text: 'fix it', triageModel: { model: 'm', effort: null, maxTurns: 20 }, baseline: { 'a.md': 'h' }, pendingChanges: {}, ...over });
+const routed = (route, over = {}) => ({ type: 'feedback-routed', round: 1, attemptId: 'tri1', route, ...over });
+const feedbackFix = taskCreated('fb1');
+
+test('old event logs derive unchanged: feature job after one done planner attempt', () => {
+  const log = featureLog(
+    started('p1', 'plan', { role: 'planner', model: 'claude-opus-5-5', dir: '/d' }),
+    { type: 'attempt-session', attemptId: 'p1', sessionId: 's1' },
+    ended('p1', 'done', { summary: 'planned', tokens: 5 }),
+    ev.tasksLoaded([taskCreated('t1')]),
+  );
+  const job = deriveJob(log);
+  const strip = (a) => {
+    const { feedbackRound, reportOrdinal, triage, ...rest } = a;
+    return rest;
+  };
+  assert.deepEqual([job.state, job.phaseIndex, job.phaseId, job.visits, job.tasks.map((t) => t.id)], ['running', 0, 'brainstorm', { brainstorm: 1 }, ['t1']]);
+  assert.deepEqual(job.attempts.map(strip), [{
+    attemptId: 'p1', phase: 'plan', task: null, role: 'planner', model: 'claude-opus-5-5', n: 1, recovery: false, previousAttemptId: null,
+    dir: '/d', handoff: null, sessionId: 's1', startedAt: null, endedAt: log.find((e) => e.type === 'attempt-ended').at,
+    outcome: 'done', reason: null, signature: null, detail: null, summary: 'planned', question: null, nudges: [], precompacts: [],
+    purpose: 'author', round: null, final: false, verdict: null, findings: null, commits: [], outputs: {}, verified: null,
+    questions: null, answers: null, escalated: null, tokens: 5, retryNote: null, retried: false,
+  }].map((a) => ({ ...a, startedAt: log.find((e) => e.type === 'attempt-started').at })));
+  assert.equal(job.feedbackRound, 0);
+  assert.deepEqual(job.feedbackRounds, []);
+  assert.deepEqual([job.attempts[0].feedbackRound, job.attempts[0].reportOrdinal, job.attempts[0].triage], [0, null, null]);
+});
+
+test('feedback-given applies only to its ready-to-try', () => {
+  let job = deriveJob(featureLog(...readyToTry, given()));
+  assert.deepEqual([job.state, job.feedbackRound, job.feedbackRounds.length], ['running', 1, 1]);
+  assert.deepEqual(job.feedbackRounds[0], { round: 1, forNeedsYouSeq: readySeq, text: 'fix it', triageModel: { model: 'm', effort: null, maxTurns: 20 }, baseline: { 'a.md': 'h' }, pendingChanges: {}, at: job.feedbackRounds[0].at, route: null, attemptId: null, tasksAppended: false });
+  job = deriveJob(featureLog(...readyToTry, given(), given()));
+  assert.deepEqual([job.feedbackRound, job.feedbackRounds.length], [1, 1]);
+  job = deriveJob(featureLog(...readyToTry, given({ forNeedsYouSeq: readySeq - 1 })));
+  assert.deepEqual([job.state, job.feedbackRound, job.feedbackRounds.length], ['needs-you', 0, 0]);
+});
+
+test('feedback-routed fix appends the task and re-enters per-task', () => {
+  const job = deriveJob(featureLog(...readyToTry, given(), routed('fix', { task: feedbackFix })));
+  assert.deepEqual(job.tasks.map((t) => [t.id, t.origin, t.round, t.fromAttemptId]), [['fb1', 'feedback', 1, 'tri1']]);
+  assert.deepEqual([job.phaseIndex, job.phaseId, job.visits.implement], [5, 'implement', 2]);
+  assert.deepEqual([job.feedbackRounds[0].route, job.feedbackRounds[0].attemptId], ['fix', 'tri1']);
+  const again = deriveJob(featureLog(...readyToTry, given(), routed('fix', { task: feedbackFix }), routed('fix', { task: taskCreated('fb2') })));
+  assert.deepEqual([again.tasks.length, again.visits.implement], [1, 2]);
+});
+
+test('feedback-routed subplan re-enters the task-writing phase', () => {
+  const log = [...readyToTry, given(), routed('subplan')];
+  let job = deriveJob(featureLog(...log));
+  assert.deepEqual([job.phaseIndex, job.phaseId, job.visits.plan, job.visits['plan-review']], [3, 'plan', 2, 2]);
+  job = deriveJob(featureLog(...log, routed('subplan')));
+  assert.deepEqual([job.visits.plan, job.visits['plan-review']], [2, 2]);
+});
+
+test('feedback-routed separate is a fresh ready-to-try', () => {
+  const log = featureLog(...readyToTry, given(), routed('separate'));
+  const job = deriveJob(log);
+  assert.deepEqual([job.state, job.reason, job.needsYouSeq, job.detail], ['needs-you', 'ready-to-try', log.length, { phase: 'accept', feedback: { round: 1 } }]);
+  assert.equal(job.feedbackRounds[0].route, 'separate');
+});
+
+test('tasks-appended adds round tasks once', () => {
+  const log = [...readyToTry, ev.tasksLoaded([taskCreated('t1')]), given(), routed('subplan'), { type: 'tasks-appended', round: 1, tasks: [taskCreated('fb1'), taskCreated('fb2')] }];
+  let job = deriveJob(featureLog(...log));
+  assert.deepEqual(job.tasks.map((t) => t.id), ['t1', 'fb1', 'fb2']);
+  assert.deepEqual([job.visits.implement, job.feedbackRounds[0].tasksAppended], [2, true]);
+  job = deriveJob(featureLog(...log, { type: 'tasks-appended', round: 1, tasks: [taskCreated('fb3')] }));
+  assert.deepEqual([job.tasks.length, job.visits.implement], [3, 2]);
+});
+
+const stuck = (phase) => ({ type: 'needs-you', reason: 'stuck', detail: { phase } });
+const retriedEv = (needsYouSeq, over) => ({ type: 'job-retried', needsYouSeq, task: null, fromAttemptId: null, handoff: null, note: null, ...over });
+
+test('job-retried in a round marks only that round attempts', () => {
+  const log = [
+    ...readyToTry,
+    started('t0', 'test', { role: 'tester' }), ended('t0', 'failed'),
+    given(),
+    started('t1', 'test', { role: 'tester', feedbackRound: 1 }), ended('t1', 'failed'),
+    stuck('test'),
+  ];
+  const seq = featureLog(...log).length;
+  const job = deriveJob(featureLog(...log, retriedEv(seq, { phase: 'test', feedbackRound: 1 })));
+  assert.deepEqual(job.attempts.map((a) => [a.attemptId, a.feedbackRound, a.retried]), [['t0', 0, false], ['t1', 1, true]]);
+  assert.equal(job.retries[0].feedbackRound, 1);
+});
+
+test('job-retried reopen resets the round authoring and review', () => {
+  const log = [
+    ...readyToTry,
+    started('x0', 'plan', { role: 'planner' }), ended('x0'),
+    given(), routed('subplan'),
+    started('p1', 'plan', { role: 'planner', feedbackRound: 1 }), ended('p1'),
+    started('r1', 'plan-review', { role: 'plan-reviewer', feedbackRound: 1, purpose: 'review' }), ended('r1', 'failed'),
+    stuck('plan-review'),
+  ];
+  const seq = featureLog(...log).length;
+  const reopened = featureLog(...log, retriedEv(seq, { phase: 'plan', feedbackRound: 1, reopen: true, errors: ['bad'] }));
+  const job = deriveJob(reopened);
+  assert.deepEqual(job.attempts.map((a) => [a.attemptId, a.retried]), [['x0', false], ['p1', true], ['r1', true]]);
+  assert.deepEqual([job.phaseIndex, job.visits.plan, job.visits['plan-review'], job.state], [3, 3, 3, 'running']);
+  assert.deepEqual([job.retries[0].reopen, job.retries[0].errors], [true, ['bad']]);
+  const replay = deriveJob([...reopened, { ...ev.phaseCompleted('plan-review', 2), seq: reopened.length + 1 }]);
+  assert.deepEqual([replay.phaseIndex, replay.completions.length], [3, 0]);
+});
+
+test('a pending retry is consumed only in its round', () => {
+  const log = [...readyToTry, given(), started('t1', 'test', { feedbackRound: 1 }), ended('t1', 'failed'), stuck('test')];
+  const seq = featureLog(...log).length;
+  const withRetry = [...log, retriedEv(seq, { phase: 'test', feedbackRound: 1 })];
+  let job = deriveJob(featureLog(...withRetry, started('t2', 'test', { feedbackRound: 2 })));
+  assert.equal(job.retries[0].consumedBy, null);
+  job = deriveJob(featureLog(...withRetry, started('t3', 'test', { feedbackRound: 1 })));
+  assert.equal(job.retries[0].consumedBy, 't3');
+});
+
+test('attempt-started and attempt-ended keep round, report ordinal and triage', () => {
+  const triage = { route: 'fix', summary: 's', requirementChanges: [] };
+  const job = deriveJob(featureLog(started('a1', 'test', { feedbackRound: 2, reportOrdinal: 3 }), ended('a1', 'done', { triage })));
+  assert.deepEqual([job.attempts[0].feedbackRound, job.attempts[0].reportOrdinal, job.attempts[0].triage], [2, 3, triage]);
+});

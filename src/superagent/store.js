@@ -22,7 +22,7 @@ import { defaultConfig, defaultSuperagentRoot } from './config.js';
 import { ledgerArtifactRoot } from './results.js';
 import { LEDGER_LEGACY_ARTIFACTS, LEGACY_ARTIFACTS, substituteArtifacts } from './workflows.js';
 
-export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored', 'job-retried', 'job-renamed', 'branch-renamed'];
+export const EVENT_TYPES = ['job-created', 'worktree-created', 'job-provisioned', 'job-failed', 'attempt-started', 'attempt-session', 'attempt-nudged', 'attempt-ended', 'needs-you', 'job-accepted', 'job-stopped', 'precompact', 'tasks-loaded', 'test-routed', 'phase-completed', 'router-decided', 'question-answered', 'folder-restored', 'job-retried', 'job-renamed', 'branch-renamed', 'feedback-given', 'feedback-routed', 'tasks-appended'];
 
 const NEWLINE = 0x0a;
 
@@ -43,6 +43,20 @@ function resolveArtifacts(first, legacy) {
   const base = legacy ? LEDGER_LEGACY_ARTIFACTS : first.artifacts ?? {};
   const root = ledgerArtifactRoot(first.jobId);
   return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, `${root}/${value}`]));
+}
+
+// Phases a feedback round re-enters; Task 2's feedbackShape replaces this.
+function roundPhases(pipeline) {
+  const only = (list) => (list.length === 1 ? list[0] : -1);
+  const taskWriting = only(pipeline.flatMap((p, i) => (p.kind === 'author' && (p.outputs ?? []).includes('tasks') ? [i] : [])));
+  const next = taskWriting >= 0 ? pipeline[taskWriting + 1] : null;
+  const review = next?.kind === 'review' && next.author === pipeline[taskWriting].role && (pipeline[taskWriting].outputs ?? []).includes(next.target) ? taskWriting + 1 : -1;
+  return {
+    taskWriting,
+    review,
+    perTask: only(pipeline.flatMap((p, i) => (p.kind === 'per-task' ? [i] : []))),
+    human: pipeline.findLastIndex((p) => p.kind === 'human'),
+  };
 }
 
 export function deriveJob(events) {
@@ -97,6 +111,8 @@ export function deriveJob(events) {
     routerDecisions: [],
     answers: [],
     retries: [],
+    feedbackRound: 0,
+    feedbackRounds: [],
     lastSeq: first.seq ?? null,
   };
   const attempt = (id) => job.attempts.find((a) => a.attemptId === id);
@@ -147,10 +163,24 @@ export function deriveJob(events) {
       case 'job-retried': {
         if (job.state !== 'needs-you' || job.reason !== 'stuck') break;
         const task = ev.task ?? null;
+        const round = ev.feedbackRound ?? 0;
         for (const a of job.attempts) {
-          if (a.phase === ev.phase && a.task === task && a.outcome === 'failed') a.retried = true;
+          if (a.phase === ev.phase && a.task === task && a.outcome === 'failed' && a.feedbackRound === round) a.retried = true;
+        }
+        if (ev.reopen === true) {
+          const at = job.pipeline.findIndex((p) => p.phase === ev.phase);
+          const review = roundPhases(job.pipeline).review;
+          const phases = [at, review === at + 1 ? review : -1].filter((i) => i >= 0).map((i) => job.pipeline[i].phase);
+          for (const a of job.attempts) {
+            if (a.feedbackRound === round && phases.includes(a.phase)) a.retried = true;
+          }
+          for (const p of phases) job.visits[p] = (job.visits[p] ?? 1) + 1;
+          if (at >= 0) job.phaseIndex = at;
         }
         job.retries.push({
+          feedbackRound: round,
+          reopen: ev.reopen === true,
+          errors: ev.errors ?? null,
           needsYouSeq: ev.needsYouSeq ?? null,
           phase: ev.phase,
           task,
@@ -166,7 +196,7 @@ export function deriveJob(events) {
       case 'job-accepted': setState('done'); break;
       case 'job-stopped': setState('stopped'); break;
       case 'attempt-started': {
-        const pending = job.retries.findLast((r) => r.phase === ev.phase && r.task === (ev.task ?? null) && r.consumedBy === null);
+        const pending = job.retries.findLast((r) => r.phase === ev.phase && r.task === (ev.task ?? null) && r.feedbackRound === (ev.feedbackRound ?? 0) && r.consumedBy === null);
         if (pending) pending.consumedBy = ev.attemptId;
         job.attempts.push({
           attemptId: ev.attemptId,
@@ -204,6 +234,9 @@ export function deriveJob(events) {
           tokens: null,
           retryNote: ev.retryNote ?? null,
           retried: false,
+          feedbackRound: ev.feedbackRound ?? 0,
+          reportOrdinal: ev.reportOrdinal ?? null,
+          triage: null,
         });
         break;
       }
@@ -238,6 +271,7 @@ export function deriveJob(events) {
           answers: ev.answers ?? null,
           escalated: ev.escalated ?? null,
           tokens: ev.tokens ?? null,
+          triage: ev.triage ?? null,
         });
         const current = job.pipeline[job.phaseIndex];
         if (ev.outcome === 'done' && current?.kind === 'author' && a.phase === current.phase) job.phaseIndex++;
@@ -255,6 +289,57 @@ export function deriveJob(events) {
         job.tasks = [...(job.tasks ?? []), structuredClone(ev.task)];
         job.phaseIndex = perTaskIndex;
         job.visits[perTaskId] = (job.visits[perTaskId] ?? 1) + 1;
+        break;
+      }
+      case 'feedback-given': {
+        if (job.state !== 'needs-you' || job.reason !== 'ready-to-try' || ev.forNeedsYouSeq !== job.needsYouSeq || ev.round !== job.feedbackRound + 1) break;
+        job.feedbackRound = ev.round;
+        job.feedbackRounds.push({
+          round: ev.round,
+          forNeedsYouSeq: ev.forNeedsYouSeq,
+          text: ev.text,
+          triageModel: structuredClone(ev.triageModel ?? null),
+          baseline: structuredClone(ev.baseline ?? {}),
+          pendingChanges: structuredClone(ev.pendingChanges ?? {}),
+          at: ev.at ?? null,
+          route: null,
+          attemptId: null,
+          tasksAppended: false,
+        });
+        setState('running');
+        break;
+      }
+      case 'feedback-routed': {
+        const entry = job.feedbackRounds.find((r) => r.round === ev.round);
+        if (!entry || entry.round !== job.feedbackRound || entry.route !== null) break;
+        const where = roundPhases(job.pipeline);
+        const bump = (index) => {
+          const id = job.pipeline[index].phase;
+          job.visits[id] = (job.visits[id] ?? 1) + 1;
+        };
+        if (ev.route === 'fix' && where.perTask >= 0) {
+          job.tasks = [...(job.tasks ?? []), { ...structuredClone(ev.task), origin: 'feedback', round: ev.round, fromAttemptId: ev.attemptId }];
+          job.phaseIndex = where.perTask;
+          bump(where.perTask);
+        } else if (ev.route === 'subplan' && where.taskWriting >= 0) {
+          job.phaseIndex = where.taskWriting;
+          bump(where.taskWriting);
+          if (where.review >= 0) bump(where.review);
+        } else if (ev.route === 'separate' && where.human >= 0) {
+          setState('needs-you', 'ready-to-try', { phase: job.pipeline[where.human].phase, feedback: { round: ev.round } });
+          job.needsYouSeq = ev.seq ?? null;
+        } else break;
+        entry.route = ev.route;
+        entry.attemptId = ev.attemptId ?? null;
+        break;
+      }
+      case 'tasks-appended': {
+        const entry = job.feedbackRounds.find((r) => r.round === ev.round);
+        const perTask = roundPhases(job.pipeline).perTask;
+        if (!entry || entry.round !== job.feedbackRound || entry.tasksAppended || perTask < 0) break;
+        job.tasks = [...(job.tasks ?? []), ...(ev.tasks ?? []).map((t) => ({ ...structuredClone(t), origin: 'feedback', round: ev.round }))];
+        job.visits[job.pipeline[perTask].phase] = (job.visits[job.pipeline[perTask].phase] ?? 1) + 1;
+        entry.tasksAppended = true;
         break;
       }
       case 'phase-completed': {
