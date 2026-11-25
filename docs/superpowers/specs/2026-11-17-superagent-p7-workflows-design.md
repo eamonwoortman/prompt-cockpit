@@ -214,7 +214,7 @@ Run inside `createJob`'s existing folder preflight (Plan 6, `ERR_DUPLICATE_REPO`
 
 | Check | Error code |
 |---|---|
-| Not a git repo / no commits (existing checks) | `ERR_NOT_GIT_REPO` / `ERR_NO_COMMITS` |
+| ~~Not a git repo / no commits (existing checks)~~ A folder inside a parent repo that has no commits (amended 2026-11-25: a folder in no repo is `git init`ed and a repo top level with no commits gets a first commit of everything in it, before these checks) | ~~`ERR_NOT_GIT_REPO` /~~ `ERR_NO_COMMITS` |
 | HEAD is detached, or a rebase, merge, cherry-pick or bisect is in progress | `ERR_FOLDER_BUSY_GIT` |
 | ~~`git status --porcelain` (untracked included, ignored excluded) is not empty; the error lists up to 10 paths~~ `git status` cannot be read (amended 2026-11-18, see below) | `ERR_FOLDER_DIRTY` |
 | Another job that is not finished (any state other than done, stopped, failed) uses the same repo top level, in place **or as the origin of a worktree** | `ERR_FOLDER_IN_USE` |

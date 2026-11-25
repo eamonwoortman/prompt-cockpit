@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { tempDir, initRepo } from './superagent-helpers.mjs';
-import { slugify, repoIds, checkRepo, repoToplevel, createWorktree, inspectWorktree, archiveLedger, listOrphanWorktrees, defaultGit, createGit, removeAbortedWorktree } from '../src/superagent/worktree.js';
+import { slugify, repoIds, checkRepo, repoToplevel, createWorktree, inspectWorktree, archiveLedger, listOrphanWorktrees, defaultGit, createGit, removeAbortedWorktree, ensureRepo } from '../src/superagent/worktree.js';
 
 const norm = (p) => realpathSync.native(path.resolve(p)).toLowerCase();
 const SETTINGS = '{"permissions":{"allow":["Bash(npm test)"]}}';
@@ -169,7 +169,66 @@ test('checkRepo reports each refusal with its code', async () => {
   assert.equal(norm(ok.toplevel), norm(origin));
 });
 
-const gitOut = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+test('ensureRepo inits a plain folder and commits what is in it, honouring .gitignore', async () => {
+  const root = await tempDir('sa-wt-');
+  const empty = path.join(root, 'empty');
+  await fs.mkdir(empty);
+  assert.deepEqual(await ensureRepo({ folder: empty }), { initialised: true, committed: true });
+  assert.equal(gitOut(empty, 'log', '--format=%s'), 'Initial commit');
+  assert.equal(gitOut(empty, 'ls-files'), '');
+
+  const full = path.join(root, 'full');
+  await fs.mkdir(path.join(full, 'lib'), { recursive: true });
+  await fs.writeFile(path.join(full, 'lib', 'a.txt'), 'a');
+  await fs.writeFile(path.join(full, 'secret.env'), 's');
+  await fs.writeFile(path.join(full, '.gitignore'), '*.env\n');
+  assert.deepEqual(await ensureRepo({ folder: full }), { initialised: true, committed: true });
+  assert.deepEqual(gitOut(full, 'ls-files').split('\n').sort(), ['.gitignore', 'lib/a.txt']);
+  await checkRepo({ origin: full, worktree: path.join(root, 'wt'), branch: 'superagent/full' });
+});
+
+test('ensureRepo commits in a repo with no commits and leaves a repo with commits alone', async () => {
+  const root = await tempDir('sa-wt-');
+  const unborn = path.join(root, 'unborn');
+  await initRepo(unborn, { commit: false });
+  assert.deepEqual(await ensureRepo({ folder: unborn }), { initialised: false, committed: true });
+  assert.equal(gitOut(unborn, 'config', 'user.name'), 'Test', 'the repo identity is used, not the fallback');
+  assert.equal(gitOut(unborn, 'log', '--format=%an'), 'Test');
+
+  const { origin, sha } = await setup();
+  assert.deepEqual(await ensureRepo({ folder: origin }), { initialised: false, committed: false });
+  assert.equal(gitOut(origin, 'rev-parse', 'HEAD'), sha);
+});
+
+test('ensureRepo leaves a folder inside a parent repo with no commits, and a missing folder, alone', async () => {
+  const root = await tempDir('sa-wt-');
+  const parent = path.join(root, 'parent');
+  await initRepo(parent, { commit: false });
+  const inner = path.join(parent, 'inner');
+  await fs.mkdir(inner);
+  assert.deepEqual(await ensureRepo({ folder: inner }), { initialised: false, committed: false });
+  assert.throws(() => gitOut(parent, 'rev-parse', '--verify', '--quiet', 'HEAD'));
+  await assert.rejects(checkRepo({ origin: inner, worktree: path.join(root, 'wt'), branch: 'superagent/i' }), { code: 'ERR_NO_COMMITS' });
+  assert.deepEqual(await ensureRepo({ folder: path.join(root, 'missing') }), { initialised: false, committed: false });
+});
+
+test('ensureRepo fills in only the identity git is missing', async () => {
+  const root = await tempDir('sa-wt-');
+  const folder = path.join(root, 'f');
+  await fs.mkdir(folder);
+  const calls = [];
+  const git = async (args, opts) => {
+    calls.push(args);
+    if (args[0] === 'config' && args[2] === 'user.name') return { code: 0, stdout: 'Me\n', stderr: '' };
+    if (args[0] === 'config' && args[2] === 'user.email') return { code: 1, stdout: '', stderr: '' };
+    return defaultGit(args, opts);
+  };
+  await ensureRepo({ git, folder });
+  const commit = calls.find((a) => a.includes('commit'));
+  assert.deepEqual(commit.slice(0, commit.indexOf('commit')), ['-c', 'user.email=superagent@localhost']);
+});
+
+const gitOut = (cwd, ...args) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const hasBranch = (cwd, branch) => {
   try {
     gitOut(cwd, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`);

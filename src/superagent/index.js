@@ -59,7 +59,7 @@ import { RUNNABLE_KINDS, attemptsFor, buildFixTask, gatedOut, nextAction } from 
 import { legacyPipeline } from './store.js';
 import { createTranscriptIndex } from './transcripts.js';
 import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
-import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, listOrphanWorktrees, removeAbortedWorktree, repoIds, repoToplevel, slugify } from './worktree.js';
+import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, ensureRepo, listOrphanWorktrees, removeAbortedWorktree, repoIds, repoToplevel, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -768,10 +768,15 @@ export function createSuperagent({
   // Every folder is checked before job-created, so a bad or repeated folder
   // never leaves a failed job and a kept worktree behind. Each folder's real
   // top level is reserved as soon as it is known, before its slower checks.
+  // A folder that is not a repo, or a repo with no commits, is made one first
+  // and stays so even when a later check refuses the job.
   async function checkRepos(jobId, repos, { slug, branch }) {
     const seen = new Map();
     const checked = [];
     for (const repo of repos) {
+      const made = await ensureRepo({ git, folder: repo.origin });
+      if (made.initialised) log(`job ${jobId}: ran git init in ${repo.origin}`);
+      if (made.committed) log(`job ${jobId}: made the first commit in ${repo.origin}`);
       const key = normaliseTop(await repoToplevel({ git, origin: repo.origin }), platform);
       if (seen.has(key)) throw fail('ERR_DUPLICATE_REPO', `superagent: ${repo.origin} is the same repository as ${seen.get(key)}`);
       seen.set(key, repo.origin);

@@ -96,6 +96,52 @@ export async function repoToplevel({ git = defaultGit, origin }) {
   return top.stdout.trim();
 }
 
+async function isDirectory(p) {
+  try {
+    return (await stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+const FALLBACK_IDENTITY = { 'user.name': 'Superagent', 'user.email': 'superagent@localhost' };
+
+// Only the identity git is missing, so the user's own name and email win.
+async function identityArgs({ git, cwd }) {
+  const args = [];
+  for (const [key, value] of Object.entries(FALLBACK_IDENTITY)) {
+    const set = await git(['config', '--get', key], { cwd });
+    if (set.code !== 0 || set.stdout.trim() === '') args.push('-c', `${key}=${value}`);
+  }
+  return args;
+}
+
+// Makes a folder a job can start from: `git init` when it is in no repo, and
+// a first commit of everything in it (honouring .gitignore) when it is the top
+// level of a repo with no commits. A folder inside a parent repo with no
+// commits is left alone, since committing would take in the parent's tree.
+export async function ensureRepo({ git = defaultGit, folder }) {
+  const result = { initialised: false, committed: false };
+  if (!(await isDirectory(folder))) return result;
+  let top = await git(['rev-parse', '--show-toplevel'], { cwd: folder });
+  if (top.code !== 0) {
+    const init = await git(['init', '--quiet'], { cwd: folder });
+    if (init.code !== 0) throw new Error(`superagent: git init failed in ${folder}: ${init.stderr.trim()}`);
+    result.initialised = true;
+    top = await git(['rev-parse', '--show-toplevel'], { cwd: folder });
+    if (top.code !== 0) throw new Error(`superagent: ${folder} is still not a git repository after git init: ${top.stderr.trim()}`);
+  }
+  if ((await git(['rev-parse', '--verify', '--quiet', 'HEAD'], { cwd: folder })).code === 0) return result;
+  if (fold(await realpath(top.stdout.trim())) !== fold(await realpath(folder))) return result;
+
+  const add = await git(['add', '--all'], { cwd: folder });
+  if (add.code !== 0) throw new Error(`superagent: git add failed in ${folder}: ${add.stderr.trim()}`);
+  const commit = await git([...(await identityArgs({ git, cwd: folder })), 'commit', '--quiet', '--allow-empty', '-m', 'Initial commit'], { cwd: folder });
+  if (commit.code !== 0) throw new Error(`superagent: the first commit failed in ${folder}: ${commit.stderr.trim()}`);
+  result.committed = true;
+  return result;
+}
+
 async function preflight({ git, origin, worktree, branch }) {
   const toplevel = await repoToplevel({ git, origin });
   const head = await git(['rev-parse', '--verify', 'HEAD'], { cwd: origin });

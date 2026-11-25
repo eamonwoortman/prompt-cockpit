@@ -119,8 +119,6 @@ test('each in-place check refuses and leaves the folder unchanged', async () => 
   try {
     const h = await harness();
     const cases = [
-      ['ERR_NOT_GIT_REPO', async (dir) => { await fs.mkdir(dir); }],
-      ['ERR_NO_COMMITS', async (dir) => { await initRepo(dir, { commit: false }); }],
       ['ERR_FOLDER_BUSY_GIT', async (dir) => { await initRepo(dir); gitIn(dir, 'checkout', '-q', '--detach'); }],
       ['ERR_FOLDER_BUSY_GIT', async (dir) => { await initRepo(dir); await conflictingMerge(dir); }],
       ['ERR_FOLDER_ON_JOB_BRANCH', async (dir) => { await initRepo(dir); gitIn(dir, 'switch', '-q', '-c', 'superagent/x'); }],
@@ -139,6 +137,24 @@ test('each in-place check refuses and leaves the folder unchanged', async () => 
     assert.deepEqual(h.sa.listJobs(), []);
     await noJobDirs(h.jobsRoot);
     assert.equal(existsSync(h.worktreesRoot), false);
+  } finally { registry._reset(); }
+});
+
+test('an in-place plain folder or repo with no commits gets a first commit and runs on the job branch', async () => {
+  try {
+    const h = await harness();
+    const plain = path.join(h.root, 'plain');
+    await fs.mkdir(plain);
+    await fs.writeFile(path.join(plain, 'notes.md'), 'n\n');
+    const unborn = path.join(h.root, 'unborn');
+    await initRepo(unborn, { commit: false });
+    for (const dir of [plain, unborn]) {
+      const job = await create(h, { primaryRepo: dir, inPlace: [dir] });
+      assert.equal(gitIn(dir, '-c', 'core.fsmonitor=false', 'log', '--format=%s'), 'Initial commit');
+      assert.equal(gitIn(dir, 'symbolic-ref', '--short', 'HEAD'), h.store.get(job.jobId).branch);
+      assert.equal(h.store.get(job.jobId).repos[0].pendingChanges, null, 'the folder\'s files are committed, not pending');
+      await h.sa.stopJob(job.jobId);
+    }
   } finally { registry._reset(); }
 });
 

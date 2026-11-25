@@ -1327,15 +1327,38 @@ test('a verified blocker parks the job needs-you with the blocker text and evide
 
 const lineCount = (h, jobId) => readFileSync(path.join(h.jobsRoot, jobId, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).length;
 
+test('createJob makes a plain folder and a repo with no commits into repos with a first commit', async () => {
+  try {
+    const logs = [];
+    const h = await harness({ logImpl: (line) => logs.push(line) });
+    const git = (cwd, ...args) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8' }).trim();
+    const plain = path.join(h.root, 'plain');
+    await fs.mkdir(path.join(plain, 'notes'), { recursive: true });
+    await fs.writeFile(path.join(plain, 'notes', 'a.md'), 'a\n');
+    const unborn = path.join(h.root, 'unborn');
+    await initRepo(unborn, { commit: false });
+    const job = await create(h, { primaryRepo: plain, additionalRepos: [unborn] });
+    assert.equal(git(plain, 'ls-files'), 'notes/a.md');
+    assert.deepEqual(git(unborn, 'ls-files').split('\n').sort(), ['.gitignore', 'README.md']);
+    for (const folder of [plain, unborn]) assert.equal(git(folder, 'log', '--format=%s'), 'Initial commit');
+    const made = h.events(job.jobId).filter((e) => e.type === 'worktree-created');
+    assert.deepEqual(made.map((e) => e.repo), ['primary', 'unborn']);
+    assert.equal(await fs.readFile(path.join(made[0].worktree, 'notes', 'a.md'), 'utf8'), 'a\n');
+    assert.equal(await fs.readFile(path.join(made[1].worktree, 'README.md'), 'utf8'), '# test\n');
+    assert.ok(logs.some((l) => l.includes(`ran git init in ${path.resolve(plain)}`)), logs.join('\n'));
+    assert.ok(!logs.some((l) => l.includes(`ran git init in ${path.resolve(unborn)}`)), 'an existing repo is not re-initialised');
+  } finally { registry._reset(); }
+});
+
 test('createJob refuses a bad folder before the job exists', async () => {
   try {
     const h = await harness();
-    const plain = path.join(h.root, 'plain');
-    await fs.mkdir(plain);
-    await assert.rejects(create(h, { primaryRepo: plain }), (err) => err.code === 'ERR_NOT_GIT_REPO');
     const unborn = path.join(h.root, 'unborn');
     await initRepo(unborn, { commit: false });
-    await assert.rejects(create(h, { additionalRepos: [unborn] }), (err) => err.code === 'ERR_NO_COMMITS');
+    const inner = path.join(unborn, 'inner');
+    await fs.mkdir(inner);
+    await assert.rejects(create(h, { additionalRepos: [inner] }), (err) => err.code === 'ERR_NO_COMMITS');
+    assert.throws(() => execFileSync('git', ['-c', 'core.fsmonitor=false', 'rev-parse', '--verify', '--quiet', 'HEAD'], { cwd: unborn, stdio: 'ignore' }), 'a folder inside a parent repo with no commits gets no commit');
     assert.deepEqual(h.sa.listJobs(), []);
     await noJobDirs(h.jobsRoot);
     assert.equal(existsSync(h.worktreesRoot), false);
