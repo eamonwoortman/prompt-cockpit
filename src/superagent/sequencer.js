@@ -49,11 +49,14 @@ export const retriedAway = (a) => a.retried === true;
 // A feedback round re-enters the task-writing, plan review, test and human
 // phases: their scopes read only the round's attempts. Per-task scopes stay
 // per task id.
-const inRound = (job, phase, round) => (isRoundScoped(job, phase) ? (a) => roundOf(a) === round : () => true);
+// attemptsFor and attemptContext share it so a reconcile sees the live scope.
+function inScope(job, phase, task, round) {
+  const scoped = isRoundScoped(job, phase);
+  return (a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a) && !retriedAway(a) && (!scoped || roundOf(a) === round);
+}
 
 export function attemptsFor(job, phase, task = null, round = currentRound(job)) {
-  const ofRound = inRound(job, phase, round);
-  return job.attempts.filter((a) => a.phase === phase && (a.task ?? null) === task && !gatedOut(a) && !retriedAway(a) && ofRound(a));
+  return job.attempts.filter(inScope(job, phase, task, round));
 }
 
 // The scope's latest Retry that no attempt has started from yet, in the
@@ -624,17 +627,15 @@ function brainstormAction(job, phase, ctx) {
 // The launch action's attempt context, rebuilt from the derived job for an
 // attempt that has no live record (reconcile), so its result is validated by
 // the same rules as a live finish. Only attempts before it in its scope count,
-// as when the sequencer created the launch, and only those of the attempt's own
-// feedback round in a round-scoped phase.
+// as when the sequencer created the launch: attemptsFor's scope (no gated or
+// retried-away attempts) in the attempt's own feedback round.
 export function attemptContext(job, attempt) {
   const purpose = attempt.purpose ?? 'author';
   const task = attempt.task ?? null;
   const round = attempt.round ?? null;
   const feedbackRound = roundOf(attempt);
-  const ofRound = inRound(job, attempt.phase, feedbackRound);
   const at = job.attempts.findIndex((a) => a.attemptId === attempt.attemptId);
-  const before = (at < 0 ? job.attempts : job.attempts.slice(0, at))
-    .filter((a) => a.phase === attempt.phase && (a.task ?? null) === task && ofRound(a));
+  const before = (at < 0 ? job.attempts : job.attempts.slice(0, at)).filter(inScope(job, attempt.phase, task, feedbackRound));
   const done = before.filter((a) => a.outcome === 'done');
   const phase = job.pipeline.find((p) => p.phase === attempt.phase);
 

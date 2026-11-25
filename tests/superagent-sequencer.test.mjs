@@ -1381,6 +1381,21 @@ test('reconciled round verifier keeps its contested ids', () => {
   assert.deepEqual(pick(contextOf(tester, 'tst2'), 'feedbackRound', 'reportOrdinal'), { feedbackRound: 1, reportOrdinal: 2 });
 });
 
+test('reconciled round verifier after a reopen Retry ignores the retried-away review', () => {
+  const B = (id) => F(id, 'blocker');
+  const loop = [rev(1, 'changes', [B('b1')]), fix(1, { b1: 'open' }), rev(2, 'changes', [B('b1')]), fix(2, { b1: 'open' }), rev(3, 'changes', [B('b1'), B('b2')]), fix(3, { b1: 'declined: no', b2: 'fixed' }, true)];
+  const reopened = [...round0, given(1), ...triaged(1, 'subplan'), routedTo(1, 'subplan'), ...fa({ id: 'p1', phase: 'plan', purpose: 'feedback-plan', fr: 1 }),
+    ...fa({ id: 'r1', phase: 'plan-review', purpose: 'review', round: 1, verdict: 'approve', findings: [], fr: 1 }), ev.phaseCompleted('plan-review', 2),
+    { type: 'needs-you', reason: 'stuck', detail: { phase: 'implement', task: null, why: 'tasks-invalid', errors: ['dup id T1'], round: 1 } },
+    { type: 'job-retried', needsYouSeq: null, phase: 'plan', task: null, feedbackRound: 1, reopen: true, errors: ['dup id T1'], fromAttemptId: 'p1', handoff: null, note: null },
+    ...fa({ id: 'p1b', phase: 'plan', purpose: 'feedback-plan', fr: 1 }),
+    ...loop.flatMap((spec, k) => fa({ id: `m${k}`, phase: 'plan-review', fr: 1, ...spec }))];
+  const launched = nextAction(fj(...reopened), ctx());
+  assert.deepEqual(pick(launched, 'purpose', 'contested'), { purpose: 'verify', contested: ['b1'] });
+  const job = fj(...reopened, ...fa({ id: 'v1', phase: 'plan-review', purpose: 'verify', fr: 1, outcome: null }));
+  assert.deepEqual(contextOf(job, 'v1').contested, launched.contested);
+});
+
 test('question cap counts the round only', () => {
   const asks = [1, 2, 3].flatMap((k) => [...fa({ id: `q0-${k}`, phase: 'plan', purpose: 'author', outcome: 'question', question: `Q${k}?` }), ...answered(`q0-${k}`)]);
   const base = round0.filter((e) => e.attemptId !== 'p0');
