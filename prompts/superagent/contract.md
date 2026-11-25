@@ -61,7 +61,7 @@ A `blocked` result needs none of these purpose fields; publish your question ins
 
 ## Feedback
 
-`feedback` on your card lists the rounds of feedback the user gave after trying the job, oldest first: each with its `text`, its `triage` file (the brief for that round's work) and its `requirementChanges`. Where the job card lists feedback, each round's requirementChanges amend the requirements in round order; a later round wins. A requirement a round dropped or changed is superseded: never fail the job on it, and never route or make a fix that undoes the change. Anything no round lists still stands as written.
+`feedback` on your card lists the rounds of feedback the user gave after trying the job, oldest first: each with its `text`, its `triage` file (the brief for that round's work) and its `requirementChanges`. Where the job card lists feedback, each round's requirementChanges amend the requirements in round order; a later round wins. A requirement a round dropped or changed is superseded: never fail the job on it, and never route or make a fix that undoes the change. Anything no round lists still stands as written. `requirements` on your card, when present, names the original requirement artifacts that `inputs` does not (for example where `inputs` names this round's own diagnosis): those originals, amended by `feedback`, are what you work and judge against.
 
 Each round's `pendingChanges` (per repo id, `paths`, at most 200 of `total`) are the user's own edits made while trying the job. Leave them untouched and unstaged: never stage, commit, edit, revert or delete them, as for `pendingChanges` on a repo.
 

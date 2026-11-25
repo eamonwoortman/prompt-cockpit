@@ -134,15 +134,16 @@ function triageFields(job, shape, feedbackRound) {
 // the job's requirement artifacts, plan, tasks and test report; the round's
 // planner also reads the requirement artifacts; once a sub-plan is routed, its
 // plan review and implementers read the round's files in place of the
-// task-writing outputs; every routed round adds its triage.md.
+// task-writing outputs; every routed round adds its triage.md. Returns the
+// inputs and, apart, any original requirement artifact they do not name.
 function cardInputs(job, phase, attempt) {
   const paths = artifactPaths(job);
   const resolve = (keys) => Object.fromEntries([...new Set(keys)].filter((k) => k in paths).map((k) => [k, paths[k]]));
   const own = (phase?.inputs ?? []).filter((k) => k !== 'idea');
   const feedbackRound = roundOf(attempt);
   const shape = feedbackRound > 0 ? feedbackShape(job) : null;
-  if (!shape) return resolve(own);
-  if (attempt.purpose === 'triage') return resolve([...shape.requirementKeys, ...(shape.taskWriting.outputs ?? []), ...(shape.test.outputs ?? [])]);
+  if (!shape) return { inputs: resolve(own) };
+  if (attempt.purpose === 'triage') return { inputs: resolve([...shape.requirementKeys, ...(shape.taskWriting.outputs ?? []), ...(shape.test.outputs ?? [])]) };
   const inputs = resolve(phase?.phase === shape.taskWriting.phase ? [...own, ...shape.requirementKeys] : own);
   const entry = roundEntry(job, feedbackRound);
   if (entry?.route === 'subplan' && (phase?.phase === shape.planReview?.phase || phase?.phase === shape.perTask.phase)) {
@@ -150,7 +151,10 @@ function cardInputs(job, phase, attempt) {
     for (const key of Object.keys(inputs)) if (key in round) inputs[key] = round[key];
   }
   if (entry?.route != null && !('triage' in inputs)) inputs.triage = roundTriagePath(job, feedbackRound);
-  return inputs;
+  // Every role judges against the original requirement artifacts amended by
+  // feedback: one that inputs lack, or name by a round file, goes here.
+  const requirements = resolve(shape.requirementKeys.filter((k) => inputs[k] !== paths[k]));
+  return { inputs, ...(Object.keys(requirements).length > 0 ? { requirements } : {}) };
 }
 
 function purposeFields(job, phase, attempt) {
@@ -249,7 +253,7 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
 
   const paths = artifactPaths(job);
   const resolve = (keys) => Object.fromEntries(keys.filter((k) => k in paths).map((k) => [k, paths[k]]));
-  const inputs = cardInputs(job, phase, attempt);
+  const { inputs, requirements } = cardInputs(job, phase, attempt);
   const outputs = resolve(phase?.outputs ?? []);
   const feedbackRound = roundOf(attempt);
   const previous = attempt.previousAttemptId ? job.attempts.find((a) => a.attemptId === attempt.previousAttemptId) : null;
@@ -270,6 +274,7 @@ export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir 
       ...(r.inPlace === true && r.pendingChanges && { pendingChanges: r.pendingChanges }),
     })),
     inputs,
+    ...(requirements ? { requirements } : {}),
     outputs,
     ...(job.artifactRoot === 'ledger' ? { artifactRoot: ledgerArtifactRoot(job.jobId) } : { artifactsCommitted: true }),
     commitTests: job.commitTests,

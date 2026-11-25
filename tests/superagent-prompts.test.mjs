@@ -911,3 +911,37 @@ test('every role prompt states feedback precedence', async () => {
     assert.ok((await fs.readFile(path.join(templatesDir(), `${role}.md`), 'utf8')).includes(line), `${role}.md`);
   }
 });
+
+test('Troubleshooting round cards carry the original diagnosis under requirements', async () => {
+  const TS = JSON.parse(await fs.readFile(new URL('../workflows/troubleshooting.json', import.meta.url), 'utf8'));
+  const over = { pipeline: TS.phases, workflow: { id: 'troubleshooting' }, artifacts: TS.artifacts };
+  const { job, card } = await featureRounds([READY, given(1), ...triaged('tri1', 1, 'subplan'), routed('tri1', 1, 'subplan')], over);
+  const paths = artifactPaths(job);
+  const round = roundOutputPaths(job, 1, ['diagnosis', 'tasks']);
+  const triage = roundTriagePath(job, 1);
+
+  const review = await card('diagnosis-reviewer', 'diagnosis-review', { purpose: 'review', round: 1, feedbackRound: 1 });
+  assert.equal(review.target, round.diagnosis);
+  assert.deepEqual(review.inputs, { tasks: round.tasks, triage });
+  assert.deepEqual(review.requirements, { diagnosis: paths.diagnosis });
+  const fix = await card('investigator', 'diagnosis-review', { purpose: 'fix', round: 1, feedbackRound: 1, reviewFindings: REVIEW_FINDINGS });
+  assert.deepEqual(fix.requirements, { diagnosis: paths.diagnosis });
+
+  const T9 = { ...TASK_DEF, id: 'T9' };
+  const fixer = await card('fixer', 'fix', { purpose: 'implement', task: 'T9', taskDef: T9, feedbackRound: 1 });
+  assert.deepEqual(fixer.inputs, { diagnosis: round.diagnosis, tasks: round.tasks, triage });
+  assert.deepEqual(fixer.requirements, { diagnosis: paths.diagnosis });
+  const fixReviewer = await card('fix-reviewer', 'fix', { purpose: 'task-review', round: 1, task: 'T9', taskDef: T9, feedbackRound: 1 });
+  assert.deepEqual(fixReviewer.requirements, { diagnosis: paths.diagnosis });
+
+  // Cards whose inputs already name the original need no requirements.
+  const investigator = await card('investigator', 'investigate', { purpose: 'feedback-plan', feedbackRound: 1 });
+  assert.deepEqual(investigator.inputs, { diagnosis: paths.diagnosis, triage });
+  assert.ok(!('requirements' in investigator));
+  const tester = await card('verifier-tester', 'verify', { purpose: 'test', feedbackRound: 1, reportOrdinal: 1 });
+  assert.equal(tester.inputs.diagnosis, paths.diagnosis);
+  assert.ok(!('requirements' in tester));
+  const round0 = await (await featureRounds([], over)).card('diagnosis-reviewer', 'diagnosis-review', { purpose: 'review', round: 1 });
+  assert.ok(!('requirements' in round0), 'a round 0 card is unchanged');
+  assert.ok((await fs.readFile(path.join(templatesDir(), 'contract.md'), 'utf8')).includes('`requirements` on your card'));
+});
