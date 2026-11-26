@@ -59,7 +59,7 @@ import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, attemptsFor, buildFixTask, gatedOut, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
 import { createTranscriptIndex } from './transcripts.js';
-import { CONFIG_PIPELINE_ID, loadWorkflows, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
+import { CONFIG_PIPELINE_ID, ROLE_NAME, loadWorkflows, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
 import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, ensureRepo, listOrphanWorktrees, removeAbortedWorktree, repoIds, repoToplevel, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
@@ -778,6 +778,60 @@ export function createSuperagent({
     return loadWorkflows({ builtinDir: workflowDirs.builtin, globalDir: workflowDirs.global, userDir: folder.dir, userError: folder.error, projectDir: origin, fileConfig, projectPath: origin, platform });
   }
 
+  async function settings() {
+    const r = config.userFolder();
+    const folder = r.error ? { dir: null, error: r } : { dir: r.resolved, error: null };
+    let exists = false;
+    if (r.resolved) {
+      try {
+        exists = (await stat(r.resolved)).isDirectory();
+      } catch {
+        exists = false;
+      }
+    }
+    const { workflows } = await loadWorkflowList(null, config.raw(), folder);
+    const userWorkflows = workflows.filter((w) => w.source === 'user').map(({ doc, source, ...entry }) => entry);
+    let prompts = [];
+    let note = null;
+    if (folder.dir) {
+      try {
+        const entries = await readdir(path.join(folder.dir, 'prompts'), { withFileTypes: true });
+        prompts = entries
+          .filter((e) => e.isFile() && e.name.endsWith('.md'))
+          .map((e) => {
+            const role = e.name.slice(0, -3);
+            return { file: e.name, role, used: role !== 'contract' && ROLE_NAME.test(role) };
+          })
+          .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+      } catch (err) {
+        if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') note = `the prompts folder could not be read: ${err.message}`;
+      }
+    }
+    return {
+      userFolder: { configured: r.configured, default: r.default, resolved: r.resolved, error: r.error, exists },
+      workflows: userWorkflows,
+      prompts,
+      note,
+    };
+  }
+
+  async function setUserFolder(value) {
+    const checked = config.checkUserFolder(value);
+    if (checked.error) throw fail('ERR_INVALID_REQUEST', checked.error);
+    let current = checked.resolved;
+    try {
+      await mkdir(current, { recursive: true });
+      for (const sub of ['workflows', 'prompts']) {
+        current = path.join(checked.resolved, sub);
+        await mkdir(current, { recursive: true });
+      }
+    } catch (err) {
+      throw fail('ERR_INVALID_FOLDER', `could not create ${current}: ${err.message}`);
+    }
+    await config.setUserFolder(value);
+    return settings();
+  }
+
   async function listWorkflows(primaryPath) {
     const { workflows, default: preselected, defaultNote } = await loadWorkflowList(primaryPath == null ? null : path.resolve(primaryPath), config.raw(), userFolderSnapshot());
     return { workflows: workflows.map(({ doc, ...entry }) => entry), default: preselected, defaultNote };
@@ -1317,5 +1371,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, accept, giveFeedback, answerQuestion, retryJob, renameJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, settings, setUserFolder, accept, giveFeedback, answerQuestion, retryJob, renameJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
 }
