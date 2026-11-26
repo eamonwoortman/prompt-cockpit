@@ -28,7 +28,7 @@ const BAD_REQUEST = new Set([
   'ERR_INVALID_CONFIG', 'ERR_NO_TEMPLATE', 'ERR_PATH_TOO_LONG', 'ERR_PHASE_KIND_UNSUPPORTED', 'ERR_MODE_UNSUPPORTED',
   'ERR_UNKNOWN_WORKFLOW', 'ERR_INVALID_WORKFLOW', 'ERR_INVALID_REQUEST', 'ERR_INVALID_BRANCH',
   'ERR_FOLDER_DIRTY', 'ERR_FOLDER_BUSY_GIT', 'ERR_FOLDER_ON_JOB_BRANCH', 'ERR_FOLDER_CHANGED',
-  'ERR_FEEDBACK_UNSUPPORTED',
+  'ERR_FEEDBACK_UNSUPPORTED', 'ERR_INVALID_FOLDER',
 ]);
 
 function statusFor(err) {
@@ -252,6 +252,27 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
         default: listing.default,
         defaultNote: listing.defaultNote ?? null,
       });
+    } catch (err) {
+      return respondError(res, err);
+    }
+  });
+
+  router.get('/api/superagent/settings', async (req, res) => {
+    try {
+      return respondJson(res, 200, await host.admit((supervisor) => supervisor.settings()));
+    } catch (err) {
+      return respondError(res, err);
+    }
+  });
+
+  router.post('/api/superagent/settings', async (req, res) => {
+    const body = await readJsonBody(req);
+    const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
+    if (keys.length !== 1 || keys[0] !== 'userFolder' || (body.userFolder !== null && typeof body.userFolder !== 'string')) {
+      return respondJson(res, 400, { error: 'userFolder must be a path or null', code: 'ERR_INVALID_REQUEST' });
+    }
+    try {
+      return respondJson(res, 200, await host.admit((supervisor) => supervisor.setUserFolder(body.userFolder)));
     } catch (err) {
       return respondError(res, err);
     }
