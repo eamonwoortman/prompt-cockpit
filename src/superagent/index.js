@@ -768,12 +768,18 @@ export function createSuperagent({
     unintercept = null;
   }
 
-  function loadWorkflowList(origin, fileConfig) {
-    return loadWorkflows({ builtinDir: workflowDirs.builtin, globalDir: workflowDirs.global, projectDir: origin, fileConfig, projectPath: origin, platform });
+  // Read once per call: an invalid stored value gives no folder and a user-source error entry.
+  function userFolderSnapshot() {
+    const r = config.userFolder();
+    return r.error ? { dir: null, error: r } : { dir: r.resolved, error: null };
+  }
+
+  function loadWorkflowList(origin, fileConfig, folder) {
+    return loadWorkflows({ builtinDir: workflowDirs.builtin, globalDir: workflowDirs.global, userDir: folder.dir, userError: folder.error, projectDir: origin, fileConfig, projectPath: origin, platform });
   }
 
   async function listWorkflows(primaryPath) {
-    const { workflows, default: preselected, defaultNote } = await loadWorkflowList(primaryPath == null ? null : path.resolve(primaryPath), config.raw());
+    const { workflows, default: preselected, defaultNote } = await loadWorkflowList(primaryPath == null ? null : path.resolve(primaryPath), config.raw(), userFolderSnapshot());
     return { workflows: workflows.map(({ doc, ...entry }) => entry), default: preselected, defaultNote };
   }
 
@@ -789,9 +795,9 @@ export function createSuperagent({
   // Validation already ran in the loader (config-pipeline's with composition on),
   // so a declared prompt exists or a project override covers it. It is recorded
   // either way, so removing that override later can never reach the built-in.
-  async function workflowPlan(id, origin) {
+  async function workflowPlan(id, origin, folder) {
     const fileConfig = config.raw();
-    const { workflows, default: preselected } = await loadWorkflowList(origin, fileConfig);
+    const { workflows, default: preselected } = await loadWorkflowList(origin, fileConfig, folder);
     const wanted = id ?? preselected;
     const entry = workflows.find((w) => sameWorkflowId(w.id, wanted));
     if (!entry) throw fail('ERR_UNKNOWN_WORKFLOW', `superagent: unknown workflow ${JSON.stringify(wanted)}`);
@@ -813,15 +819,15 @@ export function createSuperagent({
   }
 
   // Decision 11: a project override template (under projectDir) counts.
-  async function resolvePipeline(resolved, { fixture, workflow }, projectDir) {
-    const plan = fixture != null ? fixturePlan(resolved, fixture) : await workflowPlan(workflow, projectDir);
+  async function resolvePipeline(resolved, { fixture, workflow }, projectDir, folder) {
+    const plan = fixture != null ? fixturePlan(resolved, fixture) : await workflowPlan(workflow, projectDir, folder);
     const unsupported = plan.pipeline.filter((p) => !RUNNABLE_KINDS.has(p.kind));
     if (unsupported.length > 0) {
       throw fail('ERR_PHASE_KIND_UNSUPPORTED', `superagent: phase kinds not runnable yet: ${unsupported.map((p) => `${p.phase} (${p.kind})`).join(', ')}`);
     }
     const missing = [];
     for (const role of pipelineRoles(plan.pipeline)) {
-      if (!(await hasTemplate(role, { projectDir, recordedPrompt: plan.recorded?.prompts[role] ?? null }))) missing.push(role);
+      if (!(await hasTemplate(role, { projectDir, recordedPrompt: plan.recorded?.prompts[role] ?? null, userFolder: folder.dir }))) missing.push(role);
     }
     if (missing.length > 0) {
       throw fail('ERR_NO_TEMPLATE', `superagent: no prompt template for role${missing.length > 1 ? 's' : ''} ${missing.join(', ')}`, { roles: missing });
@@ -985,7 +991,8 @@ export function createSuperagent({
   async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null, workflow = null, inPlace = [], commitTests }) {
     const origin = path.resolve(primaryPath);
     const resolved = config.resolve(origin);
-    const { pipeline, models, recorded } = await resolvePipeline(resolved, { fixture, workflow }, origin);
+    const folder = userFolderSnapshot();
+    const { pipeline, models, recorded } = await resolvePipeline(resolved, { fixture, workflow }, origin, folder);
     if (mode === 'manual' && pipeline.some((p) => p.kind === 'brainstorm')) throw fail('ERR_MODE_UNSUPPORTED', 'superagent: manual mode is not built yet');
     const jobId = idImpl();
     const folders = repoIds(origin, [...resolved.additionalRepos, ...additionalRepos].map((p) => path.resolve(p)));
@@ -995,14 +1002,14 @@ export function createSuperagent({
     const marked = folders.map((repo) => ({ ...repo, inPlace: inPlaceSet.has(repo.origin) }));
     reserve(jobId, marked.map((repo) => ({ key: normaliseTop(repo.origin, platform), folder: repo.origin, inPlace: repo.inPlace })));
     try {
-      return await admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests });
+      return await admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests, userFolder: folder.dir });
     } finally {
       if (store.get(jobId)) releaseIfFinished(jobId);
       else release(jobId);
     }
   }
 
-  async function admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests }) {
+  async function admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests, userFolder }) {
     const checked = await checkRepos(jobId, marked, { slug, branch });
     const repos = marked.map(({ inPlace, ...repo }, i) => ({
       ...repo,
@@ -1023,6 +1030,7 @@ export function createSuperagent({
       repos,
       pipeline,
       artifactRoot: 'ledger',
+      userFolder,
       ...(recorded && { workflow: recorded.workflow, artifacts: substituteArtifacts(recorded.artifacts, { slug, date: createdDate }), prompts: recorded.prompts }),
       models,
       limits: resolved.limits,
