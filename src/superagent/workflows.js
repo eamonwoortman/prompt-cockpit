@@ -62,13 +62,13 @@ async function exists(file, fsImpl) {
     await fsImpl.readFile(file, 'utf8');
     return true;
   } catch (err) {
-    if (err.code === 'ENOENT') return false;
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return false;
     throw err;
   }
 }
 
 // A declared workflow prompt that is missing resolves to null, never to the built-in.
-export async function resolvePromptPath(role, { projectDir = null, workflowFile = null, promptField = null, builtinDir = templatesDir(), fsImpl = fs } = {}) {
+export async function resolvePromptPath(role, { projectDir = null, workflowFile = null, promptField = null, userPromptsDir = null, builtinDir = templatesDir(), fsImpl = fs } = {}) {
   if (typeof role !== 'string' || !ROLE_NAME.test(role) || role === CONTRACT_ROLE) return null;
   const file = `${role}.md`;
   if (projectDir) {
@@ -78,6 +78,10 @@ export async function resolvePromptPath(role, { projectDir = null, workflowFile 
   if (workflowFile && isNonEmptyString(promptField)) {
     const declared = path.resolve(path.dirname(workflowFile), promptField);
     return (await exists(declared, fsImpl)) ? { source: 'workflow', path: declared } : null;
+  }
+  if (userPromptsDir) {
+    const user = path.join(userPromptsDir, file);
+    if (await exists(user, fsImpl)) return { source: 'user', path: user };
   }
   const builtin = path.join(builtinDir, file);
   return (await exists(builtin, fsImpl)) ? { source: 'built-in', path: builtin } : null;
@@ -195,7 +199,7 @@ function checkPhases(phases, artifactKeys, errors, roles, promptFor) {
       path: `${keyPath('roles', role)}.prompt`,
       message: declared
         ? `role "${role}" has no prompt: "${declared}" was not found next to the workflow file`
-        : `role "${role}" has no prompt: no project override and no built-in template of that name`,
+        : `role "${role}" has no prompt: no project override, no prompt in your workflows folder and no built-in template of that name`,
     });
   }
 }
@@ -257,7 +261,7 @@ async function readSource(source, dir, fsImpl) {
   return out;
 }
 
-async function evaluate(raw, { projectDir, fileConfig, projectPath, fsImpl, platform }) {
+async function evaluate(raw, { projectDir, userPromptsDir, fileConfig, projectPath, fsImpl, platform }) {
   const { doc } = raw;
   if (raw.readError) return [{ path: '', message: raw.readError }];
   if (!isPlainObject(doc)) return validateWorkflow(doc, {}).errors;
@@ -268,7 +272,7 @@ async function evaluate(raw, { projectDir, fileConfig, projectPath, fsImpl, plat
   for (const role of new Set([...rolesUsed(Array.isArray(doc.phases) ? doc.phases : []), ...Object.keys(roles)])) {
     const promptField = isPlainObject(roles[role]) ? roles[role].prompt : null;
     try {
-      promptFor[role] = (await resolvePromptPath(role, { projectDir, workflowFile: raw.file, promptField, fsImpl }))?.path ?? null;
+      promptFor[role] = (await resolvePromptPath(role, { projectDir, workflowFile: raw.file, promptField, userPromptsDir, fsImpl }))?.path ?? null;
     } catch (err) {
       promptFor[role] = null;
       readErrors.push({ path: `${keyPath('roles', role)}.prompt`, message: `the prompt for "${role}" could not be read: ${err.message}` });
@@ -323,6 +327,8 @@ function configuredDefault(fileConfig, projectPath) {
 export async function loadWorkflows({
   builtinDir = workflowsDir(),
   globalDir = path.join(defaultSuperagentRoot(), 'workflows'),
+  userDir = null,
+  userError = null,
   projectDir = null,
   fileConfig = {},
   projectPath = projectDir,
@@ -332,12 +338,17 @@ export async function loadWorkflows({
   const sources = [
     ['built-in', builtinDir],
     ['global', globalDir],
+    ['user', userDir && path.join(userDir, 'workflows')],
     ['project', projectDir && path.join(projectDir, '.superpowers', 'superagent', 'workflows')],
   ];
-  const ctx = { projectDir, fileConfig, projectPath, fsImpl, platform };
+  const userPromptsDir = userDir && !userError ? path.join(userDir, 'prompts') : null;
+  const ctx = { projectDir, userPromptsDir, fileConfig, projectPath, fsImpl, platform };
   const all = [];
   for (const [source, dir] of sources) {
-    for (const raw of await readSource(source, dir, fsImpl)) all.push(entryFor(raw, await evaluate(raw, ctx)));
+    const raws = source === 'user' && userError
+      ? [{ source, file: null, name: typeof userError.configured === 'string' ? userError.configured : JSON.stringify(userError.configured), doc: null, readError: `the workflows folder setting is invalid: ${userError.error}` }]
+      : await readSource(source, dir, fsImpl);
+    for (const raw of raws) all.push(entryFor(raw, await evaluate(raw, ctx)));
   }
 
   const winner = new Map();
