@@ -19,6 +19,7 @@ import { ARTIFACT_STATE, artifactErrorText, artifactFileName, artifactMimeType, 
 import { createHandoff } from '/superagent-handoff.js';
 import { readyInputLabel, statusLabel, workflowLabel } from '/superagent-format.js';
 import { initPaneResizers } from '/superagent-panes.js';
+import { settingsSummary } from '/superagent-settings.js';
 
 const POLL_MS = 5_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -156,6 +157,8 @@ export function initSuperagentView() {
     }
   }));
   newJobBtn.title = 'Create a new superagent job';
+  const settingsBtn = left.appendChild(button('Settings', '', () => openSettings()));
+  settingsBtn.title = 'Where Superagent looks for your own workflows and prompts';
 
   const form = left.appendChild(el('form', 'sa-form'));
   form.hidden = true;
@@ -473,6 +476,78 @@ export function initSuperagentView() {
       renameSave.disabled = false;
     }
   });
+
+  // --- Settings (the user folder for workflows and prompts) ---
+
+  const settingsModal = document.getElementById('superagentSettingsModal');
+  const settingsFolder = document.getElementById('superagentSettingsFolder');
+  const settingsBody = document.getElementById('superagentSettingsBody');
+  const settingsError = document.getElementById('superagentSettingsError');
+  const settingsSave = document.getElementById('superagentSettingsSave');
+  const settingsReset = document.getElementById('superagentSettingsReset');
+  document.getElementById('superagentSettingsClose').addEventListener('click', () => settingsModal.close());
+
+  function renderSettings(summary) {
+    settingsFolder.value = summary.field;
+    settingsFolder.placeholder = summary.defaultPath ? `Default: ${summary.defaultPath}` : 'Default folder';
+    settingsReset.disabled = summary.isDefault;
+    settingsBody.textContent = '';
+    if (summary.resolved) settingsBody.append(el('div', 'sa-note', `Resolved path: ${summary.resolved}`));
+    settingsBody.append(el('div', summary.status === 'ok' ? 'sa-note' : 'sa-error', summary.statusText));
+    const section = (title, rows, emptyText) => {
+      settingsBody.append(el('h3', 'sa-heading', title));
+      if (!rows.length) return settingsBody.append(el('div', 'sa-note', emptyText));
+      const list = settingsBody.appendChild(el('ul', 'sa-list sa-note'));
+      for (const r of rows) list.append(el('li', null, `${r.label}${r.ok ? '' : ' (not used)'} - ${r.detail}`));
+    };
+    section('Workflows found', summary.workflows.map((w) => ({ label: w.label, ok: w.valid, detail: w.detail || 'valid' })), 'None found.');
+    section('Prompts found', summary.prompts.map((p) => ({ label: p.label, ok: p.used, detail: p.detail })), 'None found.');
+    if (summary.note) settingsBody.append(el('div', 'sa-error', summary.note));
+  }
+
+  async function loadSettings() {
+    renderSettings(settingsSummary(await getJson('/api/superagent/settings')));
+  }
+
+  async function openSettings() {
+    showError(settingsError, null);
+    settingsBody.textContent = 'Loading…';
+    settingsSave.disabled = true;
+    settingsReset.disabled = true;
+    settingsModal.showModal();
+    try {
+      await loadSettings();
+    } catch (err) {
+      settingsBody.textContent = '';
+      showError(settingsError, err);
+    } finally {
+      settingsSave.disabled = false;
+    }
+  }
+
+  async function saveSettings(userFolder) {
+    showError(settingsError, null);
+    settingsSave.disabled = true;
+    settingsReset.disabled = true;
+    try {
+      renderSettings(settingsSummary(await postJson('/api/superagent/settings', { userFolder })));
+      // The New job picker lists the user folder's workflows: refetch now when
+      // the form is open with a primary folder, else on its next open.
+      workflowFor = null;
+      if (!form.hidden && primaryInput.value.trim()) loadWorkflows();
+    } catch (err) {
+      showError(settingsError, err);
+      settingsReset.disabled = false;
+    } finally {
+      settingsSave.disabled = false;
+    }
+  }
+
+  document.getElementById('superagentSettingsForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    saveSettings(settingsFolder.value.trim() || null);
+  });
+  settingsReset.addEventListener('click', () => saveSettings(null));
 
   // One handoff per job, kept across polls and job switches, so a
   // retrospective whose tab did not open is reopened, never created twice.

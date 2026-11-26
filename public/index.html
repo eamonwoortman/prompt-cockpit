@@ -252,7 +252,27 @@
     </div>
   </dialog>
 
-  <dialog id="superagentRenameModal" class="modal" aria-labelledby="superagentRenameTitle">
+  <dialog id="superagentSettingsModal" class="modal" aria-labelledby="superagentSettingsTitle">
+    <form class="modal-box" id="superagentSettingsForm">
+      <header class="modal-header"><strong id="superagentSettingsTitle">Superagent settings</strong></header>
+      <div class="modal-body sa-form">
+        <label class="sa-field">
+          <span class="sa-field-label">Workflows and prompts folder</span>
+          <input type="text" id="superagentSettingsFolder" placeholder="Default folder" autocomplete="off">
+        </label>
+        <div class="sa-note">Leave empty for the default. Workflows go in <code>workflows/</code> and role prompts in <code>prompts/</code> inside it. Jobs already created keep the folder they started with.</div>
+        <div id="superagentSettingsBody"></div>
+        <div id="superagentSettingsError" class="sa-error" hidden></div>
+      </div>
+      <footer>
+        <button type="button" id="superagentSettingsReset" class="btn" title="Go back to the default folder">Use default</button>
+        <button type="button" id="superagentSettingsClose" class="btn" title="Close without saving">Close</button>
+        <button type="submit" id="superagentSettingsSave" class="btn btn-primary" title="Save the folder">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="superagentRenameModal"class="modal" aria-labelledby="superagentRenameTitle">
     <form class="modal-box" id="superagentRenameForm">
       <header class="modal-header"><strong id="superagentRenameTitle">Rename job</strong></header>
       <div class="modal-body sa-form">
