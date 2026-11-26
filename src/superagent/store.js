@@ -74,6 +74,7 @@ export function deriveJob(events) {
     workflow: legacy ? null : structuredClone(first.workflow),
     artifactRoot: first.artifactRoot === 'ledger' ? 'ledger' : null,
     artifacts: resolveArtifacts(first, legacy),
+    userFolder: first.userFolder ?? null,
     prompts: structuredClone(first.prompts ?? {}),
     pipeline: legacy ? legacyPipeline(pipeline) : pipeline,
     models: structuredClone(first.models ?? {}),
