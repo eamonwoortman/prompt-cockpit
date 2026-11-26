@@ -7,7 +7,7 @@
 // settings files - this module only touches its own config.json).
 import os from 'node:os';
 import path from 'node:path';
-import { readJsonChecked, writeJsonAtomic } from '../json-store.js';
+import { readJsonChecked, updateJson, writeJsonAtomic } from '../json-store.js';
 import { costForUsage } from '../usage.js';
 import { CLAUDE_EFFORTS } from '../provider-registry.js';
 
@@ -42,6 +42,38 @@ export const MILESTONE_2_PIPELINE = Object.freeze([
 ]);
 
 export const FIXTURES = Object.freeze({ 'milestone-1': MILESTONE_1_PIPELINE, 'milestone-2': MILESTONE_2_PIPELINE });
+
+export const USER_FOLDER_MAX_CHARS = 1000;
+
+const defaultHome = () => process.env.COCKPIT_HOME || os.homedir();
+
+export function defaultUserFolder(home = defaultHome()) {
+  return path.join(home, 'prompt-cockpit');
+}
+
+export function resolveUserFolder(value, { home = defaultHome(), platform = process.platform } = {}) {
+  const win = platform === 'win32';
+  const p = win ? path.win32 : path.posix;
+  const base = { configured: value ?? null, resolved: null, error: null, default: defaultUserFolder(home) };
+  if (value === undefined || value === null) return { ...base, resolved: base.default };
+  const fail = (error) => ({ ...base, configured: value, error });
+  if (typeof value !== 'string' || value.trim() === '') return fail('userFolder must be a non-empty path');
+  const trimmed = value.trim();
+  if (trimmed.length > USER_FOLDER_MAX_CHARS) return fail(`userFolder must be at most ${USER_FOLDER_MAX_CHARS} characters`);
+  let expanded = trimmed;
+  if (trimmed.startsWith('~')) {
+    const rest = trimmed.slice(1);
+    if (rest === '' || rest[0] === '/' || (win && rest[0] === '\\')) expanded = home + rest;
+    else return fail('"~user" paths are not supported; use an absolute path');
+  }
+  const absolute = p.isAbsolute(expanded) && (!win || /^[a-zA-Z]:[\\/]/.test(expanded) || expanded.startsWith('\\\\'));
+  if (!absolute) return fail(`userFolder must be an absolute path or start with ~ (got "${trimmed}")`);
+  return { ...base, configured: trimmed, resolved: p.resolve(expanded) };
+}
+
+export function validateUserFolder(value, opts) {
+  return resolveUserFolder(value, opts).error;
+}
 
 export function defaultSuperagentRoot() {
   return path.join(process.env.COCKPIT_HOME || os.homedir(), '.prompt-cockpit', 'superagent');
@@ -375,15 +407,18 @@ function configError(code, message, extra = {}) {
   return Object.assign(new Error(message), { code, ...extra });
 }
 
-export function createSuperagentConfig({ filePath = path.join(defaultSuperagentRoot(), 'config.json') } = {}) {
+export function createSuperagentConfig({
+  filePath = path.join(defaultSuperagentRoot(), 'config.json'),
+  home = defaultHome(),
+  platform = process.platform,
+} = {}) {
   let fileConfig = {};
+  const corruptError = () => configError('ERR_CONFIG_CORRUPT', `${filePath} is not a valid superagent config - fix or remove it by hand`);
 
   return {
     async load() {
       const { value, corrupt } = await readJsonChecked(filePath, {});
-      if (corrupt || !isPlainObject(value)) {
-        throw configError('ERR_CONFIG_CORRUPT', `${filePath} is not a valid superagent config - fix or remove it by hand`);
-      }
+      if (corrupt || !isPlainObject(value)) throw corruptError();
       fileConfig = value;
     },
 
@@ -396,9 +431,42 @@ export function createSuperagentConfig({ filePath = path.join(defaultSuperagentR
       return structuredClone(fileConfig);
     },
 
+    userFolder() {
+      return resolveUserFolder(fileConfig.userFolder, { home, platform });
+    },
+
+    checkUserFolder(value) {
+      return resolveUserFolder(value, { home, platform });
+    },
+
+    async setUserFolder(value) {
+      let trimmed = null;
+      if (value !== null) {
+        const r = resolveUserFolder(value, { home, platform });
+        if (r.error) throw configError('ERR_INVALID_REQUEST', r.error);
+        trimmed = r.configured;
+      }
+      try {
+        await updateJson(filePath, (current) => {
+          if (!isPlainObject(current)) throw corruptError();
+          if (trimmed === null) delete current.userFolder;
+          else current.userFolder = trimmed;
+        });
+      } catch (err) {
+        if (err?.code) throw err;
+        throw corruptError();
+      }
+      const { userFolder: _previous, ...rest } = fileConfig;
+      fileConfig = trimmed === null ? rest : { ...rest, userFolder: trimmed };
+    },
+
     async save(next) {
       const candidate = isPlainObject(next) ? next : {};
       const errors = validateDefaults(resolveProjectConfig(candidate, null)).errors.slice();
+      if (candidate.userFolder !== undefined && candidate.userFolder !== null) {
+        const message = validateUserFolder(candidate.userFolder, { home, platform });
+        if (message) errors.push({ path: 'userFolder', message });
+      }
       for (const project of Object.keys(isPlainObject(candidate.projects) ? candidate.projects : {})) {
         for (const e of validateDefaults(resolveProjectConfig(candidate, project)).errors) {
           errors.push({ path: `projects[${JSON.stringify(project)}].${e.path}`, message: e.message });
