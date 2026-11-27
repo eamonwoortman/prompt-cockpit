@@ -569,9 +569,10 @@ test('old event logs derive unchanged: feature job through plan, a retried revie
     ev.phaseCompleted('plan-review', 1),
     { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } },
   ]);
-  const { feedbackRound, feedbackRounds, ...job } = deriveJob(log);
+  const { feedbackRound, feedbackRounds, userFolder, ...job } = deriveJob(log);
   assert.equal(feedbackRound, 0);
   assert.deepEqual(feedbackRounds, []);
+  assert.equal(userFolder, null);
   job.attempts = job.attempts.map((a) => {
     assert.deepEqual([a.feedbackRound, a.reportOrdinal, a.triage], [0, null, null]);
     const { feedbackRound: _r, reportOrdinal: _o, triage: _t, ...rest } = a;

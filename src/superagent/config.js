@@ -48,7 +48,7 @@ export const USER_FOLDER_MAX_CHARS = 1000;
 const defaultHome = () => process.env.COCKPIT_HOME || os.homedir();
 
 export function defaultUserFolder(home = defaultHome()) {
-  return path.join(home, 'prompt-cockpit');
+  return path.join(home, '.prompt-cockpit');
 }
 
 export function resolveUserFolder(value, { home = defaultHome(), platform = process.platform } = {}) {

@@ -14,11 +14,20 @@ import {
   resolveProjectConfig,
   ENGINE_ROLES,
   resolveEngineModel,
+  defaultUserFolder,
+  resolveUserFolder,
 } from '../src/superagent/config.js';
 import { tempDir } from './superagent-helpers.mjs';
 
 const without = (pipeline, phase) => pipeline.filter((p) => p.phase !== phase);
 const hasError = (result, p) => result.errors.some((e) => e.path === p);
+
+test('the default user folder is ~/.prompt-cockpit, used when userFolder is unset', () => {
+  const home = path.join(path.sep, 'home', 'x');
+  assert.equal(defaultUserFolder(home), path.join(home, '.prompt-cockpit'));
+  assert.equal(resolveUserFolder(undefined, { home }).resolved, path.join(home, '.prompt-cockpit'));
+  assert.equal(resolveUserFolder(null, { home }).resolved, path.join(home, '.prompt-cockpit'));
+});
 
 test('the default config validates end-to-end with no errors or warnings', () => {
   assert.deepEqual(validateDefaults(defaultConfig()), { errors: [], warnings: [] });
