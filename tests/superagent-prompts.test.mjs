@@ -965,3 +965,43 @@ test('feedback entries carry their route; only a subplan round names its outputs
   assert.ok(contract.includes('A `separate` round changes nothing in this job'), 'contract: separate rounds');
   assert.ok(contract.includes('`outputs`'), 'contract: feedback outputs');
 });
+
+async function userPrompt(root, name, role, marker) {
+  const file = path.join(root, name, 'prompts', `${role}.md`);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, `${marker}\n`);
+  return path.join(root, name);
+}
+
+test('an old job-created replays to the old folder', async () => {
+  const root = await tempDir('sa-prompts-legacy-');
+  const dir = await userPrompt(root, 'old', 'spec-writer', 'LEGACY-FOLDER-MARKER');
+  const render = async (over) => {
+    const job = deriveJob(provisionedEvents({ jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', ...over }));
+    const phase = job.pipeline[0];
+    const attempt = { attemptId: 'a1', phase: phase.phase, task: null, role: phase.role, n: 1, recovery: false, previousAttemptId: null, dir: path.join(root, 'attempts', 'a1') };
+    return (await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: root })).system;
+  };
+  assert.ok((await render({ userFolder: dir })).includes('LEGACY-FOLDER-MARKER'));
+  assert.ok(!(await render({ userFolder: null })).includes('LEGACY-FOLDER-MARKER'));
+  assert.ok(!(await render({})).includes('LEGACY-FOLDER-MARKER'));
+  assert.ok(!(await render({ userFolders: [], userFolder: dir })).includes('LEGACY-FOLDER-MARKER'));
+});
+
+test('buildWorkerPrompt takes the first user folder that has the role', async () => {
+  const root = await tempDir('sa-prompts-folders-');
+  const a = path.join(root, 'a');
+  const b = await userPrompt(root, 'b', 'spec-writer', 'FOLDER-B-MARKER');
+  const render = async () => {
+    const job = deriveJob(provisionedEvents({ jobId: 'j1', slug: 'add-hello-12345678', createdDate: '2026-11-03', userFolders: [a, b] }));
+    const phase = job.pipeline[0];
+    const attempt = { attemptId: 'a1', phase: phase.phase, task: null, role: phase.role, n: 1, recovery: false, previousAttemptId: null, dir: path.join(root, 'attempts', 'a1') };
+    return (await buildWorkerPrompt({ role: 'spec-writer', job, phase, attempt, projectDir: root })).system;
+  };
+  assert.ok((await render()).includes('FOLDER-B-MARKER'));
+  await userPrompt(root, 'a', 'spec-writer', 'FOLDER-A-MARKER');
+  const system = await render();
+  assert.ok(system.includes('FOLDER-A-MARKER'));
+  assert.ok(!system.includes('FOLDER-B-MARKER'));
+  assert.equal(await hasTemplate('spec-writer', { projectDir: root, userFolders: [a, b] }), true);
+});

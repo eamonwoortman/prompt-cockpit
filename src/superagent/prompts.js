@@ -40,9 +40,9 @@ function checkRole(role) {
 // `recordedPrompt` is the job's absolute workflow prompt path, or null for the
 // built-in. An absolute promptField resolves to itself, so it stands in for
 // the workflow file's prompt in the one lookup order.
-async function resolveTemplate(role, projectDir, recordedPrompt, userFolder = null) {
+async function resolveTemplate(role, projectDir, recordedPrompt, userFolders = []) {
   checkRole(role);
-  const userPromptsDirs = userFolder ? [path.join(userFolder, 'prompts')] : [];
+  const userPromptsDirs = userFolders.map((f) => path.join(f, 'prompts'));
   const found = await resolvePromptPath(role, { projectDir, workflowFile: recordedPrompt, promptField: recordedPrompt, userPromptsDirs });
   if (found == null && recordedPrompt != null) {
     throw Object.assign(new Error(`superagent: the workflow prompt for role ${JSON.stringify(role)} is missing: ${recordedPrompt}`), { code: 'ERR_PROMPT_MISSING', path: recordedPrompt });
@@ -50,14 +50,14 @@ async function resolveTemplate(role, projectDir, recordedPrompt, userFolder = nu
   return found;
 }
 
-async function loadRoleTemplate(role, projectDir, recordedPrompt = null, userFolder = null) {
-  const found = await resolveTemplate(role, projectDir, recordedPrompt, userFolder);
+async function loadRoleTemplate(role, projectDir, recordedPrompt = null, userFolders = []) {
+  const found = await resolveTemplate(role, projectDir, recordedPrompt, userFolders);
   return found == null ? null : readIfExists(found.path);
 }
 
-export async function hasTemplate(role, { projectDir, recordedPrompt = null, userFolder = null }) {
+export async function hasTemplate(role, { projectDir, recordedPrompt = null, userFolders = [] }) {
   try {
-    return (await resolveTemplate(role, projectDir, recordedPrompt, userFolder)) != null;
+    return (await resolveTemplate(role, projectDir, recordedPrompt, userFolders)) != null;
   } catch (err) {
     if (err.code === 'ERR_NO_TEMPLATE' || err.code === 'ERR_PROMPT_MISSING') return false;
     throw err;
@@ -252,7 +252,7 @@ function purposeFields(job, phase, attempt) {
 }
 
 export async function buildWorkerPrompt({ role, job, phase, attempt, projectDir }) {
-  const template = await loadRoleTemplate(role, projectDir, job.prompts?.[role] ?? null, job.userFolder ?? null);
+  const template = await loadRoleTemplate(role, projectDir, job.prompts?.[role] ?? null, job.userFolders ?? []);
   if (template == null) throw Object.assign(new Error(`superagent: no prompt template for role ${JSON.stringify(role)}`), { code: 'ERR_NO_TEMPLATE' });
   const contract = await fs.readFile(path.join(templatesDir(), CONTRACT_FILE), 'utf8');
 

@@ -881,7 +881,7 @@ export function createSuperagent({
     }
     const missing = [];
     for (const role of pipelineRoles(plan.pipeline)) {
-      if (!(await hasTemplate(role, { projectDir, recordedPrompt: plan.recorded?.prompts[role] ?? null, userFolder: folder.dir }))) missing.push(role);
+      if (!(await hasTemplate(role, { projectDir, recordedPrompt: plan.recorded?.prompts[role] ?? null, userFolders: folder.dir ? [folder.dir] : [] }))) missing.push(role);
     }
     if (missing.length > 0) {
       throw fail('ERR_NO_TEMPLATE', `superagent: no prompt template for role${missing.length > 1 ? 's' : ''} ${missing.join(', ')}`, { roles: missing });

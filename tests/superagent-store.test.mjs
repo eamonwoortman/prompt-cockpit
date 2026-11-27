@@ -569,10 +569,10 @@ test('old event logs derive unchanged: feature job through plan, a retried revie
     ev.phaseCompleted('plan-review', 1),
     { type: 'needs-you', reason: 'ready-to-try', detail: { phase: 'accept' } },
   ]);
-  const { feedbackRound, feedbackRounds, userFolder, ...job } = deriveJob(log);
+  const { feedbackRound, feedbackRounds, userFolders, ...job } = deriveJob(log);
   assert.equal(feedbackRound, 0);
   assert.deepEqual(feedbackRounds, []);
-  assert.equal(userFolder, null);
+  assert.deepEqual(userFolders, []);
   job.attempts = job.attempts.map((a) => {
     assert.deepEqual([a.feedbackRound, a.reportOrdinal, a.triage], [0, null, null]);
     const { feedbackRound: _r, reportOrdinal: _o, triage: _t, ...rest } = a;
@@ -952,4 +952,15 @@ test('job-retried reopen for a phase outside the pipeline changes nothing', () =
   const base = deriveJob(featureLog(...log));
   const job = deriveJob(featureLog(...log, retriedEv(seq, { phase: 'nope', feedbackRound: 1, reopen: true })));
   assert.deepEqual([job.state, job.phaseIndex, job.visits, job.attempts.map((a) => a.retried)], ['running', base.phaseIndex, base.visits, [false, false]]);
+});
+
+test('legacy userFolder becomes a one-item list', () => {
+  const folders = (over) => deriveJob(provisionedEvents(over)).userFolders;
+  assert.deepEqual(folders({ userFolder: '/u' }), ['/u']);
+  assert.deepEqual(folders({ userFolders: ['/a', '/b'] }), ['/a', '/b']);
+  assert.deepEqual(folders({ userFolders: ['/a', null, 3] }), ['/a']);
+  assert.deepEqual(folders({}), []);
+  assert.deepEqual(folders({ userFolder: null }), []);
+  assert.deepEqual(folders({ userFolders: [], userFolder: '/u' }), []);
+  assert.equal('userFolder' in deriveJob(provisionedEvents({ userFolder: '/u' })), false);
 });
