@@ -238,7 +238,7 @@ Each attempt gets a fresh session created with the role's model/effort/`maxTurns
 
 **Update (2026-11-24): outputs are not committed.** New jobs keep spec, plan, tasks, reviews, brief and reports in the git-ignored ledger (`.superpowers/superagent/<jobId>/artifacts/`, recorded as `artifactRoot: 'ledger'`), so "every required output path exists and is non-empty" is the whole check for them and `attempt-ended` records a SHA-256 per required output; workers commit only code, by explicit path, and tests only when the job's `commitTests` is true. Every listed commit is rejected if it touches `.superpowers/` or, with `commitTests` false, a test path. Jobs created before this keep the committed-artifact rules above. See `2026-11-24-superagent-artifacts-out-of-git-and-branch-names-design.md`.
 
-**Completion detection.** When a worker's turn ends, the runner first consults the cooldown store and the row's rate-limit state (see "Usage cap"); then reads the attempt's `result.json`. Missing → one nudge ("publish your result") → still missing → failed attempt (`no-result`).
+**Completion detection.** When a worker's turn ends, the runner first consults the cooldown store and the row's rate-limit state (see "Usage cap"); then reads the attempt's `result.json`. Missing → one nudge ("publish your result") → still missing → failed attempt (`no-result`). Rejected by validation → one nudge carrying the validator's error → still rejected → failed attempt (`invalid-result`). A failed attempt's `attempt-ended` keeps the readable error as `detail` (500 characters at most) beside the normalised `signature`; the router's trigger carries it, and the next attempt's card carries it as `previousFailure: { reason, detail }`.
 
 ### Questions from unattended workers [Author's call]
 
@@ -258,7 +258,7 @@ Cockpit parks every `AskUserQuestion` regardless of permission mode (`src/sessio
 | implementer, tester, task-reviewer | Claude Sonnet 5.5 | 80 | Bulk of tokens, clear plan to follow |
 | triage | Claude Sonnet 5.5 | 20 | Small focused judgement |
 
-`maxTurns` defaults are starting points for the builder to tune from real runs. Hitting `maxTurns` without a result counts as a failed attempt (`turn-cap`), with `handoff.md` requested on the nudge so the next attempt can continue.
+`maxTurns` defaults are starting points for the builder to tune from real runs. Hitting `maxTurns` without a result counts as a failed attempt (`turn-cap`), with `handoff.md` requested on the nudge so the next attempt can continue. The same nudge lets a worker with only its outputs left to write and commit finish them and publish `done` instead.
 
 ### Context drift for workers [Author's call]
 
