@@ -75,6 +75,71 @@ export function validateUserFolder(value, opts) {
   return resolveUserFolder(value, opts).error;
 }
 
+function folderKey(resolved, platform) {
+  const win = platform === 'win32';
+  const p = win ? path.win32 : path.posix;
+  let key = p.resolve(resolved);
+  const root = p.parse(key).root;
+  while (key.length > root.length && (key.endsWith(p.sep) || (win && key.endsWith('/')))) key = key.slice(0, -1);
+  return win ? key.toLowerCase() : key;
+}
+
+// An unset `userFolders` falls back to the legacy `userFolder` (a one-item list), then to the default folder.
+export function resolveUserFolders(fileConfig, { home = defaultHome(), platform = process.platform } = {}) {
+  const opts = { home, platform };
+  const def = defaultUserFolder(home);
+  const value = fileConfig?.userFolders;
+  if (value === undefined || value === null) {
+    const legacy = fileConfig?.userFolder;
+    if (legacy === undefined || legacy === null) {
+      return { isDefault: true, default: def, error: null, entries: [{ index: 0, raw: null, configured: null, resolved: def, error: null }] };
+    }
+    const r = resolveUserFolder(legacy, opts);
+    return { isDefault: false, default: def, error: null, entries: [{ index: 0, raw: legacy, configured: r.configured, resolved: r.error ? null : r.resolved, error: r.error }] };
+  }
+  if (!Array.isArray(value)) {
+    const error = 'userFolders must be a list of paths';
+    return { isDefault: false, default: def, error, entries: [{ index: null, raw: value, configured: value, resolved: null, error }] };
+  }
+  const seen = new Map();
+  const entries = value.map((raw, index) => {
+    const r = resolveUserFolder(raw, opts);
+    if (r.error) return { index, raw, configured: r.configured, resolved: null, error: r.error };
+    const key = folderKey(r.resolved, platform);
+    if (seen.has(key)) return { index, raw, configured: r.configured, resolved: null, error: `same folder as #${seen.get(key) + 1}` };
+    seen.set(key, index);
+    return { index, raw, configured: r.configured, resolved: r.resolved, error: null };
+  });
+  return { isDefault: false, default: def, error: null, entries };
+}
+
+// Items equal to a stored string are kept untouched (each stored string claimed once), so a
+// stored folder that is missing or invalid never blocks a reorder; only the rest are checked.
+export function planUserFolders(next, stored, { home = defaultHome(), platform = process.platform } = {}) {
+  const unclaimed = stored.filter((e) => typeof e.raw === 'string' && e.index !== null);
+  const planned = next.map((item) => {
+    const at = unclaimed.findIndex((e) => e.raw === item);
+    if (at !== -1) {
+      const [kept] = unclaimed.splice(at, 1);
+      return { configured: item, resolved: kept.resolved, isNew: false };
+    }
+    return { configured: item, resolved: null, isNew: true };
+  });
+  for (const entry of planned.filter((e) => e.isNew)) {
+    const r = resolveUserFolder(entry.configured, { home, platform });
+    if (r.error) return { error: `${JSON.stringify(entry.configured)}: ${r.error}` };
+    entry.configured = r.configured;
+    entry.resolved = r.resolved;
+  }
+  for (const [i, entry] of planned.entries()) {
+    if (!entry.isNew) continue;
+    const key = folderKey(entry.resolved, platform);
+    const other = planned.findIndex((e, j) => j !== i && e.resolved && folderKey(e.resolved, platform) === key);
+    if (other !== -1) return { error: `${JSON.stringify(next[i])}: same folder as #${other + 1}` };
+  }
+  return { entries: planned };
+}
+
 export function defaultSuperagentRoot() {
   return path.join(process.env.COCKPIT_HOME || os.homedir(), '.prompt-cockpit', 'superagent');
 }
@@ -431,8 +496,15 @@ export function createSuperagentConfig({
       return structuredClone(fileConfig);
     },
 
+    userFolders() {
+      return resolveUserFolders(fileConfig, { home, platform });
+    },
+
+    // TRANSITIONAL (removed in Task 4 of the user-folders plan).
     userFolder() {
-      return resolveUserFolder(fileConfig.userFolder, { home, platform });
+      const r = resolveUserFolders(fileConfig, { home, platform });
+      const first = r.entries[0];
+      return { configured: r.isDefault ? null : (first?.raw ?? null), resolved: first?.resolved ?? null, error: first?.error ?? null, default: r.default };
     },
 
     checkUserFolder(value) {
@@ -440,30 +512,46 @@ export function createSuperagentConfig({
     },
 
     async setUserFolder(value) {
-      let trimmed = null;
-      if (value !== null) {
-        const r = resolveUserFolder(value, { home, platform });
-        if (r.error) throw configError('ERR_INVALID_REQUEST', r.error);
-        trimmed = r.configured;
+      await this.setUserFolders(value === null ? null : [value]);
+    },
+
+    planUserFolders(next) {
+      return planUserFolders(next, resolveUserFolders(fileConfig, { home, platform }).entries, { home, platform });
+    },
+
+    // Writes the list exactly as given; checking new entries is planUserFolders' job.
+    async setUserFolders(list) {
+      if (list !== null && (!Array.isArray(list) || !list.every((v) => typeof v === 'string'))) {
+        throw configError('ERR_INVALID_REQUEST', 'userFolders must be a list of paths or null');
       }
+      const apply = (current) => {
+        delete current.userFolder;
+        if (list === null) delete current.userFolders;
+        else current.userFolders = [...list];
+      };
       try {
         await updateJson(filePath, (current) => {
           if (!isPlainObject(current)) throw corruptError();
-          if (trimmed === null) delete current.userFolder;
-          else current.userFolder = trimmed;
+          apply(current);
         });
       } catch (err) {
         if (err?.code) throw err;
         throw corruptError();
       }
-      const { userFolder: _previous, ...rest } = fileConfig;
-      fileConfig = trimmed === null ? rest : { ...rest, userFolder: trimmed };
+      const next = structuredClone(fileConfig);
+      apply(next);
+      fileConfig = next;
     },
 
     async save(next) {
-      const candidate = isPlainObject(next) ? next : {};
+      const candidate = isPlainObject(next) ? structuredClone(next) : {};
       const errors = validateDefaults(resolveProjectConfig(candidate, null)).errors.slice();
-      if (candidate.userFolder !== undefined && candidate.userFolder !== null) {
+      if (candidate.userFolders !== undefined && candidate.userFolders !== null) {
+        delete candidate.userFolder;
+        const r = resolveUserFolders(candidate, { home, platform });
+        if (r.error) errors.push({ path: 'userFolders', message: r.error });
+        else for (const e of r.entries) if (e.error) errors.push({ path: `userFolders[${e.index}]`, message: e.error });
+      } else if (candidate.userFolder !== undefined && candidate.userFolder !== null) {
         const message = validateUserFolder(candidate.userFolder, { home, platform });
         if (message) errors.push({ path: 'userFolder', message });
       }

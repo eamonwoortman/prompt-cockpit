@@ -16,6 +16,8 @@ import {
   resolveEngineModel,
   defaultUserFolder,
   resolveUserFolder,
+  resolveUserFolders,
+  planUserFolders,
 } from '../src/superagent/config.js';
 import { tempDir } from './superagent-helpers.mjs';
 
@@ -27,6 +29,7 @@ test('the default user folder is ~/.prompt-cockpit, used when userFolder is unse
   assert.equal(defaultUserFolder(home), path.join(home, '.prompt-cockpit'));
   assert.equal(resolveUserFolder(undefined, { home }).resolved, path.join(home, '.prompt-cockpit'));
   assert.equal(resolveUserFolder(null, { home }).resolved, path.join(home, '.prompt-cockpit'));
+  assert.equal(resolveUserFolders({}, { home }).entries[0].resolved, path.join(home, '.prompt-cockpit'));
 });
 
 test('the default config validates end-to-end with no errors or warnings', () => {
@@ -424,4 +427,103 @@ test('triage is an engine role whose model comes from config only', () => {
   assert.deepEqual(resolveEngineModel(fileConfig, origin, 'triage'), { provider: 'claude', model: 'claude-opus-5-5', maxTurns: 30 });
   assert.deepEqual(resolveEngineModel(fileConfig, other, 'triage'), { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 30 });
   assert.deepEqual(resolveEngineModel(fileConfig, null, 'triage'), { provider: 'claude', model: 'claude-sonnet-5-5', maxTurns: 30 });
+});
+
+const posix = { home: '/home/x', platform: 'linux' };
+const resolvedOf = (r) => r.entries.map((e) => e.resolved);
+
+test('userFolders: unset gives the default, [] gives none', () => {
+  const unset = resolveUserFolders({}, posix);
+  assert.equal(unset.isDefault, true);
+  assert.equal(unset.error, null);
+  assert.deepEqual(resolvedOf(unset), [defaultUserFolder('/home/x')]);
+  assert.equal(unset.default, defaultUserFolder('/home/x'));
+  const none = resolveUserFolders({ userFolders: [] }, posix);
+  assert.equal(none.isDefault, false);
+  assert.deepEqual(none.entries, []);
+  assert.deepEqual(resolvedOf(resolveUserFolders({ userFolder: null }, posix)), [defaultUserFolder('/home/x')]);
+  assert.equal(resolveUserFolders({ userFolders: null }, posix).isDefault, true);
+});
+
+test('legacy userFolder reads as a one-item list, userFolders wins over it', () => {
+  const legacy = resolveUserFolders({ userFolder: '~/a' }, posix);
+  assert.equal(legacy.isDefault, false);
+  assert.deepEqual(resolvedOf(legacy), ['/home/x/a']);
+  assert.deepEqual(resolvedOf(resolveUserFolders({ userFolder: '~/a', userFolders: ['~/b'] }, posix)), ['/home/x/b']);
+});
+
+test('entries are validated one by one', () => {
+  const r = resolveUserFolders({ userFolders: ['~/a', 'relative', 7] }, posix);
+  assert.equal(r.error, null);
+  assert.deepEqual(r.entries.map((e) => [e.index, e.raw, e.resolved]), [[0, '~/a', '/home/x/a'], [1, 'relative', null], [2, 7, null]]);
+  assert.equal(r.entries[0].error, null);
+  assert.ok(r.entries[1].error);
+  assert.ok(r.entries[2].error);
+});
+
+test('a non-array setting is one invalid entry', () => {
+  const r = resolveUserFolders({ userFolders: 'x' }, posix);
+  assert.match(r.error, /userFolders must be a list/);
+  assert.equal(r.entries.length, 1);
+  assert.deepEqual([r.entries[0].index, r.entries[0].raw, r.entries[0].resolved, r.entries[0].error], [null, 'x', null, r.error]);
+});
+
+test('duplicate detection folds case on win32', () => {
+  const win = resolveUserFolders({ userFolders: ['C:\\A', 'c:\\a\\'] }, { home: 'C:\\Users\\x', platform: 'win32' });
+  assert.equal(win.entries[0].error, null);
+  assert.deepEqual([win.entries[1].resolved, win.entries[1].error], [null, 'same folder as #1']);
+  const linux = resolveUserFolders({ userFolders: ['/a', '/A', '/a/'] }, posix);
+  assert.deepEqual(linux.entries.map((e) => e.error), [null, null, 'same folder as #1']);
+});
+
+test('planUserFolders keeps stored items and checks new ones', () => {
+  const stored = resolveUserFolders({ userFolders: ['/ok', 'relative'] }, posix).entries;
+  const plan = planUserFolders(['relative', '/ok', '/new'], stored, posix);
+  assert.equal(plan.error, undefined);
+  assert.deepEqual(plan.entries.map((e) => [e.configured, e.resolved, e.isNew]), [['relative', null, false], ['/ok', '/ok', false], ['/new', '/new', true]]);
+  assert.match(planUserFolders(['/ok', '/ok/'], stored, posix).error, /"\/ok\/": same folder as #1/);
+  assert.match(planUserFolders(['/ok', 'nope'], stored, posix).error, /^"nope": /);
+  assert.deepEqual(planUserFolders(['  /n  '], stored, posix).entries.map((e) => [e.configured, e.resolved, e.isNew]), [['/n', '/n', true]]);
+});
+
+test('a stored string is claimed once', () => {
+  const stored = resolveUserFolders({ userFolders: ['/a'] }, posix).entries;
+  assert.match(planUserFolders(['/a', '/a'], stored, posix).error, /"\/a": same folder as #1/);
+  const padded = resolveUserFolders({ userFolders: [' /a '] }, posix).entries;
+  assert.deepEqual(planUserFolders([' /a '], padded, posix).entries.map((e) => [e.configured, e.isNew]), [[' /a ', false]]);
+});
+
+test('a stored duplicate is kept as-is and does not block other changes', () => {
+  const stored = resolveUserFolders({ userFolders: ['/a', '/a'] }, posix).entries;
+  const plan = planUserFolders(['/a', '/a', '/b'], stored, posix);
+  assert.deepEqual(plan.entries.map((e) => e.isNew), [false, false, true]);
+});
+
+test('setUserFolders writes userFolders and drops userFolder; null drops both', async () => {
+  const dir = await tempDir('sa-cfg-folders-');
+  const filePath = path.join(dir, 'config.json');
+  await fs.writeFile(filePath, JSON.stringify({ userFolder: '~/a', defaults: {} }));
+  const cfg = createSuperagentConfig({ filePath, ...posix });
+  await cfg.load();
+  await cfg.setUserFolders(['~/b']);
+  assert.deepEqual(JSON.parse(await fs.readFile(filePath, 'utf8')), { defaults: {}, userFolders: ['~/b'] });
+  assert.deepEqual(resolvedOf(cfg.userFolders()), ['/home/x/b']);
+  assert.deepEqual(cfg.planUserFolders(['~/b', '~/c']).entries.map((e) => e.isNew), [false, true]);
+  await cfg.setUserFolders(null);
+  assert.deepEqual(JSON.parse(await fs.readFile(filePath, 'utf8')), { defaults: {} });
+  assert.equal(cfg.userFolders().isDefault, true);
+  await assert.rejects(cfg.setUserFolders(['ok', 3]), (err) => err.code === 'ERR_INVALID_REQUEST');
+});
+
+test('save() writes only userFolders', async () => {
+  const dir = await tempDir('sa-cfg-save-folders-');
+  const filePath = path.join(dir, 'config.json');
+  const cfg = createSuperagentConfig({ filePath, ...posix });
+  await cfg.save({ userFolder: '/a', userFolders: ['/b'] });
+  assert.deepEqual(JSON.parse(await fs.readFile(filePath, 'utf8')), { userFolders: ['/b'] });
+  await assert.rejects(cfg.save({ userFolders: ['rel'] }), (err) => err.code === 'ERR_INVALID_CONFIG' && err.errors.some((e) => e.path === 'userFolders[0]'));
+  await assert.rejects(cfg.save({ userFolders: 'x' }), (err) => err.code === 'ERR_INVALID_CONFIG' && err.errors.some((e) => e.path === 'userFolders'));
+  const again = createSuperagentConfig({ filePath, ...posix });
+  await again.load();
+  assert.deepEqual(resolvedOf(again.userFolders()), ['/b']);
 });
