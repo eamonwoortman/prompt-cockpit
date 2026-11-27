@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { settingsSummary, moveFolder, removeFolder, addFolder } from '../public/superagent-settings.js';
+import { settingsSummary, moveFolder, removeFolder, addFolder, editFolders } from '../public/superagent-settings.js';
 
 const row = (over) => ({ index: 0, configured: '/a', resolved: '/a', error: null, exists: true, fixed: false, workflows: [], prompts: [], note: null, ...over });
 const globalRow = (over) => row({ index: null, configured: null, resolved: '/home/x/.prompt-cockpit/superagent/workflows', fixed: true, ...over });
@@ -86,4 +86,14 @@ test('moveFolder/removeFolder/addFolder', () => {
   removeFolder(list, 0);
   addFolder(list, 'c');
   assert.deepEqual(list, ['a']);
+});
+
+test('no list edit is possible before the settings have loaded', () => {
+  assert.equal(editFolders(null, { add: '/c' }), null);
+  assert.equal(editFolders(null, { move: 0, delta: 1 }), null);
+  const s = settingsSummary(settings([row({}), row({ index: 1, configured: '/b', resolved: '/b' }), globalRow()]));
+  assert.deepEqual(editFolders(s, { add: ' /c ' }), ['/a', '/b', '/c']);
+  assert.deepEqual(editFolders(s, { move: 1, delta: -1 }), ['/b', '/a']);
+  assert.deepEqual(editFolders(s, { remove: 0 }), ['/b']);
+  assert.deepEqual(editFolders(s, { remove: null }), ['/a', '/b']);
 });

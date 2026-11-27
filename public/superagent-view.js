@@ -19,7 +19,7 @@ import { ARTIFACT_STATE, artifactErrorText, artifactFileName, artifactMimeType, 
 import { createHandoff } from '/superagent-handoff.js';
 import { readyInputLabel, statusLabel, workflowLabel } from '/superagent-format.js';
 import { initPaneResizers } from '/superagent-panes.js';
-import { addFolder, moveFolder, removeFolder, settingsSummary } from '/superagent-settings.js';
+import { editFolders, settingsSummary } from '/superagent-settings.js';
 
 const POLL_MS = 5_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -485,16 +485,18 @@ export function initSuperagentView() {
   const settingsAddInput = document.getElementById('superagentSettingsAddInput');
   const settingsAdd = document.getElementById('superagentSettingsAdd');
   document.getElementById('superagentSettingsClose').addEventListener('click', () => settingsModal.close());
-  let settingsList = [];
+  // null until a load succeeds: no edit is posted from an empty or stale list.
+  let settingsLoaded = null;
   let settingsBusy = false;
   // Which rows and inner lists are open, kept across re-renders by folder path.
   const openFolders = new Set();
 
   function setSettingsBusy(busy) {
     settingsBusy = busy;
-    settingsAdd.disabled = busy;
-    settingsAddInput.disabled = busy;
-    for (const b of settingsBody.querySelectorAll('button')) b.disabled = busy || b.dataset.locked === 'true';
+    const locked = busy || !settingsLoaded;
+    settingsAdd.disabled = locked;
+    settingsAddInput.disabled = locked;
+    for (const b of settingsBody.querySelectorAll('button')) b.disabled = locked || b.dataset.locked === 'true';
   }
 
   function itemList(title, items, emptyText, key) {
@@ -528,7 +530,7 @@ export function initSuperagentView() {
   }
 
   function renderSettings(summary) {
-    settingsList = summary.list;
+    settingsLoaded = summary;
     settingsBody.textContent = '';
     for (const [i, row] of summary.rows.entries()) {
       const key = row.resolved ?? `#${i}`;
@@ -541,9 +543,9 @@ export function initSuperagentView() {
       if (!row.fixed) {
         const tools = head.appendChild(el('span', 'sa-folder-tools'));
         tools.append(
-          rowButton('↑', 'Move up: earlier folders win', row.canUp, () => saveSettings(moveFolder(settingsList, row.listIndex, -1))),
-          rowButton('↓', 'Move down', row.canDown, () => saveSettings(moveFolder(settingsList, row.listIndex, 1))),
-          rowButton('✕', 'Remove from the list (nothing is deleted on disk)', row.canRemove, () => saveSettings(row.listIndex === null ? settingsList : removeFolder(settingsList, row.listIndex))),
+          rowButton('↑', 'Move up: earlier folders win', row.canUp, () => saveSettings(editFolders(settingsLoaded, { move: row.listIndex, delta: -1 }))),
+          rowButton('↓', 'Move down', row.canDown, () => saveSettings(editFolders(settingsLoaded, { move: row.listIndex, delta: 1 }))),
+          rowButton('✕', 'Remove from the list (nothing is deleted on disk)', row.canRemove, () => saveSettings(editFolders(settingsLoaded, { remove: row.listIndex }))),
         );
       }
       if (row.resolved && row.title !== row.resolved && !row.title.startsWith(row.resolved)) folder.append(el('div', 'sa-note', `Resolved path: ${row.resolved}`));
@@ -559,6 +561,7 @@ export function initSuperagentView() {
 
   async function openSettings() {
     showError(settingsError, null);
+    settingsLoaded = null;
     settingsBody.textContent = 'Loading…';
     settingsModal.showModal();
     setSettingsBusy(true);
@@ -573,7 +576,7 @@ export function initSuperagentView() {
   }
 
   async function saveSettings(userFolders) {
-    if (settingsBusy) return false;
+    if (settingsBusy || userFolders === null) return false;
     showError(settingsError, null);
     setSettingsBusy(true);
     try {
@@ -595,7 +598,7 @@ export function initSuperagentView() {
     event.preventDefault();
     const value = settingsAddInput.value.trim();
     if (!value) return;
-    if (await saveSettings(addFolder(settingsList, value))) settingsAddInput.value = '';
+    if (await saveSettings(editFolders(settingsLoaded, { add: value }))) settingsAddInput.value = '';
   });
 
   // One handoff per job, kept across polls and job switches, so a

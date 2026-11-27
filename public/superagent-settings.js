@@ -80,3 +80,13 @@ export function removeFolder(list, index) {
 export function addFolder(list, value) {
   return [...list, String(value).trim()];
 }
+
+// The list an action would post, or null before a successful load: posting
+// from an empty or stale list would overwrite the stored folders.
+export function editFolders(summary, { add, move, delta, remove } = {}) {
+  if (!summary) return null;
+  if (add !== undefined) return addFolder(summary.list, add);
+  if (move !== undefined) return moveFolder(summary.list, move, delta);
+  if (remove !== undefined) return remove === null ? [...summary.list] : removeFolder(summary.list, remove);
+  return null;
+}
