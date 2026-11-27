@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { settingsSummary, moveFolder, removeFolder, addFolder, editFolders } from '../public/superagent-settings.js';
+import { settingsSummary, moveFolder, removeFolder, addFolder, editFolders, browseStartPath } from '../public/superagent-settings.js';
 
 const row = (over) => ({ index: 0, configured: '/a', resolved: '/a', error: null, exists: true, fixed: false, workflows: [], prompts: [], note: null, ...over });
 const globalRow = (over) => row({ index: null, configured: null, resolved: '/home/x/.prompt-cockpit/superagent/workflows', fixed: true, ...over });
@@ -96,4 +96,11 @@ test('no list edit is possible before the settings have loaded', () => {
   assert.deepEqual(editFolders(s, { move: 1, delta: -1 }), ['/b', '/a']);
   assert.deepEqual(editFolders(s, { remove: 0 }), ['/b']);
   assert.deepEqual(editFolders(s, { remove: null }), ['/a', '/b']);
+});
+
+test('browsing starts in the last usable folder, else the default folder', () => {
+  const s = settingsSummary(settings([row({}), row({ index: 1, configured: '/b', resolved: '/b' }), row({ index: 2, configured: 'rel', resolved: null, error: 'bad', exists: false }), globalRow()]));
+  assert.equal(browseStartPath(s), '/b');
+  assert.equal(browseStartPath(settingsSummary(settings([globalRow()]))), '/home/x/.prompt-cockpit');
+  assert.equal(browseStartPath(null), '');
 });

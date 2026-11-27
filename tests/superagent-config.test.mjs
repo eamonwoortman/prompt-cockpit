@@ -492,6 +492,13 @@ test('planUserFolders quotes a Windows path without escaping its backslashes', (
   assert.equal(planUserFolders(['C:\\A', 'c:\\a\\'], stored, win).error, '"c:\\a\\": same folder as #1');
 });
 
+test('a duplicate is reported on the later item, the one the user just added', () => {
+  const unset = resolveUserFolders({}, posix).entries;
+  assert.equal(planUserFolders(['/home/x/.prompt-cockpit', '~/.prompt-cockpit'], unset, posix).error, '"~/.prompt-cockpit": same folder as #1');
+  const stored = resolveUserFolders({ userFolders: ['/b'] }, posix).entries;
+  assert.equal(planUserFolders(['/b/', '/b'], stored, posix).error, '"/b/": same folder as #2');
+});
+
 test('a stored string is claimed once', () => {
   const stored = resolveUserFolders({ userFolders: ['/a'] }, posix).entries;
   assert.match(planUserFolders(['/a', '/a'], stored, posix).error, /"\/a": same folder as #1/);

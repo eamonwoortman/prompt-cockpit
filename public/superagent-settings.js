@@ -90,3 +90,8 @@ export function editFolders(summary, { add, move, delta, remove } = {}) {
   if (remove !== undefined) return remove === null ? [...summary.list] : removeFolder(summary.list, remove);
   return null;
 }
+
+export function browseStartPath(summary) {
+  const usable = (summary?.rows ?? []).filter((r) => !r.fixed && r.resolved && r.status !== 'error');
+  return usable.at(-1)?.resolved ?? summary?.defaultPath ?? '';
+}

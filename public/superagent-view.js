@@ -19,7 +19,7 @@ import { ARTIFACT_STATE, artifactErrorText, artifactFileName, artifactMimeType, 
 import { createHandoff } from '/superagent-handoff.js';
 import { readyInputLabel, statusLabel, workflowLabel } from '/superagent-format.js';
 import { initPaneResizers } from '/superagent-panes.js';
-import { editFolders, settingsSummary } from '/superagent-settings.js';
+import { browseStartPath, editFolders, settingsSummary } from '/superagent-settings.js';
 
 const POLL_MS = 5_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -484,6 +484,7 @@ export function initSuperagentView() {
   const settingsError = document.getElementById('superagentSettingsError');
   const settingsAddInput = document.getElementById('superagentSettingsAddInput');
   const settingsAdd = document.getElementById('superagentSettingsAdd');
+  const settingsBrowse = document.getElementById('superagentSettingsBrowse');
   document.getElementById('superagentSettingsClose').addEventListener('click', () => settingsModal.close());
   // null until a load succeeds: no edit is posted from an empty or stale list.
   let settingsLoaded = null;
@@ -495,6 +496,7 @@ export function initSuperagentView() {
     settingsBusy = busy;
     const locked = busy || !settingsLoaded;
     settingsAdd.disabled = locked;
+    settingsBrowse.disabled = locked;
     settingsAddInput.disabled = locked;
     for (const b of settingsBody.querySelectorAll('button')) b.disabled = locked || b.dataset.locked === 'true';
   }
@@ -599,6 +601,10 @@ export function initSuperagentView() {
     const value = settingsAddInput.value.trim();
     if (!value) return;
     if (await saveSettings(editFolders(settingsLoaded, { add: value }))) settingsAddInput.value = '';
+  });
+  settingsBrowse.addEventListener('click', () => {
+    if (!settingsLoaded || settingsBusy) return;
+    dirBrowser.open(browseStartPath(settingsLoaded), (picked) => saveSettings(editFolders(settingsLoaded, { add: picked })));
   });
 
   // One handoff per job, kept across polls and job switches, so a

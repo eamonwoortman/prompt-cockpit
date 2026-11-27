@@ -134,7 +134,8 @@ export function planUserFolders(next, stored, { home = defaultHome(), platform =
   for (const [i, entry] of planned.entries()) {
     if (!entry.isNew) continue;
     const key = folderKey(entry.resolved, platform);
-    const other = planned.findIndex((e, j) => j !== i && e.resolved && folderKey(e.resolved, platform) === key);
+    // Checked against earlier items and kept ones, so the later of two new items (the one just added) is named.
+    const other = planned.findIndex((e, j) => j !== i && (j < i || !e.isNew) && e.resolved && folderKey(e.resolved, platform) === key);
     if (other !== -1) return { error: `"${next[i]}": same folder as #${other + 1}` };
   }
   return { entries: planned };
