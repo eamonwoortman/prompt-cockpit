@@ -268,11 +268,12 @@ export function registerSuperagentRoutes(router, { host, registry, readArtifactI
   router.post('/api/superagent/settings', async (req, res) => {
     const body = await readJsonBody(req);
     const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
-    if (keys.length !== 1 || keys[0] !== 'userFolder' || (body.userFolder !== null && typeof body.userFolder !== 'string')) {
-      return respondJson(res, 400, { error: 'userFolder must be a path or null', code: 'ERR_INVALID_REQUEST' });
+    const list = keys.length === 1 && keys[0] === 'userFolders' ? body.userFolders : undefined;
+    if (list !== null && !(Array.isArray(list) && list.every((v) => typeof v === 'string'))) {
+      return respondJson(res, 400, { error: 'userFolders must be a list of paths or null', code: 'ERR_INVALID_REQUEST' });
     }
     try {
-      return respondJson(res, 200, await host.admit((supervisor) => supervisor.setUserFolder(body.userFolder)));
+      return respondJson(res, 200, await host.admit((supervisor) => supervisor.setUserFolders(list)));
     } catch (err) {
       return respondError(res, err);
     }

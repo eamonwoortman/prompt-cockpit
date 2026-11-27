@@ -911,3 +911,26 @@ test('POST /api/superagent/jobs validates and passes commitTests through', async
   await api('/api/superagent/jobs', { method: 'POST', body: { idea: 'x', primaryRepo: repo } });
   assert.equal(calls[1].commitTests, undefined);
 });
+
+test('POST settings passes userFolders through', async (t) => {
+  const calls = [];
+  const api = await serve(t, { host: fakeHost({ supervisor: { setUserFolders: async (list) => { calls.push(list); return { folders: [] }; } } }) });
+  const ok = await api('/api/superagent/settings', { method: 'POST', body: { userFolders: ['/a', '/b'] } });
+  assert.deepEqual([ok.status, ok.body], [200, { folders: [] }]);
+  assert.equal((await api('/api/superagent/settings', { method: 'POST', body: { userFolders: null } })).status, 200);
+  assert.deepEqual(calls, [['/a', '/b'], null]);
+});
+
+test('POST settings refuses any other body', async (t) => {
+  const api = await serve(t, { host: fakeHost({ supervisor: { setUserFolders: async () => assert.fail('must not be called') } }) });
+  for (const body of [{}, { userFolder: '/a' }, { userFolders: '/a' }, { userFolders: ['/a', 3] }, { userFolders: [], x: 1 }, []]) {
+    const res = await api('/api/superagent/settings', { method: 'POST', body });
+    assert.deepEqual([res.status, res.body], [400, { error: 'userFolders must be a list of paths or null', code: 'ERR_INVALID_REQUEST' }], JSON.stringify(body));
+  }
+});
+
+test('POST settings maps ERR_INVALID_FOLDER to 400', async (t) => {
+  const api = await serve(t, { host: fakeHost({ supervisor: { setUserFolders: async () => { throw Object.assign(new Error('could not create /x'), { code: 'ERR_INVALID_FOLDER' }); } } }) });
+  const res = await api('/api/superagent/settings', { method: 'POST', body: { userFolders: ['/x'] } });
+  assert.deepEqual([res.status, res.body.code], [400, 'ERR_INVALID_FOLDER']);
+});
