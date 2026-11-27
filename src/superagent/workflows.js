@@ -68,7 +68,7 @@ async function exists(file, fsImpl) {
 }
 
 // A declared workflow prompt that is missing resolves to null, never to the built-in.
-export async function resolvePromptPath(role, { projectDir = null, workflowFile = null, promptField = null, userPromptsDir = null, builtinDir = templatesDir(), fsImpl = fs } = {}) {
+export async function resolvePromptPath(role, { projectDir = null, workflowFile = null, promptField = null, userPromptsDirs = [], builtinDir = templatesDir(), fsImpl = fs } = {}) {
   if (typeof role !== 'string' || !ROLE_NAME.test(role) || role === CONTRACT_ROLE) return null;
   const file = `${role}.md`;
   if (projectDir) {
@@ -79,9 +79,9 @@ export async function resolvePromptPath(role, { projectDir = null, workflowFile 
     const declared = path.resolve(path.dirname(workflowFile), promptField);
     return (await exists(declared, fsImpl)) ? { source: 'workflow', path: declared } : null;
   }
-  if (userPromptsDir) {
-    const user = path.join(userPromptsDir, file);
-    if (await exists(user, fsImpl)) return { source: 'user', path: user };
+  for (const dir of userPromptsDirs) {
+    const user = path.join(dir, file);
+    if (await exists(user, fsImpl)) return { source: 'user', path: user, folder: path.dirname(dir) };
   }
   const builtin = path.join(builtinDir, file);
   return (await exists(builtin, fsImpl)) ? { source: 'built-in', path: builtin } : null;
@@ -261,7 +261,7 @@ async function readSource(source, dir, fsImpl) {
   return out;
 }
 
-async function evaluate(raw, { projectDir, userPromptsDir, fileConfig, projectPath, fsImpl, platform }) {
+async function evaluate(raw, { projectDir, userPromptsDirs, fileConfig, projectPath, fsImpl, platform }) {
   const { doc } = raw;
   if (raw.readError) return [{ path: '', message: raw.readError }];
   if (!isPlainObject(doc)) return validateWorkflow(doc, {}).errors;
@@ -272,7 +272,7 @@ async function evaluate(raw, { projectDir, userPromptsDir, fileConfig, projectPa
   for (const role of new Set([...rolesUsed(Array.isArray(doc.phases) ? doc.phases : []), ...Object.keys(roles)])) {
     const promptField = isPlainObject(roles[role]) ? roles[role].prompt : null;
     try {
-      promptFor[role] = (await resolvePromptPath(role, { projectDir, workflowFile: raw.file, promptField, userPromptsDir, fsImpl }))?.path ?? null;
+      promptFor[role] = (await resolvePromptPath(role, { projectDir, workflowFile: raw.file, promptField, userPromptsDirs, fsImpl }))?.path ?? null;
     } catch (err) {
       promptFor[role] = null;
       readErrors.push({ path: `${keyPath('roles', role)}.prompt`, message: `the prompt for "${role}" could not be read: ${err.message}` });
@@ -290,6 +290,7 @@ function entryFor(raw, errors) {
     name: id !== null && isNonEmptyString(raw.doc.name) ? raw.doc.name : (id ?? raw.name),
     description: id !== null && typeof raw.doc.description === 'string' ? raw.doc.description : '',
     source: raw.source,
+    folder: raw.folder ?? null,
     file: raw.file,
     valid: errors.length === 0,
     errors,
@@ -327,45 +328,56 @@ function configuredDefault(fileConfig, projectPath) {
 export async function loadWorkflows({
   builtinDir = workflowsDir(),
   globalDir = path.join(defaultSuperagentRoot(), 'workflows'),
-  userDir = null,
-  userError = null,
+  userFolders = [],
   projectDir = null,
   fileConfig = {},
   projectPath = projectDir,
   fsImpl = fs,
   platform = process.platform,
 } = {}) {
-  const sources = [
-    ['built-in', builtinDir],
-    ['global', globalDir],
-    ['user', userDir && path.join(userDir, 'workflows')],
-    ['project', projectDir && path.join(projectDir, '.superpowers', 'superagent', 'workflows')],
+  // rank orders precedence (higher wins), so user folder 0 outranks user folder 1.
+  const n = userFolders.length;
+  const layers = [
+    { source: 'built-in', dir: builtinDir, rank: 0, folder: null },
+    { source: 'global', dir: globalDir, rank: 1, folder: null },
+    ...userFolders.map((entry, i) => ({ source: 'user', entry, folder: entry.error ? null : entry.resolved, dir: entry.error ? null : path.join(entry.resolved, 'workflows'), rank: 2 + (n - 1 - i) })),
+    { source: 'project', dir: projectDir && path.join(projectDir, '.superpowers', 'superagent', 'workflows'), rank: 2 + n, folder: null },
   ];
-  const userPromptsDir = userDir && !userError ? path.join(userDir, 'prompts') : null;
-  const ctx = { projectDir, userPromptsDir, fileConfig, projectPath, fsImpl, platform };
+  const userPromptsDirs = userFolders.filter((e) => !e.error).map((e) => path.join(e.resolved, 'prompts'));
+  const ctx = { projectDir, userPromptsDirs, fileConfig, projectPath, fsImpl, platform };
   const all = [];
-  for (const [source, dir] of sources) {
-    const raws = source === 'user' && userError
-      ? [{ source, file: null, name: typeof userError.configured === 'string' ? userError.configured : JSON.stringify(userError.configured), doc: null, readError: `the workflows folder setting is invalid: ${userError.error}` }]
-      : await readSource(source, dir, fsImpl);
-    for (const raw of raws) all.push(entryFor(raw, await evaluate(raw, ctx)));
+  for (const layer of layers) {
+    const raws = layer.entry?.error
+      ? [{ source: 'user', file: null, name: typeof layer.entry.configured === 'string' ? layer.entry.configured : JSON.stringify(layer.entry.configured), doc: null, readError: `the workflows folder setting is invalid: ${layer.entry.error}` }]
+      : await readSource(layer.source, layer.dir, fsImpl);
+    for (const raw of raws) all.push({ e: entryFor({ ...raw, folder: layer.folder }, await evaluate(raw, ctx)), rank: layer.rank });
   }
 
   const winner = new Map();
   const count = new Map();
   const key = (e) => e.id.toLowerCase();
-  for (const e of all) {
+  const layerKey = (rank, e) => `${rank}\n${key(e)}`;
+  for (const { e, rank } of all) {
     if (e.id === null) continue;
-    winner.set(key(e), e.source);
-    count.set(`${e.source}\n${key(e)}`, (count.get(`${e.source}\n${key(e)}`) ?? 0) + 1);
+    if (!winner.has(key(e)) || winner.get(key(e)).rank < rank) winner.set(key(e), { rank, source: e.source, folder: e.folder });
+    count.set(layerKey(rank, e), (count.get(layerKey(rank, e)) ?? 0) + 1);
+  }
+  // Duplicates are marked before the split, so a losing folder's duplicates stay invalid too.
+  for (const { e, rank } of all) {
+    if (e.id === null || count.get(layerKey(rank, e)) <= 1) continue;
+    const where = e.source === 'user' ? `the user workflows of ${e.folder}` : `the ${e.source} workflows`;
+    e.errors = [{ path: 'id', message: `duplicate id "${e.id}" in ${where}` }, ...e.errors];
+    e.valid = false;
   }
   const configEntry = configPipelineEntry(fileConfig, projectPath);
   const workflows = [];
-  for (const e of all) {
-    if (e.id !== null && winner.get(key(e)) !== e.source) continue;
-    if (e.id !== null && count.get(`${e.source}\n${key(e)}`) > 1) {
-      e.errors = [{ path: 'id', message: `duplicate id "${e.id}" in the ${e.source} workflows` }, ...e.errors];
-      e.valid = false;
+  const shadowed = [];
+  for (const { e, rank } of all) {
+    const won = e.id === null ? null : winner.get(key(e));
+    if (won && won.rank !== rank) {
+      const { doc, ...rest } = e;
+      shadowed.push({ ...rest, shadowedBy: { source: won.source, folder: won.folder } });
+      continue;
     }
     workflows.push(e);
     if (sameWorkflowId(e.id, DEFAULT_WORKFLOW) && configEntry && !workflows.includes(configEntry)) workflows.push(configEntry);
@@ -375,9 +387,9 @@ export async function loadWorkflows({
   // `default` is the listed entry's own spelling, so it matches an option value.
   const fallback = workflows.find((w) => sameWorkflowId(w.id, DEFAULT_WORKFLOW))?.id ?? DEFAULT_WORKFLOW;
   const wanted = configuredDefault(fileConfig, projectPath);
-  if (wanted === null) return { workflows, default: fallback, defaultNote: null };
+  if (wanted === null) return { workflows, default: fallback, defaultNote: null, shadowed };
   const match = workflows.find((w) => sameWorkflowId(w.id, wanted));
-  if (match?.valid) return { workflows, default: match.id, defaultNote: null };
+  if (match?.valid) return { workflows, default: match.id, defaultNote: null, shadowed };
   const why = match ? 'invalid' : 'unknown';
-  return { workflows, default: fallback, defaultNote: `the configured workflow ${JSON.stringify(wanted)} is ${why}; using "${fallback}"` };
+  return { workflows, shadowed, default: fallback, defaultNote: `the configured workflow ${JSON.stringify(wanted)} is ${why}; using "${fallback}"` };
 }

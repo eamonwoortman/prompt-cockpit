@@ -515,3 +515,110 @@ test('the shipped troubleshooting file is valid', async () => {
     'verifier-tester': ['claude-sonnet-5-5', 80, null, false],
   });
 });
+
+test('user folder layers', async (t) => {
+  const setup = async () => {
+    const root = await tempDir('sa-wf-users-');
+    const dirs = { builtinDir: path.join(root, 'builtin'), globalDir: path.join(root, 'global'), projectDir: null };
+    await fs.mkdir(dirs.builtinDir, { recursive: true });
+    await fs.copyFile(path.join(workflowsDir(), 'feature.json'), path.join(dirs.builtinDir, 'feature.json'));
+    const userA = path.join(root, 'ua');
+    const userB = path.join(root, 'ub');
+    const entry = (index, p) => ({ index, raw: p, configured: p, resolved: p, error: null });
+    return { root, dirs, userA, userB, A: entry(0, userA), B: entry(1, userB) };
+  };
+  const doc = (id, extra = {}) => ({ ...baseDoc(), id, ...extra });
+  const byId = (list, id) => list.filter((w) => w.id === id);
+
+  await t.test('the higher user folder wins and the lower copy is reported shadowed', async () => {
+    const { dirs, userA, userB, A, B } = await setup();
+    await writeJson(path.join(userA, 'workflows', 'x.json'), doc('x'));
+    await writeJson(path.join(userB, 'workflows', 'x.json'), doc('x'));
+    const { workflows, shadowed } = await loadWorkflows({ ...dirs, userFolders: [A, B], fileConfig: {} });
+    assert.deepEqual(byId(workflows, 'x').map((w) => [w.source, w.folder, w.valid]), [['user', userA, true]]);
+    const lost = byId(shadowed, 'x');
+    assert.deepEqual(lost.map((w) => [w.folder, w.shadowedBy]), [[userB, { source: 'user', folder: userA }]]);
+    assert.equal('doc' in lost[0], false);
+    assert.equal(byId(workflows, 'feature')[0].folder, null);
+  });
+
+  await t.test('an invalid higher copy still shadows a valid lower one', async () => {
+    const { dirs, userA, userB, A, B } = await setup();
+    await writeJson(path.join(userA, 'workflows', 'x.json'), doc('x', { format: 9 }));
+    await writeJson(path.join(userB, 'workflows', 'x.json'), doc('x'));
+    const { workflows, shadowed } = await loadWorkflows({ ...dirs, userFolders: [A, B], fileConfig: {} });
+    assert.deepEqual(byId(workflows, 'x').map((w) => [w.folder, w.valid]), [[userA, false]]);
+    assert.deepEqual(byId(shadowed, 'x').map((w) => [w.folder, w.valid]), [[userB, true]]);
+  });
+
+  await t.test('duplicates inside one folder name the folder', async () => {
+    const { dirs, userA, userB, A, B } = await setup();
+    await writeJson(path.join(userA, 'workflows', 'a.json'), doc('x'));
+    await writeJson(path.join(userA, 'workflows', 'b.json'), doc('x'));
+    await writeJson(path.join(userB, 'workflows', 'x.json'), doc('x'));
+    const { workflows, shadowed } = await loadWorkflows({ ...dirs, userFolders: [A, B], fileConfig: {} });
+    const listed = byId(workflows, 'x');
+    assert.deepEqual(listed.map((w) => [w.folder, w.valid]), [[userA, false], [userA, false]]);
+    for (const w of listed) assert.equal(w.errors[0].message, `duplicate id "x" in the user workflows of ${userA}`);
+    assert.deepEqual(byId(shadowed, 'x').map((w) => w.folder), [userB]);
+  });
+
+  await t.test('duplicates in a losing folder stay invalid', async () => {
+    const { dirs, userA, userB, A, B } = await setup();
+    await writeJson(path.join(userA, 'workflows', 'x.json'), doc('x'));
+    await writeJson(path.join(userB, 'workflows', 'a.json'), doc('x'));
+    await writeJson(path.join(userB, 'workflows', 'b.json'), doc('x'));
+    const { shadowed } = await loadWorkflows({ ...dirs, userFolders: [A, B], fileConfig: {} });
+    const lost = byId(shadowed, 'x');
+    assert.equal(lost.length, 2);
+    for (const w of lost) {
+      assert.equal(w.valid, false);
+      assert.equal(w.errors[0].message, `duplicate id "x" in the user workflows of ${userB}`);
+    }
+  });
+
+  await t.test('a user folder shadows global', async () => {
+    const { dirs, userA, A } = await setup();
+    await writeJson(path.join(dirs.globalDir, 'x.json'), doc('x'));
+    await writeJson(path.join(userA, 'workflows', 'x.json'), doc('x'));
+    const { workflows, shadowed } = await loadWorkflows({ ...dirs, userFolders: [A], fileConfig: {} });
+    assert.deepEqual(byId(workflows, 'x').map((w) => w.source), ['user']);
+    assert.deepEqual(byId(shadowed, 'x').map((w) => [w.source, w.shadowedBy]), [['global', { source: 'user', folder: userA }]]);
+  });
+
+  await t.test('an invalid folder setting is one invalid entry and hides nothing', async () => {
+    const { dirs, userB, B } = await setup();
+    await writeJson(path.join(userB, 'workflows', 'y.json'), doc('y'));
+    const bad = { index: 0, raw: 'rel', configured: 'rel', resolved: null, error: 'bad' };
+    const { workflows } = await loadWorkflows({ ...dirs, userFolders: [bad, B], fileConfig: {} });
+    const user = workflows.filter((w) => w.source === 'user');
+    assert.deepEqual(user.map((w) => [w.id, w.folder, w.valid]), [[null, null, false], ['y', userB, true]]);
+    assert.match(user[0].errors[0].message, /the workflows folder setting is invalid: bad/);
+    assert.equal(byId(workflows, 'feature').length, 1);
+  });
+
+  await t.test('workflows list built-in, global, user folders in order, then project', async () => {
+    const { root, dirs, userA, userB, A, B } = await setup();
+    const projectDir = path.join(root, 'repo');
+    await writeJson(path.join(dirs.globalDir, 'g.json'), doc('g'));
+    await writeJson(path.join(userA, 'workflows', 'a.json'), doc('a'));
+    await writeJson(path.join(userB, 'workflows', 'b.json'), doc('b'));
+    await writeJson(path.join(projectWorkflows(projectDir), 'p.json'), doc('p'));
+    const { workflows } = await loadWorkflows({ ...dirs, projectDir, userFolders: [A, B], fileConfig: {} });
+    assert.deepEqual(workflows.map((w) => w.id), ['feature', 'g', 'a', 'b', 'p']);
+  });
+});
+
+test('resolvePromptPath tries user folders in order', async () => {
+  const root = await tempDir('sa-wf-user-prompts-');
+  const ua = path.join(root, 'ua', 'prompts');
+  const ub = path.join(root, 'ub', 'prompts');
+  await writeJson(path.join(ub, 'tester.md'), 'b');
+  const builtinDir = path.join(root, 'builtin');
+  await writeJson(path.join(builtinDir, 'tester.md'), 'built-in');
+  assert.equal((await resolvePromptPath('tester', { userPromptsDirs: [ua, ub], builtinDir })).path, path.join(ub, 'tester.md'));
+  await writeJson(path.join(ua, 'tester.md'), 'a');
+  const found = await resolvePromptPath('tester', { userPromptsDirs: [ua, ub], builtinDir });
+  assert.deepEqual([found.source, found.path], ['user', path.join(ua, 'tester.md')]);
+  assert.equal((await resolvePromptPath('tester', { builtinDir })).source, 'built-in');
+});

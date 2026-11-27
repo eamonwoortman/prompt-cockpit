@@ -42,8 +42,8 @@ function checkRole(role) {
 // the workflow file's prompt in the one lookup order.
 async function resolveTemplate(role, projectDir, recordedPrompt, userFolder = null) {
   checkRole(role);
-  const userPromptsDir = userFolder ? path.join(userFolder, 'prompts') : null;
-  const found = await resolvePromptPath(role, { projectDir, workflowFile: recordedPrompt, promptField: recordedPrompt, userPromptsDir });
+  const userPromptsDirs = userFolder ? [path.join(userFolder, 'prompts')] : [];
+  const found = await resolvePromptPath(role, { projectDir, workflowFile: recordedPrompt, promptField: recordedPrompt, userPromptsDirs });
   if (found == null && recordedPrompt != null) {
     throw Object.assign(new Error(`superagent: the workflow prompt for role ${JSON.stringify(role)} is missing: ${recordedPrompt}`), { code: 'ERR_PROMPT_MISSING', path: recordedPrompt });
   }

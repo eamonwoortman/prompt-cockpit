@@ -775,7 +775,7 @@ export function createSuperagent({
   }
 
   function loadWorkflowList(origin, fileConfig, folder) {
-    return loadWorkflows({ builtinDir: workflowDirs.builtin, globalDir: workflowDirs.global, userDir: folder.dir, userError: folder.error, projectDir: origin, fileConfig, projectPath: origin, platform });
+    return loadWorkflows({ builtinDir: workflowDirs.builtin, globalDir: workflowDirs.global, userFolders: folder.error ? [{ index: 0, raw: folder.error.configured, configured: folder.error.configured, resolved: null, error: folder.error.error }] : folder.dir ? [{ index: 0, raw: folder.dir, configured: folder.dir, resolved: folder.dir, error: null }] : [], projectDir: origin, fileConfig, projectPath: origin, platform });
   }
 
   async function settings() {
