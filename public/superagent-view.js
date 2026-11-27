@@ -19,7 +19,7 @@ import { ARTIFACT_STATE, artifactErrorText, artifactFileName, artifactMimeType, 
 import { createHandoff } from '/superagent-handoff.js';
 import { readyInputLabel, statusLabel, workflowLabel } from '/superagent-format.js';
 import { initPaneResizers } from '/superagent-panes.js';
-import { settingsSummary } from '/superagent-settings.js';
+import { addFolder, moveFolder, removeFolder, settingsSummary } from '/superagent-settings.js';
 
 const POLL_MS = 5_000;
 const ANSWER_MAX_CHARS = 4000;
@@ -477,32 +477,80 @@ export function initSuperagentView() {
     }
   });
 
-  // --- Settings (the user folder for workflows and prompts) ---
+  // --- Settings (the ordered folders for workflows and prompts) ---
 
   const settingsModal = document.getElementById('superagentSettingsModal');
-  const settingsFolder = document.getElementById('superagentSettingsFolder');
   const settingsBody = document.getElementById('superagentSettingsBody');
   const settingsError = document.getElementById('superagentSettingsError');
-  const settingsSave = document.getElementById('superagentSettingsSave');
-  const settingsReset = document.getElementById('superagentSettingsReset');
+  const settingsAddInput = document.getElementById('superagentSettingsAddInput');
+  const settingsAdd = document.getElementById('superagentSettingsAdd');
   document.getElementById('superagentSettingsClose').addEventListener('click', () => settingsModal.close());
+  let settingsList = [];
+  let settingsBusy = false;
+  // Which rows and inner lists are open, kept across re-renders by folder path.
+  const openFolders = new Set();
+
+  function setSettingsBusy(busy) {
+    settingsBusy = busy;
+    settingsAdd.disabled = busy;
+    settingsAddInput.disabled = busy;
+    for (const b of settingsBody.querySelectorAll('button')) b.disabled = busy || b.dataset.locked === 'true';
+  }
+
+  function itemList(title, items, emptyText, key) {
+    const box = el('details', 'sa-folder-items');
+    box.open = openFolders.has(key);
+    box.addEventListener('toggle', () => (box.open ? openFolders.add(key) : openFolders.delete(key)));
+    box.append(el('summary', null, `${title} (${items.length})`));
+    if (!items.length) {
+      box.append(el('div', 'sa-note', emptyText));
+      return box;
+    }
+    const list = box.appendChild(el('ul', 'sa-list sa-note'));
+    for (const item of items) {
+      const li = list.appendChild(el('li', `sa-item sa-item-${item.status}`));
+      li.append(el('span', 'sa-item-label', item.label), el('span', 'sa-item-status', ` ${item.status}`));
+      if (item.detail) li.append(el('span', null, ` - ${item.detail}`));
+    }
+    return box;
+  }
+
+  function rowButton(text, title, enabled, onClick) {
+    const b = button(text, 'sa-folder-btn', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onClick();
+    });
+    b.title = title;
+    b.dataset.locked = String(!enabled);
+    b.disabled = !enabled || settingsBusy;
+    return b;
+  }
 
   function renderSettings(summary) {
-    settingsFolder.value = summary.field;
-    settingsFolder.placeholder = summary.defaultPath ? `Default: ${summary.defaultPath}` : 'Default folder';
-    settingsReset.disabled = summary.isDefault;
+    settingsList = summary.list;
     settingsBody.textContent = '';
-    if (summary.resolved) settingsBody.append(el('div', 'sa-note', `Resolved path: ${summary.resolved}`));
-    settingsBody.append(el('div', summary.status === 'ok' ? 'sa-note' : 'sa-error', summary.statusText));
-    const section = (title, rows, emptyText) => {
-      settingsBody.append(el('h3', 'sa-heading', title));
-      if (!rows.length) return settingsBody.append(el('div', 'sa-note', emptyText));
-      const list = settingsBody.appendChild(el('ul', 'sa-list sa-note'));
-      for (const r of rows) list.append(el('li', null, `${r.label}${r.ok ? '' : ' (not used)'} - ${r.detail}`));
-    };
-    section('Workflows found', summary.workflows.map((w) => ({ label: w.label, ok: w.valid, detail: w.detail || 'valid' })), 'None found.');
-    section('Prompts found', summary.prompts.map((p) => ({ label: p.label, ok: p.used, detail: p.detail })), 'None found.');
-    if (summary.note) settingsBody.append(el('div', 'sa-error', summary.note));
+    for (const [i, row] of summary.rows.entries()) {
+      const key = row.resolved ?? `#${i}`;
+      const folder = settingsBody.appendChild(el('details', `sa-folder${row.fixed ? ' sa-folder-fixed' : ''}`));
+      folder.open = openFolders.has(key);
+      folder.addEventListener('toggle', () => (folder.open ? openFolders.add(key) : openFolders.delete(key)));
+      const head = folder.appendChild(el('summary', 'sa-folder-head'));
+      head.append(el('span', 'sa-folder-title', row.title));
+      if (row.statusText) head.append(el('span', row.status === 'error' ? 'sa-folder-status sa-error' : 'sa-folder-status sa-muted', row.statusText));
+      if (!row.fixed) {
+        const tools = head.appendChild(el('span', 'sa-folder-tools'));
+        tools.append(
+          rowButton('↑', 'Move up: earlier folders win', row.canUp, () => saveSettings(moveFolder(settingsList, row.listIndex, -1))),
+          rowButton('↓', 'Move down', row.canDown, () => saveSettings(moveFolder(settingsList, row.listIndex, 1))),
+          rowButton('✕', 'Remove from the list (nothing is deleted on disk)', row.canRemove, () => saveSettings(row.listIndex === null ? settingsList : removeFolder(settingsList, row.listIndex))),
+        );
+      }
+      if (row.resolved && row.title !== row.resolved && !row.title.startsWith(row.resolved)) folder.append(el('div', 'sa-note', `Resolved path: ${row.resolved}`));
+      folder.append(itemList('Workflows', row.workflows, 'No .json files in its workflows/ folder.', `${key}\nworkflows`));
+      if (!row.fixed) folder.append(itemList('Prompts', row.prompts, 'No .md files in its prompts/ folder.', `${key}\nprompts`));
+      if (row.note) folder.append(el('div', 'sa-error', row.note));
+    }
   }
 
   async function loadSettings() {
@@ -512,42 +560,43 @@ export function initSuperagentView() {
   async function openSettings() {
     showError(settingsError, null);
     settingsBody.textContent = 'Loading…';
-    settingsSave.disabled = true;
-    settingsReset.disabled = true;
     settingsModal.showModal();
+    setSettingsBusy(true);
     try {
       await loadSettings();
     } catch (err) {
       settingsBody.textContent = '';
       showError(settingsError, err);
     } finally {
-      settingsSave.disabled = false;
+      setSettingsBusy(false);
     }
   }
 
-  async function saveSettings(userFolder) {
+  async function saveSettings(userFolders) {
+    if (settingsBusy) return false;
     showError(settingsError, null);
-    settingsSave.disabled = true;
-    settingsReset.disabled = true;
+    setSettingsBusy(true);
     try {
-      renderSettings(settingsSummary(await postJson('/api/superagent/settings', { userFolder })));
-      // The New job picker lists the user folder's workflows: refetch now when
+      renderSettings(settingsSummary(await postJson('/api/superagent/settings', { userFolders })));
+      // The New job picker lists the folders' workflows: refetch now when
       // the form is open with a primary folder, else on its next open.
       workflowFor = null;
       if (!form.hidden && primaryInput.value.trim()) loadWorkflows();
+      return true;
     } catch (err) {
       showError(settingsError, err);
-      settingsReset.disabled = false;
+      return false;
     } finally {
-      settingsSave.disabled = false;
+      setSettingsBusy(false);
     }
   }
 
-  document.getElementById('superagentSettingsForm').addEventListener('submit', (event) => {
+  document.getElementById('superagentSettingsForm').addEventListener('submit', async (event) => {
     event.preventDefault();
-    saveSettings(settingsFolder.value.trim() || null);
+    const value = settingsAddInput.value.trim();
+    if (!value) return;
+    if (await saveSettings(addFolder(settingsList, value))) settingsAddInput.value = '';
   });
-  settingsReset.addEventListener('click', () => saveSettings(null));
 
   // One handoff per job, kept across polls and job switches, so a
   // retrospective whose tab did not open is reopened, never created twice.

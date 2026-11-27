@@ -127,7 +127,7 @@ export function planUserFolders(next, stored, { home = defaultHome(), platform =
   });
   for (const entry of planned.filter((e) => e.isNew)) {
     const r = resolveUserFolder(entry.configured, { home, platform });
-    if (r.error) return { error: `${JSON.stringify(entry.configured)}: ${r.error}` };
+    if (r.error) return { error: `"${entry.configured}": ${r.error}` };
     entry.configured = r.configured;
     entry.resolved = r.resolved;
   }
@@ -135,7 +135,7 @@ export function planUserFolders(next, stored, { home = defaultHome(), platform =
     if (!entry.isNew) continue;
     const key = folderKey(entry.resolved, platform);
     const other = planned.findIndex((e, j) => j !== i && e.resolved && folderKey(e.resolved, platform) === key);
-    if (other !== -1) return { error: `${JSON.stringify(next[i])}: same folder as #${other + 1}` };
+    if (other !== -1) return { error: `"${next[i]}": same folder as #${other + 1}` };
   }
   return { entries: planned };
 }

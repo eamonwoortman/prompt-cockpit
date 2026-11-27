@@ -486,6 +486,12 @@ test('planUserFolders keeps stored items and checks new ones', () => {
   assert.deepEqual(planUserFolders(['  /n  '], stored, posix).entries.map((e) => [e.configured, e.resolved, e.isNew]), [['/n', '/n', true]]);
 });
 
+test('planUserFolders quotes a Windows path without escaping its backslashes', () => {
+  const win = { home: 'C:\\Users\\x', platform: 'win32' };
+  const stored = resolveUserFolders({ userFolders: ['C:\\A'] }, win).entries;
+  assert.equal(planUserFolders(['C:\\A', 'c:\\a\\'], stored, win).error, '"c:\\a\\": same folder as #1');
+});
+
 test('a stored string is claimed once', () => {
   const stored = resolveUserFolders({ userFolders: ['/a'] }, posix).entries;
   assert.match(planUserFolders(['/a', '/a'], stored, posix).error, /"\/a": same folder as #1/);

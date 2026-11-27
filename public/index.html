@@ -256,18 +256,17 @@
     <form class="modal-box" id="superagentSettingsForm">
       <header class="modal-header"><strong id="superagentSettingsTitle">Superagent settings</strong></header>
       <div class="modal-body sa-form">
-        <label class="sa-field">
-          <span class="sa-field-label">Workflows and prompts folder</span>
-          <input type="text" id="superagentSettingsFolder" placeholder="Default folder" autocomplete="off">
-        </label>
-        <div class="sa-note">Leave empty for the default. Workflows go in <code>workflows/</code> and role prompts in <code>prompts/</code> inside it. Jobs already created keep the folder they started with.</div>
-        <div id="superagentSettingsBody"></div>
+        <span class="sa-field-label">Workflows and prompts folders</span>
+        <div class="sa-note">Workflows go in <code>workflows/</code> and role prompts in <code>prompts/</code> inside each folder. The first folder wins when two folders have the same workflow or prompt. Project overrides in <code>&lt;project&gt;/.superpowers/superagent/</code> beat every folder listed here. Jobs already created keep the folders they started with.</div>
+        <div id="superagentSettingsBody" class="sa-folders"></div>
+        <div class="sa-folder-add">
+          <input type="text" id="superagentSettingsAddInput" placeholder="Add a folder: an absolute path or ~/…" autocomplete="off" aria-label="Folder to add">
+          <button type="submit" id="superagentSettingsAdd" class="btn" title="Add this folder below the others; it is created if missing">Add</button>
+        </div>
         <div id="superagentSettingsError" class="sa-error" hidden></div>
       </div>
       <footer>
-        <button type="button" id="superagentSettingsReset" class="btn" title="Go back to the default folder">Use default</button>
-        <button type="button" id="superagentSettingsClose" class="btn" title="Close without saving">Close</button>
-        <button type="submit" id="superagentSettingsSave" class="btn btn-primary" title="Save the folder">Save</button>
+        <button type="button" id="superagentSettingsClose" class="btn" title="Close the settings">Close</button>
       </footer>
     </form>
   </dialog>
