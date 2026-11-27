@@ -39,7 +39,7 @@ async function harness({ configJson = {}, ...over } = {}) {
 
   async function build({ storeOpts = {}, ...opts } = {}) {
     const store = createSuperagentStore({ rootDir: jobsRoot, now: () => clock.t, logImpl: quiet, ...storeOpts });
-    const config = createSuperagentConfig({ filePath: configFile });
+    const config = createSuperagentConfig({ filePath: configFile, home: root });
     await config.load();
     const factory = sessionFactory(registry);
     const sa = createSuperagent({
@@ -2014,4 +2014,158 @@ test('a round-0 retry event carries feedbackRound 0', async () => {
     assert.equal(typed(h, job.jobId, 'job-retried')[0].feedbackRound, 0);
     await h.sa.stop();
   } finally { registry._reset(); }
+});
+
+// --- user folders (settings, setUserFolders, job-created.userFolders) ---
+
+async function writeFeatureCopy(file, id) {
+  const doc = JSON.parse(await fs.readFile(path.join(workflowsDir(), 'feature.json'), 'utf8'));
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify({ ...doc, id, name: id }));
+}
+async function writeText(file, text) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, text);
+}
+const rowItem = (row, key, name) => row[key].find((i) => (key === 'prompts' ? i.file : i.id ?? i.name) === name);
+
+test('createJob records userFolders in order, skipping invalid entries', async () => {
+  const h = await harness({ configJson: () => ({}) });
+  const u1 = path.join(h.root, 'u1');
+  const u2 = path.join(h.root, 'u2');
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [u1, 'relative', u2] }));
+  const h2 = await h.restart();
+  const job = await create(h2);
+  const created = h2.events(job.jobId).find((e) => e.type === 'job-created');
+  assert.deepEqual(created.userFolders, [u1, u2]);
+  assert.equal('userFolder' in created, false);
+});
+
+test('settings lists each folder with used, shadowed and invalid items', async () => {
+  const h = await harness();
+  const u1 = path.join(h.root, 'u1');
+  const u2 = path.join(h.root, 'u2');
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [u1, u2] }));
+  await writeFeatureCopy(path.join(u1, 'workflows', 'x.json'), 'x');
+  await writeFeatureCopy(path.join(u2, 'workflows', 'x.json'), 'x');
+  await writeText(path.join(u2, 'workflows', 'broken.json'), '{');
+  await writeFeatureCopy(path.join(h.globalWorkflows, 'y.json'), 'y');
+  await writeText(path.join(u1, 'prompts', 'tester.md'), 'u1');
+  await writeText(path.join(u2, 'prompts', 'tester.md'), 'u2');
+  await writeText(path.join(u2, 'prompts', 'contract.md'), 'c');
+  const { sa } = await h.restart();
+  const s = await sa.settings();
+  assert.equal(s.isDefault, false);
+  assert.deepEqual(s.folders.map((f) => [f.resolved, f.fixed, f.exists]), [[u1, false, true], [u2, false, true], [h.globalWorkflows, true, true]]);
+  const [r1, r2, global] = s.folders;
+  assert.deepEqual([r1.index, r1.configured, r2.index, global.index, global.configured], [0, u1, 1, null, null]);
+  assert.deepEqual([rowItem(r1, 'workflows', 'x').status, rowItem(r1, 'workflows', 'x').shadowedBy], ['used', null]);
+  assert.deepEqual([rowItem(r2, 'workflows', 'x').status, rowItem(r2, 'workflows', 'x').shadowedBy], ['shadowed', u1]);
+  assert.equal(rowItem(r2, 'workflows', 'broken.json').status, 'invalid');
+  assert.equal(rowItem(global, 'workflows', 'y').status, 'used');
+  assert.deepEqual(global.prompts, []);
+  assert.deepEqual([rowItem(r1, 'prompts', 'tester.md').status, rowItem(r1, 'prompts', 'tester.md').reason], ['used', null]);
+  assert.deepEqual([rowItem(r2, 'prompts', 'tester.md').status, rowItem(r2, 'prompts', 'tester.md').shadowedBy], ['shadowed', u1]);
+  assert.deepEqual([rowItem(r2, 'prompts', 'contract.md').status, rowItem(r2, 'prompts', 'contract.md').reason], ['ignored', 'the contract is built in']);
+  assert.equal(rowItem(r1, 'workflows', 'x').doc, undefined);
+});
+
+test('a global workflow shadowed by a user folder names that folder', async () => {
+  const h = await harness();
+  const u1 = path.join(h.root, 'u1');
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [u1] }));
+  await writeFeatureCopy(path.join(u1, 'workflows', 'g.json'), 'g');
+  await writeFeatureCopy(path.join(h.globalWorkflows, 'g.json'), 'g');
+  const { sa } = await h.restart();
+  const global = (await sa.settings()).folders.at(-1);
+  assert.deepEqual([rowItem(global, 'workflows', 'g').status, rowItem(global, 'workflows', 'g').shadowedBy], ['shadowed', u1]);
+});
+
+test('setUserFolders keeps stored entries as-is', async () => {
+  const h = await harness();
+  const gone = path.join(h.root, 'gone');
+  const fresh = path.join(h.root, 'new');
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [gone, 'relative'] }));
+  const { sa } = await h.restart();
+  const s = await sa.setUserFolders(['relative', gone, fresh]);
+  assert.equal(existsSync(path.join(fresh, 'workflows')), true);
+  assert.equal(existsSync(path.join(fresh, 'prompts')), true);
+  assert.equal(existsSync(gone), false);
+  assert.deepEqual(JSON.parse(await fs.readFile(h.configFile, 'utf8')).userFolders, ['relative', gone, fresh]);
+  assert.deepEqual(s.folders.map((f) => f.configured), ['relative', gone, fresh, null]);
+  assert.ok(s.folders[0].error);
+});
+
+test('setUserFolders refuses a duplicate new folder', async () => {
+  const h = await harness();
+  const a = path.join(h.root, 'a');
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [a] }));
+  const before = await fs.readFile(h.configFile, 'utf8');
+  const { sa } = await h.restart();
+  await assert.rejects(sa.setUserFolders([a, a + path.sep]), (err) => err.code === 'ERR_INVALID_REQUEST' && /same folder as #1/.test(err.message));
+  await assert.rejects(sa.setUserFolders([a, 'relative']), (err) => err.code === 'ERR_INVALID_REQUEST');
+  assert.equal(await fs.readFile(h.configFile, 'utf8'), before);
+});
+
+test('setUserFolders leaves config.json untouched when a folder cannot be created', async () => {
+  const h = await harness();
+  const blocker = path.join(h.root, 'blocker');
+  await fs.writeFile(blocker, 'a file');
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [] }));
+  const before = await fs.readFile(h.configFile, 'utf8');
+  const { sa } = await h.restart();
+  await assert.rejects(sa.setUserFolders([path.join(blocker, 'inside')]), (err) => err.code === 'ERR_INVALID_FOLDER');
+  assert.equal(await fs.readFile(h.configFile, 'utf8'), before);
+});
+
+test('setUserFolders(null) resets to the default', async () => {
+  const h = await harness();
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [path.join(h.root, 'a')], userFolder: path.join(h.root, 'b') }));
+  const { sa } = await h.restart();
+  const s = await sa.setUserFolders(null);
+  assert.equal(s.isDefault, true);
+  assert.equal(s.folders[0].resolved, path.join(h.root, '.prompt-cockpit'));
+  assert.deepEqual(JSON.parse(await fs.readFile(h.configFile, 'utf8')), {});
+});
+
+test('overlapping setUserFolders calls do not lose a write', async () => {
+  const h = await harness();
+  const a = path.join(h.root, 'a');
+  const b = path.join(h.root, 'b');
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [] }));
+  const { sa } = await h.restart();
+  const first = sa.setUserFolders([a]);
+  const second = sa.setUserFolders([a, b]);
+  await Promise.all([first, second]);
+  assert.deepEqual(JSON.parse(await fs.readFile(h.configFile, 'utf8')).userFolders, [a, b]);
+  assert.equal(existsSync(path.join(a, 'workflows')), true);
+  assert.equal(existsSync(path.join(b, 'prompts')), true);
+});
+
+test('a non-array setting shows as one invalid row and hides nothing', async () => {
+  const h = await harness();
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: 'x' }));
+  await writeFeatureCopy(path.join(h.globalWorkflows, 'y.json'), 'y');
+  const { sa } = await h.restart();
+  const s = await sa.settings();
+  assert.equal(s.error, 'userFolders must be a list of paths');
+  assert.deepEqual([s.folders[0].index, s.folders[0].error], [null, s.error]);
+  assert.equal(rowItem(s.folders.at(-1), 'workflows', 'y').status, 'used');
+  const { workflows } = await sa.listWorkflows(h.repo);
+  const user = workflows.filter((w) => w.source === 'user');
+  assert.deepEqual(user.map((w) => [w.id, w.valid]), [[null, false]]);
+  assert.ok(workflows.some((w) => w.id === 'feature' && w.valid));
+});
+
+test('a prompt that differs only by case is shadowed on win32', { skip: process.platform !== 'win32' }, async () => {
+  const h = await harness();
+  const u1 = path.join(h.root, 'u1');
+  const u2 = path.join(h.root, 'u2');
+  await fs.writeFile(h.configFile, JSON.stringify({ userFolders: [u1, u2] }));
+  await writeText(path.join(u1, 'prompts', 'Tester.md'), 'u1');
+  await writeText(path.join(u2, 'prompts', 'tester.md'), 'u2');
+  const { sa } = await h.restart();
+  const [r1, r2] = (await sa.settings()).folders;
+  assert.equal(rowItem(r1, 'prompts', 'Tester.md').status, 'used');
+  assert.deepEqual([rowItem(r2, 'prompts', 'tester.md').status, rowItem(r2, 'prompts', 'tester.md').shadowedBy], ['shadowed', u1]);
 });

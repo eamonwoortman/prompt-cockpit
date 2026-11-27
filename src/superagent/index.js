@@ -59,7 +59,7 @@ import { createRunner } from './runner.js';
 import { RUNNABLE_KINDS, attemptsFor, buildFixTask, gatedOut, nextAction } from './sequencer.js';
 import { legacyPipeline } from './store.js';
 import { createTranscriptIndex } from './transcripts.js';
-import { CONFIG_PIPELINE_ID, ROLE_NAME, loadWorkflows, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
+import { CONFIG_PIPELINE_ID, ROLE_NAME, loadWorkflows, resolvePromptPath, resolveWorkflowModels, sameWorkflowId, substituteArtifacts, workflowsDir } from './workflows.js';
 import { BRANCH_PREFIX, archiveLedger, checkRepo, createWorktree, defaultGit, ensureRepo, listOrphanWorktrees, removeAbortedWorktree, repoIds, repoToplevel, slugify } from './worktree.js';
 
 export const TICK_MS = 15_000;
@@ -768,72 +768,121 @@ export function createSuperagent({
     unintercept = null;
   }
 
-  // Read once per call: an invalid stored value gives no folder and a user-source error entry.
-  function userFolderSnapshot() {
-    const r = config.userFolder();
-    return r.error ? { dir: null, error: r } : { dir: r.resolved, error: null };
+  // Read once per call; an invalid entry lists as one invalid user workflow and contributes nothing.
+  const validFolders = (entries) => entries.filter((e) => !e.error).map((e) => e.resolved);
+
+  function loadWorkflowList(origin, fileConfig, entries) {
+    return loadWorkflows({ builtinDir: workflowDirs.builtin, globalDir: workflowDirs.global, userFolders: entries, projectDir: origin, fileConfig, projectPath: origin, platform });
   }
 
-  function loadWorkflowList(origin, fileConfig, folder) {
-    return loadWorkflows({ builtinDir: workflowDirs.builtin, globalDir: workflowDirs.global, userFolders: folder.error ? [{ index: 0, raw: folder.error.configured, configured: folder.error.configured, resolved: null, error: folder.error.error }] : folder.dir ? [{ index: 0, raw: folder.dir, configured: folder.dir, resolved: folder.dir, error: null }] : [], projectDir: origin, fileConfig, projectPath: origin, platform });
+  async function isDirectory(dir) {
+    try {
+      return (await stat(dir)).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  const withoutDoc = ({ doc, source, folder, ...rest }) => rest;
+
+  function workflowItem(entry, shadowedBy = null) {
+    const { shadowedBy: _s, ...rest } = withoutDoc(entry);
+    const status = shadowedBy ? 'shadowed' : entry.valid ? 'used' : 'invalid';
+    return { ...rest, status, shadowedBy };
+  }
+
+  // A prompt's status comes from the same lookup a launch uses, so case-insensitive
+  // filesystems and unreadable files agree with what a worker would get.
+  async function promptItems(folder, userPromptsDirs) {
+    let entries;
+    try {
+      entries = await readdir(path.join(folder, 'prompts'), { withFileTypes: true });
+    } catch (err) {
+      if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return { prompts: [], note: null };
+      return { prompts: [], note: `the prompts folder could not be read: ${err.message}` };
+    }
+    let note = null;
+    const prompts = [];
+    const files = entries.filter((e) => e.isFile() && e.name.endsWith('.md')).map((e) => e.name).sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+    for (const file of files) {
+      const role = file.slice(0, -3);
+      if (role === 'contract') {
+        prompts.push({ file, role, status: 'ignored', shadowedBy: null, reason: 'the contract is built in' });
+        continue;
+      }
+      if (!ROLE_NAME.test(role)) {
+        prompts.push({ file, role, status: 'ignored', shadowedBy: null, reason: 'not a role name' });
+        continue;
+      }
+      try {
+        const found = await resolvePromptPath(role, { userPromptsDirs });
+        const winner = found?.source === 'user' ? found.folder : null;
+        prompts.push(winner === folder ? { file, role, status: 'used', shadowedBy: null, reason: null } : { file, role, status: 'shadowed', shadowedBy: winner, reason: null });
+      } catch (err) {
+        note ??= `a prompt could not be read: ${err.message}`;
+        prompts.push({ file, role, status: 'ignored', shadowedBy: null, reason: `could not be read: ${err.message}` });
+      }
+    }
+    return { prompts, note };
   }
 
   async function settings() {
-    const r = config.userFolder();
-    const folder = r.error ? { dir: null, error: r } : { dir: r.resolved, error: null };
-    let exists = false;
-    if (r.resolved) {
-      try {
-        exists = (await stat(r.resolved)).isDirectory();
-      } catch {
-        exists = false;
+    const r = config.userFolders();
+    const { workflows, shadowed } = await loadWorkflowList(null, config.raw(), r.entries);
+    const shadowOf = (w) => w.shadowedBy.folder ?? (w.shadowedBy.source === 'global' ? workflowDirs.global : w.shadowedBy.source);
+    const itemsFor = (source, folder) => [
+      ...workflows.filter((w) => w.source === source && w.folder === folder).map((w) => workflowItem(w)),
+      ...shadowed.filter((w) => w.source === source && w.folder === folder).map((w) => workflowItem(w, shadowOf(w))),
+    ];
+    const userPromptsDirs = validFolders(r.entries).map((f) => path.join(f, 'prompts'));
+    const folders = [];
+    for (const entry of r.entries) {
+      const base = { index: entry.index, configured: entry.raw, resolved: entry.resolved, error: entry.error, fixed: false };
+      if (entry.error) {
+        folders.push({ ...base, exists: false, workflows: [], prompts: [], note: null });
+        continue;
       }
+      const { prompts, note } = await promptItems(entry.resolved, userPromptsDirs);
+      folders.push({ ...base, exists: await isDirectory(entry.resolved), workflows: itemsFor('user', entry.resolved), prompts, note });
     }
-    const { workflows } = await loadWorkflowList(null, config.raw(), folder);
-    const userWorkflows = workflows.filter((w) => w.source === 'user').map(({ doc, source, ...entry }) => entry);
-    let prompts = [];
-    let note = null;
-    if (folder.dir) {
-      try {
-        const entries = await readdir(path.join(folder.dir, 'prompts'), { withFileTypes: true });
-        prompts = entries
-          .filter((e) => e.isFile() && e.name.endsWith('.md'))
-          .map((e) => {
-            const role = e.name.slice(0, -3);
-            return { file: e.name, role, used: role !== 'contract' && ROLE_NAME.test(role) };
-          })
-          .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
-      } catch (err) {
-        if (err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR') note = `the prompts folder could not be read: ${err.message}`;
-      }
-    }
-    return {
-      userFolder: { configured: r.configured, default: r.default, resolved: r.resolved, error: r.error, exists },
-      workflows: userWorkflows,
-      prompts,
-      note,
-    };
+    const globalWorkflows = itemsFor('global', null);
+    folders.push({ index: null, configured: null, resolved: workflowDirs.global, error: null, fixed: true, exists: await isDirectory(workflowDirs.global), workflows: globalWorkflows, prompts: [], note: null });
+    return { isDefault: r.isDefault, default: r.default, error: r.error, folders };
   }
 
-  async function setUserFolder(value) {
-    const checked = config.checkUserFolder(value);
-    if (checked.error) throw fail('ERR_INVALID_REQUEST', checked.error);
-    let current = checked.resolved;
-    try {
-      await mkdir(current, { recursive: true });
-      for (const sub of ['workflows', 'prompts']) {
-        current = path.join(checked.resolved, sub);
-        await mkdir(current, { recursive: true });
-      }
-    } catch (err) {
-      throw fail('ERR_INVALID_FOLDER', `could not create ${current}: ${err.message}`);
+  // One chain, so a POST's plan, folder creation and write finish before the next one plans.
+  let settingsChain = Promise.resolve();
+  function setUserFolders(list) {
+    const run = settingsChain.then(() => applyUserFolders(list));
+    settingsChain = run.catch(() => {});
+    return run;
+  }
+
+  async function applyUserFolders(list) {
+    if (list === null) {
+      await config.setUserFolders(null);
+      return settings();
     }
-    await config.setUserFolder(value);
+    const plan = config.planUserFolders(list);
+    if (plan.error) throw fail('ERR_INVALID_REQUEST', plan.error);
+    for (const entry of plan.entries.filter((e) => e.isNew)) {
+      let current = entry.resolved;
+      try {
+        await mkdir(current, { recursive: true });
+        for (const sub of ['workflows', 'prompts']) {
+          current = path.join(entry.resolved, sub);
+          await mkdir(current, { recursive: true });
+        }
+      } catch (err) {
+        throw fail('ERR_INVALID_FOLDER', `could not create ${current}: ${err.message}`);
+      }
+    }
+    await config.setUserFolders(plan.entries.map((e) => e.configured));
     return settings();
   }
 
   async function listWorkflows(primaryPath) {
-    const { workflows, default: preselected, defaultNote } = await loadWorkflowList(primaryPath == null ? null : path.resolve(primaryPath), config.raw(), userFolderSnapshot());
+    const { workflows, default: preselected, defaultNote } = await loadWorkflowList(primaryPath == null ? null : path.resolve(primaryPath), config.raw(), config.userFolders().entries);
     return { workflows: workflows.map(({ doc, ...entry }) => entry), default: preselected, defaultNote };
   }
 
@@ -881,7 +930,7 @@ export function createSuperagent({
     }
     const missing = [];
     for (const role of pipelineRoles(plan.pipeline)) {
-      if (!(await hasTemplate(role, { projectDir, recordedPrompt: plan.recorded?.prompts[role] ?? null, userFolders: folder.dir ? [folder.dir] : [] }))) missing.push(role);
+      if (!(await hasTemplate(role, { projectDir, recordedPrompt: plan.recorded?.prompts[role] ?? null, userFolders: validFolders(folder) }))) missing.push(role);
     }
     if (missing.length > 0) {
       throw fail('ERR_NO_TEMPLATE', `superagent: no prompt template for role${missing.length > 1 ? 's' : ''} ${missing.join(', ')}`, { roles: missing });
@@ -1045,7 +1094,7 @@ export function createSuperagent({
   async function createJob({ title, idea, primaryRepo: primaryPath, additionalRepos = [], mode = 'automatic', fixture = null, workflow = null, inPlace = [], commitTests }) {
     const origin = path.resolve(primaryPath);
     const resolved = config.resolve(origin);
-    const folder = userFolderSnapshot();
+    const folder = config.userFolders().entries;
     const { pipeline, models, recorded } = await resolvePipeline(resolved, { fixture, workflow }, origin, folder);
     if (mode === 'manual' && pipeline.some((p) => p.kind === 'brainstorm')) throw fail('ERR_MODE_UNSUPPORTED', 'superagent: manual mode is not built yet');
     const jobId = idImpl();
@@ -1056,14 +1105,14 @@ export function createSuperagent({
     const marked = folders.map((repo) => ({ ...repo, inPlace: inPlaceSet.has(repo.origin) }));
     reserve(jobId, marked.map((repo) => ({ key: normaliseTop(repo.origin, platform), folder: repo.origin, inPlace: repo.inPlace })));
     try {
-      return await admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests, userFolder: folder.dir });
+      return await admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests, userFolders: validFolders(folder) });
     } finally {
       if (store.get(jobId)) releaseIfFinished(jobId);
       else release(jobId);
     }
   }
 
-  async function admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests, userFolder }) {
+  async function admitJob(jobId, marked, { title, idea, mode, slug, branch, pipeline, models, recorded, resolved, commitTests, userFolders }) {
     const checked = await checkRepos(jobId, marked, { slug, branch });
     const repos = marked.map(({ inPlace, ...repo }, i) => ({
       ...repo,
@@ -1084,7 +1133,7 @@ export function createSuperagent({
       repos,
       pipeline,
       artifactRoot: 'ledger',
-      userFolder,
+      userFolders,
       ...(recorded && { workflow: recorded.workflow, artifacts: substituteArtifacts(recorded.artifacts, { slug, date: createdDate }), prompts: recorded.prompts }),
       models,
       limits: resolved.limits,
@@ -1371,5 +1420,5 @@ export function createSuperagent({
     return listOrphanWorktrees({ git, repos, knownBranches });
   }
 
-  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, settings, setUserFolder, accept, giveFeedback, answerQuestion, retryJob, renameJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
+  return { start, stop, dispose, ownsSession: runner.ownsSession, tick, drain, createJob, listWorkflows, settings, setUserFolders, accept, giveFeedback, answerQuestion, retryJob, renameJob, stopJob, listJobs, getJob, orphanWorktrees, usageForJob, transcriptFor, artifactStates, jobDir: store.jobDir };
 }

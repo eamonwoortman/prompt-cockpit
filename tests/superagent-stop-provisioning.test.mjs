@@ -38,7 +38,7 @@ async function harness({ git } = {}) {
   const worktreesRoot = path.join(root, 'worktrees');
   const logs = [];
   const store = createSuperagentStore({ rootDir: jobsRoot, now: () => T0, logImpl: () => {} });
-  const config = createSuperagentConfig({ filePath: configFile });
+  const config = createSuperagentConfig({ filePath: configFile, home: root });
   await config.load();
   const factory = sessionFactory(registry);
   let n = 0;

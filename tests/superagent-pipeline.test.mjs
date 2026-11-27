@@ -72,7 +72,7 @@ async function harness({ handlers = handlersWith(), limits = null, defaults = {}
 
   async function build(router = firstRouter) {
     const store = createSuperagentStore({ rootDir: jobsRoot, now: () => clock.t, logImpl: quiet });
-    const config = createSuperagentConfig({ filePath: configFile });
+    const config = createSuperagentConfig({ filePath: configFile, home: root });
     await config.load();
     const factory = sessionFactory(registry);
     const worker = scriptedWorker({ factory, handlers, commitOutputs });

@@ -57,9 +57,9 @@ export function resolveUserFolder(value, { home = defaultHome(), platform = proc
   const base = { configured: value ?? null, resolved: null, error: null, default: defaultUserFolder(home) };
   if (value === undefined || value === null) return { ...base, resolved: base.default };
   const fail = (error) => ({ ...base, configured: value, error });
-  if (typeof value !== 'string' || value.trim() === '') return fail('userFolder must be a non-empty path');
+  if (typeof value !== 'string' || value.trim() === '') return fail('a folder must be a non-empty path');
   const trimmed = value.trim();
-  if (trimmed.length > USER_FOLDER_MAX_CHARS) return fail(`userFolder must be at most ${USER_FOLDER_MAX_CHARS} characters`);
+  if (trimmed.length > USER_FOLDER_MAX_CHARS) return fail(`a folder must be at most ${USER_FOLDER_MAX_CHARS} characters`);
   let expanded = trimmed;
   if (trimmed.startsWith('~')) {
     const rest = trimmed.slice(1);
@@ -67,7 +67,7 @@ export function resolveUserFolder(value, { home = defaultHome(), platform = proc
     else return fail('"~user" paths are not supported; use an absolute path');
   }
   const absolute = p.isAbsolute(expanded) && (!win || /^[a-zA-Z]:[\\/]/.test(expanded) || expanded.startsWith('\\\\'));
-  if (!absolute) return fail(`userFolder must be an absolute path or start with ~ (got "${trimmed}")`);
+  if (!absolute) return fail(`a folder must be an absolute path or start with ~ (got "${trimmed}")`);
   return { ...base, configured: trimmed, resolved: p.resolve(expanded) };
 }
 
@@ -498,21 +498,6 @@ export function createSuperagentConfig({
 
     userFolders() {
       return resolveUserFolders(fileConfig, { home, platform });
-    },
-
-    // TRANSITIONAL (removed in Task 4 of the user-folders plan).
-    userFolder() {
-      const r = resolveUserFolders(fileConfig, { home, platform });
-      const first = r.entries[0];
-      return { configured: r.isDefault ? null : (first?.raw ?? null), resolved: first?.resolved ?? null, error: first?.error ?? null, default: r.default };
-    },
-
-    checkUserFolder(value) {
-      return resolveUserFolder(value, { home, platform });
-    },
-
-    async setUserFolder(value) {
-      await this.setUserFolders(value === null ? null : [value]);
     },
 
     planUserFolders(next) {
